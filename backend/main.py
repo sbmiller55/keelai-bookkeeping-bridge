@@ -44,22 +44,30 @@ app.include_router(qbo.router)
 
 def _migrate_db():
     """Add new columns to existing tables without a full migration framework."""
-    from sqlalchemy import text
+    import os
+    from sqlalchemy import text, inspect
     new_columns = [
         ("clients",        "qbo_access_token",     "TEXT"),
         ("clients",        "qbo_refresh_token",    "TEXT"),
         ("clients",        "qbo_realm_id",         "TEXT"),
-        ("clients",        "qbo_token_expires_at", "DATETIME"),
+        ("clients",        "qbo_token_expires_at", "TIMESTAMP"),
         ("journal_entries","qbo_je_id",             "TEXT"),
         ("journal_entries","qbo_object_type",       "TEXT"),
         ("journal_entries","qbo_export_error",      "TEXT"),
     ]
+    is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:
+        insp = inspect(engine)
         for table, column, col_type in new_columns:
-            existing = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-            col_names = [row[1] for row in existing]
-            if column not in col_names:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            try:
+                existing_cols = [c["name"] for c in insp.get_columns(table)]
+            except Exception:
+                continue
+            if column not in existing_cols:
+                if is_sqlite:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                else:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"))
         conn.commit()
 
 
