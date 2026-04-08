@@ -29,8 +29,11 @@ export default function ClientsPage() {
   const [policyUploading, setPolicyUploading] = useState(false);
 
   useEffect(() => {
-    getClients().then(setClients).finally(() => setLoading(false));
-  }, []);
+    getClients()
+      .then(setClients)
+      .catch(() => router.replace("/login"))
+      .finally(() => setLoading(false));
+  }, [router]);
 
   async function handleFileUpload(file: File, field: "chart_of_accounts_path" | "policy_path") {
     const setUploading = field === "chart_of_accounts_path" ? setChartUploading : setPolicyUploading;

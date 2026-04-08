@@ -1,4 +1,4 @@
-import { getToken } from "./auth";
+import { getToken, removeToken } from "./auth";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -132,6 +132,7 @@ export interface RuleCreate {
   rule_action?: "expense" | "prepaid" | "fixed_asset";
   rule_metadata?: string;
   created_from_transaction_id?: number;
+  active?: boolean;
 }
 
 export interface AuditLog {
@@ -165,6 +166,11 @@ export async function apiFetch<T = unknown>(
   });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      removeToken();
+      window.location.href = "/login";
+      throw new Error("Session expired");
+    }
     const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(errorBody.detail ?? "Request failed");
   }
@@ -406,11 +412,17 @@ export function getChatHistory(clientId: number): Promise<ChatMessage[]> {
   return apiFetch<ChatMessage[]>(`/chat/history?client_id=${clientId}`);
 }
 
+export interface ChatImage {
+  data: string;       // base64
+  media_type: string; // e.g. "image/png"
+}
+
 export async function sendChatMessage(
   clientId: number,
   messages: ChatMessage[],
   currentPage?: string,
   pageContext?: string | null,
+  images?: ChatImage[],
 ): Promise<string> {
   const res = await apiFetch<{ reply: string }>("/chat/", {
     method: "POST",
@@ -419,6 +431,7 @@ export async function sendChatMessage(
       messages,
       current_page: currentPage ?? null,
       page_context: pageContext ?? null,
+      images: images ?? [],
     }),
   });
   return res.reply;

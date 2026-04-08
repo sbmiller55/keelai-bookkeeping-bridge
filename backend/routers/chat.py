@@ -25,11 +25,17 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class ChatImage(BaseModel):
+    data: str        # base64-encoded bytes
+    media_type: str  # e.g. "image/png", "image/jpeg"
+
+
 class ChatRequest(BaseModel):
     client_id: int
     messages: list[ChatMessage]
     current_page: Optional[str] = None   # e.g. "review_queue", "transactions"
     page_context: Optional[str] = None   # JSON string of data currently on screen
+    images: list[ChatImage] = []         # attached to the latest user message
 
 
 class ChatResponse(BaseModel):
@@ -120,6 +126,14 @@ def _build_system_prompt(
         "Be concise and specific. Use accounting terminology correctly. "
         "When referencing amounts use dollar signs and two decimal places. "
         "When you see a correction (a human changed the AI's coding), note what was changed and why it matters.\n\n"
+        "## Critical behavior rules\n"
+        "1. NEVER claim or imply that you have done something unless you have already completed it via a tool call "
+        "in this exact response. Do not say 'I've updated the COA' or 'I created the rule' unless the tool call "
+        "already succeeded. If you intend to do something, do it first with the tool, then confirm. "
+        "If a tool call fails, say so honestly.\n"
+        "2. NEVER ask the user for a journal entry ID, transaction ID, or rule ID. "
+        "You have all of this data in your context under 'All Transactions with Journal Entries'. "
+        "Look it up yourself using the description, date, amount, or account names the user provides.\n\n"
         "## Rules Engine Access\n"
         "You can CREATE, LIST, and DISABLE rules that automatically code future transactions. "
         "When a user asks you to set up a rule — including excluding/rejecting certain transactions — use your tools to do it immediately. "
@@ -133,7 +147,11 @@ def _build_system_prompt(
         "  - reject: mark transaction as rejected — NO journal entry, excluded from QBO export. "
         "Use this when the user wants to exclude/skip certain transactions (e.g. payroll handled elsewhere).\n\n"
         "Placeholders: $source_account (the Mercury account the txn came from), $category (Mercury category).\n\n"
-        "After creating each rule, call apply_rule to apply it immediately to matching pending transactions.",
+        "After creating each rule, call apply_rule to apply it immediately to matching pending transactions.\n\n"
+        "## Chart of Accounts\n"
+        "You can add accounts to the Chart of Accounts using the update_chart_of_accounts tool. "
+        "Use this when the user asks you to add accounts, or when a transaction needs an account that doesn't exist yet. "
+        "Never tell the user to manually update the COA — do it yourself with the tool.",
     ]
 
     # Chart of accounts
@@ -171,7 +189,9 @@ def _build_system_prompt(
             for je in je_list:
                 conf = f"{int(je.ai_confidence * 100)}%" if je.ai_confidence is not None else "?"
                 je_strs.append(
-                    f"  je_id={je.id} DR:{je.debit_account} / CR:{je.credit_account} "
+                    f"  je_id={je.id}"
+                    + (f" je_number={je.je_number}" if je.je_number else "")
+                    + f" DR:{je.debit_account} / CR:{je.credit_account} "
                     f"${je.amount:,.2f} conf={conf}"
                     + (f" memo={je.memo!r}" if je.memo else "")
                     + (f" je_date={je.je_date.strftime('%Y-%m-%d')}" if je.je_date else "")
@@ -354,6 +374,26 @@ _TOOLS = [
                 "rule_id": {"type": "integer"},
             },
             "required": ["rule_id"],
+        },
+    },
+    {
+        "name": "update_chart_of_accounts",
+        "description": (
+            "Add one or more account names to the client's Chart of Accounts file. "
+            "Use this when the user asks you to add accounts to the COA, or when a transaction "
+            "requires an account that doesn't exist yet. The accounts will be merged with any "
+            "existing ones and saved sorted alphabetically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "accounts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of account names to add to the Chart of Accounts.",
+                },
+            },
+            "required": ["accounts"],
         },
     },
 ]
@@ -546,6 +586,35 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             verb = "rejected" if rule.rule_action == "reject" else "coded"
             return f"Rule {rule_id} applied: {verb} {applied} pending transaction(s)."
 
+        elif tool_name == "update_chart_of_accounts":
+            new_accounts = [a.strip() for a in tool_input.get("accounts", []) if a.strip()]
+            if not new_accounts:
+                return "No account names provided."
+
+            client = db.query(models.Client).filter(models.Client.id == client_id).first()
+            if not client:
+                return "Client not found."
+
+            coa_path = _find_file(client.chart_of_accounts_path) if client.chart_of_accounts_path else None
+            existing: list[str] = []
+            if coa_path and coa_path.suffix.lower() == ".txt":
+                existing = [l.strip() for l in coa_path.read_text().splitlines() if l.strip()]
+            elif coa_path:
+                return f"COA file is {coa_path.suffix} format — can only append to .txt files. Ask the user to re-upload as a .txt file first."
+
+            merged = sorted(set(existing) | set(new_accounts), key=str.casefold)
+
+            if coa_path:
+                coa_path.write_text("\n".join(merged) + "\n")
+            else:
+                new_path = UPLOADS_DIR / f"coa_client_{client_id}.txt"
+                new_path.write_text("\n".join(merged) + "\n")
+                client.chart_of_accounts_path = str(new_path)
+                db.commit()
+
+            added = set(new_accounts) - set(existing)
+            return f"Chart of Accounts updated. Added {len(added)} account(s): {', '.join(sorted(added))}. Total accounts: {len(merged)}."
+
         return f"Unknown tool: {tool_name}"
     except Exception as e:
         return f"Tool error: {e}"
@@ -588,6 +657,18 @@ def chat(
     )
     history_messages = [{"role": m.role, "content": m.content} for m in db_history[-_HISTORY_LIMIT:]]
     session_messages = [{"role": m.role, "content": m.content} for m in payload.messages]
+
+    # Attach images to the last user message if provided
+    if payload.images and session_messages and session_messages[-1]["role"] == "user":
+        text = session_messages[-1]["content"]
+        content: list = [{"type": "text", "text": text}] if text else []
+        for img in payload.images:
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": img.media_type, "data": img.data},
+            })
+        session_messages[-1] = {"role": "user", "content": content}
+
     messages = history_messages + session_messages
 
     anthropic_client = anthropic.Anthropic(api_key=api_key)
@@ -635,12 +716,38 @@ def chat(
             reply = next((b.text for b in response.content if hasattr(b, "text")), "Done.")
             break
 
-    # Persist the user message and assistant reply
+    # Persist the user message and assistant reply.
+    # If the user sent images, generate a text description to store instead of raw base64.
     if session_messages:
+        user_content = session_messages[-1]["content"]
+        if payload.images and isinstance(user_content, list):
+            try:
+                desc_content: list = []
+                for img in payload.images:
+                    desc_content.append({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": img.media_type, "data": img.data},
+                    })
+                desc_content.append({
+                    "type": "text",
+                    "text": "Describe what is shown in this image in one concise sentence, for use as a conversation history summary.",
+                })
+                desc_resp = anthropic_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=100,
+                    messages=[{"role": "user", "content": desc_content}],
+                )
+                image_desc = next((b.text for b in desc_resp.content if hasattr(b, "text")), "image attachment").strip()
+            except Exception:
+                image_desc = "image attachment"
+            text_part = next((b["text"] for b in user_content if isinstance(b, dict) and b.get("type") == "text"), "").strip()
+            stored_content = f"{text_part}\n[Image: {image_desc}]".strip() if text_part else f"[Image: {image_desc}]"
+        else:
+            stored_content = user_content if isinstance(user_content, str) else str(user_content)
         db.add(models.ClientChatMessage(
             client_id=client.id,
             role=session_messages[-1]["role"],
-            content=session_messages[-1]["content"],
+            content=stored_content,
         ))
     db.add(models.ClientChatMessage(
         client_id=client.id,

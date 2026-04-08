@@ -255,6 +255,7 @@ export default function ExportPage() {
   const [coaError, setCoaError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [markingExported, setMarkingExported] = useState(false);
+  const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
 
   const [qboConnected, setQboConnected] = useState(false);
   const [qboSyncing, setQboSyncing] = useState(false);
@@ -304,14 +305,28 @@ export default function ExportPage() {
     }
   }
 
-  async function markAllExported() {
+  async function markSelectedExported() {
+    if (selectedTxIds.size === 0) return;
     setMarkingExported(true);
     try {
-      await Promise.all(approved.map((tx) => updateTransactionStatus(tx.id, "exported")));
-      setApproved([]);
+      await Promise.all(
+        approved
+          .filter((tx) => selectedTxIds.has(tx.id))
+          .map((tx) => updateTransactionStatus(tx.id, "exported"))
+      );
+      setApproved((prev) => prev.filter((tx) => !selectedTxIds.has(tx.id)));
+      setSelectedTxIds(new Set());
     } finally {
       setMarkingExported(false);
     }
+  }
+
+  function toggleTx(id: number) {
+    setSelectedTxIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   }
 
   const totalJes = approved.reduce((n, tx) => n + tx.journal_entries.length, 0);
@@ -401,7 +416,7 @@ export default function ExportPage() {
               <p className="text-3xl font-bold text-white">{approved.length}</p>
             </div>
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-              <p className="text-xs text-gray-500 mb-1">Journal Entries</p>
+              <p className="text-xs text-gray-500 mb-1">Line Items</p>
               <p className="text-3xl font-bold text-white">{totalJes}</p>
             </div>
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
@@ -421,7 +436,7 @@ export default function ExportPage() {
                   <h2 className="text-sm font-semibold text-white">Sync to QuickBooks Online</h2>
                 </div>
                 <p className="text-xs text-gray-500">
-                  Push journal entries directly to QBO. New vendors are created automatically.
+                  Push transactions directly to QBO as Purchases (vendor expenses) or Journal Entries. New vendors are created automatically.
                   The CSV/Excel export below is always available as a backup.
                 </p>
               </div>
@@ -429,7 +444,7 @@ export default function ExportPage() {
               {qboResult && (
                 <div className={`rounded-lg px-4 py-3 text-xs space-y-1 ${qboResult.errors.length > 0 ? "bg-yellow-950 border border-yellow-700" : "bg-green-950 border border-green-700"}`}>
                   <p className={qboResult.errors.length > 0 ? "text-yellow-300" : "text-green-300"}>
-                    {qboResult.synced} journal {qboResult.synced === 1 ? "entry" : "entries"} synced to QBO
+                    {qboResult.synced} {qboResult.synced === 1 ? "transaction" : "transactions"} synced to QBO
                     {qboResult.created_vendors.length > 0 && ` · ${qboResult.created_vendors.length} new vendor${qboResult.created_vendors.length > 1 ? "s" : ""} created`}
                   </p>
                   {qboResult.created_vendors.length > 0 && (
@@ -545,18 +560,45 @@ export default function ExportPage() {
           </div>
 
           {/* Mark exported */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-            <h2 className="text-sm font-semibold text-white mb-2">After importing</h2>
-            <p className="text-xs text-gray-500 mb-4">
-              Once you've imported into your accounting software, mark all {approved.length} transactions to clear this queue. This cannot be undone.
-            </p>
-            <button
-              onClick={markAllExported}
-              disabled={markingExported}
-              className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-            >
-              {markingExported ? "Marking…" : `Mark All as Imported (${approved.length})`}
-            </button>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-white">After importing</h2>
+              <div className="flex gap-3 text-xs text-indigo-400">
+                <button onClick={() => setSelectedTxIds(new Set(approved.map((t) => t.id)))}>
+                  Select all
+                </button>
+                <button onClick={() => setSelectedTxIds(new Set())}>
+                  Deselect all
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1 max-h-64 overflow-y-auto">
+              {approved.map((tx) => (
+                <label key={tx.id} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selectedTxIds.has(tx.id)}
+                    onChange={() => toggleTx(tx.id)}
+                    className="w-4 h-4 rounded accent-purple-500 shrink-0"
+                  />
+                  <span className="text-xs text-gray-400 w-24 shrink-0">{new Date(tx.date).toLocaleDateString()}</span>
+                  <span className="text-xs text-white truncate">{tx.description}</span>
+                  <span className="text-xs text-gray-500 ml-auto shrink-0">
+                    ${tx.journal_entries.reduce((s, je) => s + je.amount, 0).toFixed(2)}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={markSelectedExported}
+                disabled={markingExported || selectedTxIds.size === 0}
+                className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {markingExported ? "Marking…" : `Mark Selected as Imported (${selectedTxIds.size})`}
+              </button>
+              <p className="text-xs text-gray-600">This cannot be undone.</p>
+            </div>
           </div>
 
           {/* Preview */}

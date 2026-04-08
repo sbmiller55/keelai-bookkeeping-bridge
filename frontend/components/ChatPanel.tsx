@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { sendChatMessage, getChatHistory, ChatMessage } from "@/lib/api";
+import { sendChatMessage, getChatHistory, ChatMessage, ChatImage } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
 interface Props {
@@ -16,6 +16,9 @@ export default function ChatPanel({ clientId, clientName }: Props) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
+  const [imagePreviewUrls, setImagePreviewUrls] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const { pageContext, currentPage } = useChatContext();
 
@@ -35,19 +38,40 @@ export default function ChatPanel({ clientId, clientName }: Props) {
     if (open) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, open]);
 
+  async function handleFileAttach(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(",")[1];
+        setPendingImages((prev) => [...prev, { data: base64, media_type: file.type || "image/png" }]);
+        setImagePreviewUrls((prev) => [...prev, dataUrl]);
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  function removeImage(idx: number) {
+    setPendingImages((prev) => prev.filter((_, i) => i !== idx));
+    setImagePreviewUrls((prev) => prev.filter((_, i) => i !== idx));
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || loading) return;
-    const userMsg: ChatMessage = { role: "user", content: text };
+    if ((!text && pendingImages.length === 0) || loading) return;
+    const userMsg: ChatMessage = { role: "user", content: text || "(see attached image)" };
+    const imagesToSend = [...pendingImages];
     const next = [...messages, userMsg];
     setMessages(next);
     setInput("");
+    setPendingImages([]);
+    setImagePreviewUrls([]);
     setLoading(true);
     try {
-      // Send only the latest user message — backend loads full history from DB
-      const reply = await sendChatMessage(clientId, [userMsg], currentPage, pageContext);
+      const reply = await sendChatMessage(clientId, [userMsg], currentPage, pageContext, imagesToSend);
       setMessages([...next, { role: "assistant", content: reply }]);
-      // Notify any open page that data may have changed (e.g. JEs updated)
       window.dispatchEvent(new Event("bb-data-changed"));
     } catch (err: unknown) {
       setMessages([...next, { role: "assistant", content: `Error: ${err instanceof Error ? err.message : "Request failed"}` }]);
@@ -198,7 +222,38 @@ export default function ChatPanel({ clientId, clientName }: Props) {
 
           {/* Input */}
           {!minimized && <div className="px-3 pb-3 shrink-0">
+            {imagePreviewUrls.length > 0 && (
+              <div className="flex gap-2 mb-2 flex-wrap">
+                {imagePreviewUrls.map((url, i) => (
+                  <div key={i} className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt="attachment" className="h-14 w-14 object-cover rounded-lg border border-gray-600" />
+                    <button
+                      onClick={() => removeImage(i)}
+                      className="absolute -top-1 -right-1 w-4 h-4 bg-gray-900 border border-gray-600 rounded-full text-gray-400 hover:text-white flex items-center justify-center text-xs"
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex items-end gap-2 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 focus-within:border-indigo-500 transition-colors">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleFileAttach}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="text-gray-500 hover:text-gray-300 transition-colors shrink-0"
+                title="Attach image"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                </svg>
+              </button>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -211,7 +266,7 @@ export default function ChatPanel({ clientId, clientName }: Props) {
               />
               <button
                 onClick={send}
-                disabled={!input.trim() || loading}
+                disabled={(!input.trim() && pendingImages.length === 0) || loading}
                 className="text-indigo-400 hover:text-indigo-300 disabled:text-gray-600 transition-colors shrink-0"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">

@@ -117,6 +117,15 @@ def get_accounts(api_key: str) -> list[dict]:
     return data.get("accounts", [])
 
 
+def get_treasury_accounts(api_key: str) -> list[dict]:
+    data = _request("/treasury", api_key, "TREASURY_ACCOUNTS")
+    return data.get("accounts", [])
+
+
+def get_treasury_transactions(treasury_id: str, api_key: str) -> list[dict]:
+    return _paginate(f"/treasury/{treasury_id}/transactions", "transactions", api_key)
+
+
 def get_all_transactions_global(api_key: str, start: Optional[str] = None, end: Optional[str] = None) -> list[dict]:
     """
     GET /transactions — global endpoint that returns ALL transaction types
@@ -181,7 +190,7 @@ def normalize_transaction(txn: dict, account_name: str = "") -> dict:
     txn_id = txn.get("id", "")
     kind = txn.get("kind", "")
 
-    date_raw = txn.get("postedAt") or txn.get("createdAt") or txn.get("estimatedDeliveryDate")
+    date_raw = txn.get("postedAt") or txn.get("createdAt") or txn.get("canonicalDay") or txn.get("estimatedDeliveryDate")
     date = _parse_date(date_raw) or datetime.utcnow()
 
     counterparty = txn.get("counterpartyName") or txn.get("recipientName") or ""
@@ -191,6 +200,7 @@ def normalize_transaction(txn: dict, account_name: str = "") -> dict:
         or txn.get("externalMemo")
         or txn.get("note")
         or txn.get("memo")
+        or txn.get("description")
         or counterparty
         or "No description"
     )
@@ -263,6 +273,7 @@ def sync_for_client(api_key: str, start: Optional[str] = None, end: Optional[str
 
     errors: list[str] = []
     all_txns: list[dict] = []
+    account_summaries: list[dict] = []
 
     # ── 1. Global /transactions endpoint (catches credit cards + all account types) ──
     try:
@@ -288,8 +299,36 @@ def sync_for_client(api_key: str, start: Optional[str] = None, end: Optional[str
     except MercuryError as e:
         errors.append(f"Global transactions: {e}")
 
-    # ── 2. Per-account /account/{id}/transactions (catches anything global missed) ──
-    account_summaries: list[dict] = []
+    # ── 2. Treasury accounts and their transactions ──
+    try:
+        treasury_accounts = get_treasury_accounts(api_key)
+        for ta in treasury_accounts:
+            ta_id = ta["id"]
+            ta_name = ta.get("name") or ta.get("accountNumber") or "Mercury Treasury"
+            account_name_map[ta_id] = ta_name
+            try:
+                t_txns = get_treasury_transactions(ta_id, api_key)
+                start_dt = _parse_date(start) if start else None
+                end_dt = _parse_date(end) if end else None
+                filtered = []
+                for t in t_txns:
+                    day = t.get("canonicalDay") or t.get("postedAt") or t.get("createdAt")
+                    txn_dt = _parse_date(day)
+                    if start_dt and txn_dt and txn_dt.date() < start_dt.date():
+                        continue
+                    if end_dt and txn_dt and txn_dt.date() > end_dt.date():
+                        continue
+                    if not any(n["mercury_transaction_id"] == t.get("id") for n in all_txns):
+                        all_txns.append(normalize_transaction(t, account_name=ta_name))
+                        filtered.append(t)
+                account_summaries.append({"name": ta_name, "transactions": len(filtered), "scheduled": 0})
+            except MercuryError as e:
+                errors.append(f"Treasury account [{ta_name}]: {e}")
+                account_summaries.append({"name": ta_name, "transactions": 0, "scheduled": 0})
+    except MercuryError as e:
+        errors.append(f"Treasury accounts: {e}")
+
+    # ── 3. Per-account /account/{id}/transactions (catches anything global missed) ──
     for account in accounts:
         acct_id = account["id"]
         acct_name = account_name_map[acct_id]
@@ -304,7 +343,7 @@ def sync_for_client(api_key: str, start: Optional[str] = None, end: Optional[str
             errors.append(f"Account [{acct_name}]: {e}")
             account_summaries.append({"name": acct_name, "transactions": 0, "scheduled": 0})
 
-    # ── 3. Deduplicate by mercury_transaction_id ──
+    # ── 4. Deduplicate by mercury_transaction_id ──
     seen: set[str] = set()
     deduped: list[dict] = []
     for n in all_txns:
