@@ -84,12 +84,11 @@ def _extract_accounts_from_pdf(path: Path) -> list[str]:
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
-
 from auth import get_current_user
 from database import get_db
 import models
 import schemas
+import storage
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -165,55 +164,46 @@ def get_chart_of_accounts(
     if not client.chart_of_accounts_path:
         return []
 
-    # Try to find the file
-    path = None
-    candidate = UPLOADS_DIR / Path(client.chart_of_accounts_path).name
-    if candidate.exists():
-        path = candidate
-    else:
-        p = Path(client.chart_of_accounts_path)
-        if p.exists():
-            path = p
+    with storage.as_local_path(client.chart_of_accounts_path) as path:
+        if not path:
+            return []
 
-    if not path:
-        return []
+        # PDF: extract table rows
+        if path.suffix.lower() == ".pdf":
+            result = _extract_accounts_from_pdf(path)
+            if result:
+                return result
 
-    # PDF: extract table rows
-    if path.suffix.lower() == ".pdf":
-        result = _extract_accounts_from_pdf(path)
-        if result:
-            return result
+        # Try reading as text
+        text = _extract_text_from_file(path)
+        if not text:
+            return []
 
-    # Try reading as text
-    text = _extract_text_from_file(path)
-    if not text:
-        return []
+        accounts: list[str] = []
 
-    accounts: list[str] = []
+        # Try CSV first
+        try:
+            reader = csv.DictReader(io.StringIO(text))
+            name_cols = [c for c in (reader.fieldnames or [])
+                         if any(k in c.lower() for k in ("name", "account", "description", "title"))]
+            if name_cols:
+                col = name_cols[0]
+                for row in reader:
+                    val = (row.get(col) or "").strip()
+                    if val:
+                        accounts.append(val)
+                if accounts:
+                    return sorted(set(accounts))
+        except Exception:
+            pass
 
-    # Try CSV first
-    try:
-        reader = csv.DictReader(io.StringIO(text))
-        name_cols = [c for c in (reader.fieldnames or [])
-                     if any(k in c.lower() for k in ("name", "account", "description", "title"))]
-        if name_cols:
-            col = name_cols[0]
-            for row in reader:
-                val = (row.get(col) or "").strip()
-                if val:
-                    accounts.append(val)
-            if accounts:
-                return sorted(set(accounts))
-    except Exception:
-        pass
+        # Fallback: one account per line
+        for line in text.splitlines():
+            line = line.strip().strip(",").strip('"').strip()
+            if line and not line.startswith("#"):
+                accounts.append(line)
 
-    # Fallback: one account per line
-    for line in text.splitlines():
-        line = line.strip().strip(",").strip('"').strip()
-        if line and not line.startswith("#"):
-            accounts.append(line)
-
-    return sorted(set(accounts)) if accounts else []
+        return sorted(set(accounts)) if accounts else []
 
 
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)

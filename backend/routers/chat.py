@@ -12,10 +12,9 @@ from sqlalchemy.orm import Session
 from auth import get_current_user
 from database import get_db
 import models
+import storage
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 _VOWELS = set("aeiou")
 _COMMON_WORDS = {"in", "is", "of", "to", "at", "on", "an", "as", "or", "and", "the", "by", "for"}
 
@@ -43,13 +42,6 @@ class ChatResponse(BaseModel):
 
 
 # ── File readers ──────────────────────────────────────────────────────────────
-
-def _find_file(path: str) -> Optional[Path]:
-    for candidate in [UPLOADS_DIR / Path(path).name, Path(path)]:
-        if candidate.exists():
-            return candidate
-    return None
-
 
 def _read_coa_pdf(p: Path) -> Optional[str]:
     """Extract clean account list from a QBO Chart of Accounts PDF."""
@@ -97,18 +89,18 @@ def _read_docx(p: Path) -> Optional[str]:
 def _read_file(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
-    p = _find_file(path)
-    if not p:
-        return None
-    suffix = p.suffix.lower()
-    if suffix == ".pdf":
-        return _read_coa_pdf(p)
-    elif suffix in (".docx", ".doc"):
-        return _read_docx(p)
-    try:
-        return p.read_text(errors="replace")[:12000]
-    except Exception:
-        return None
+    with storage.as_local_path(path) as p:
+        if p is None:
+            return None
+        suffix = p.suffix.lower()
+        if suffix == ".pdf":
+            return _read_coa_pdf(p)
+        elif suffix in (".docx", ".doc"):
+            return _read_docx(p)
+        try:
+            return p.read_text(errors="replace")[:12000]
+        except Exception:
+            return None
 
 
 # ── System prompt builder ─────────────────────────────────────────────────────
@@ -595,21 +587,22 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             if not client:
                 return "Client not found."
 
-            coa_path = _find_file(client.chart_of_accounts_path) if client.chart_of_accounts_path else None
             existing: list[str] = []
-            if coa_path and coa_path.suffix.lower() == ".txt":
-                existing = [l.strip() for l in coa_path.read_text().splitlines() if l.strip()]
-            elif coa_path:
-                return f"COA file is {coa_path.suffix} format — can only append to .txt files. Ask the user to re-upload as a .txt file first."
+            ref = client.chart_of_accounts_path
+            if ref:
+                existing_text = storage.read_text(ref)
+                if existing_text is not None:
+                    if not ref.endswith(".txt") and not ref.split("?")[0].endswith(".txt"):
+                        return "COA file is not .txt format — can only append to .txt files. Ask the user to re-upload as a .txt file first."
+                    existing = [l.strip() for l in existing_text.splitlines() if l.strip()]
 
             merged = sorted(set(existing) | set(new_accounts), key=str.casefold)
+            contents = ("\n".join(merged) + "\n").encode()
+            filename = f"coa_client_{client_id}.txt"
+            new_ref = storage.upload(filename, contents)
 
-            if coa_path:
-                coa_path.write_text("\n".join(merged) + "\n")
-            else:
-                new_path = UPLOADS_DIR / f"coa_client_{client_id}.txt"
-                new_path.write_text("\n".join(merged) + "\n")
-                client.chart_of_accounts_path = str(new_path)
+            if not ref:
+                client.chart_of_accounts_path = new_ref
                 db.commit()
 
             added = set(new_accounts) - set(existing)

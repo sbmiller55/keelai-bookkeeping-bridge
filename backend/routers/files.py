@@ -1,5 +1,4 @@
-"""File upload endpoint — stores uploads in ./uploads/ and returns the server path."""
-import os
+"""File upload endpoint — stores uploads via storage abstraction (local or S3)."""
 import uuid
 from pathlib import Path
 
@@ -8,9 +7,7 @@ from pydantic import BaseModel
 
 from auth import get_current_user
 import models
-
-UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+import storage
 
 # 20 MB limit
 MAX_BYTES = 20 * 1024 * 1024
@@ -36,11 +33,9 @@ async def upload_file(
         )
 
     original = Path(file.filename or "upload").name
-    # Sanitise and make unique
     safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in original)
     unique_name = f"{uuid.uuid4().hex}_{safe_name}"
 
-    dest = UPLOAD_DIR / unique_name
-    dest.write_bytes(contents)
+    ref = storage.upload(unique_name, contents)
 
-    return UploadResponse(path=str(dest), filename=original)
+    return UploadResponse(path=ref, filename=original)

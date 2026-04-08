@@ -7,9 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-UPLOADS_DIR = Path(__file__).parent / "uploads"
-MODEL = "claude-sonnet-4-6"
+import storage
 
+MODEL = "claude-sonnet-4-6"
 
 _VOWELS = set("aeiou")
 _COMMON_WORDS = {"in", "is", "of", "to", "at", "on", "an", "as", "or", "and", "the", "by", "for"}
@@ -58,10 +58,9 @@ def _read_file_safe(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
     try:
-        candidates = [UPLOADS_DIR / Path(path).name, Path(path)]
-        for p in candidates:
-            if not p.exists():
-                continue
+        with storage.as_local_path(path) as p:
+            if p is None:
+                return None
             suffix = p.suffix.lower()
             if suffix == ".pdf":
                 return _extract_coa_from_pdf(p)
@@ -72,8 +71,7 @@ def _read_file_safe(path: Optional[str]) -> Optional[str]:
             else:
                 return p.read_text(errors="replace")[:8000]
     except Exception:
-        pass
-    return None
+        return None
 
 
 # Parent/header accounts that must never appear in journal entries
