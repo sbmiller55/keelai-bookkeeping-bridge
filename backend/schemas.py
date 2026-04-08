@@ -69,6 +69,7 @@ class ClientUpdate(BaseModel):
     qbo_oauth_token: Optional[str] = None
     chart_of_accounts_path: Optional[str] = None
     policy_path: Optional[str] = None
+    last_sync_at: Optional[datetime] = None
 
 
 # ── Transaction schemas ───────────────────────────────────────────────────────
