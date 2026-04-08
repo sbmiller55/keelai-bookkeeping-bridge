@@ -1,10 +1,11 @@
 "use client";
 
+import { Suspense } from "react";
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { connectQbo } from "@/lib/api";
 
-export default function QboCallbackPage() {
+function QboCallbackContent() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"connecting" | "success" | "error">("connecting");
@@ -92,5 +93,17 @@ export default function QboCallbackPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function QboCallbackPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    }>
+      <QboCallbackContent />
+    </Suspense>
   );
 }
