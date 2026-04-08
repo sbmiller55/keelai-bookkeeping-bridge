@@ -302,6 +302,7 @@ def delete_transaction(
     db: Session = Depends(get_db),
 ):
     tx = _get_transaction_or_404(transaction_id, current_user, db)
+    db.query(models.JournalEntry).filter(models.JournalEntry.transaction_id == tx.id).delete()
     db.delete(tx)
     db.commit()
 
