@@ -59,6 +59,7 @@ function AccountSelect({
   const [inputValue, setInputValue] = useState(value);
   const [open, setOpen] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  const [isTyping, setIsTyping] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -73,13 +74,15 @@ function AccountSelect({
           onChange(inputValue);
         }
         setOpen(false);
+        setIsTyping(false);
       }
     }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [inputValue, value, onChange]);
 
-  const filtered = inputValue
+  // Show all accounts when just opened; filter only once user starts typing
+  const filtered = (isTyping && inputValue)
     ? accounts.filter((a) => a.toLowerCase().includes(inputValue.toLowerCase()))
     : accounts;
 
@@ -88,6 +91,7 @@ function AccountSelect({
 
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     setInputValue(e.target.value);
+    setIsTyping(true);
     setOpen(true);
     setActiveIdx(0);
   }
@@ -96,6 +100,7 @@ function AccountSelect({
     setInputValue(val);
     onChange(val);
     setOpen(false);
+    setIsTyping(false);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -113,6 +118,7 @@ function AccountSelect({
     } else if (e.key === "Escape") {
       setInputValue(value);
       setOpen(false);
+      setIsTyping(false);
     }
   }
 
@@ -130,7 +136,7 @@ function AccountSelect({
         value={inputValue}
         placeholder={placeholder}
         onChange={handleInputChange}
-        onFocus={() => setOpen(true)}
+        onFocus={(e) => { setOpen(true); setIsTyping(false); e.target.select(); }}
         onKeyDown={handleKeyDown}
         onBlur={() => {
           // Small delay so click on dropdown item fires first
@@ -138,6 +144,7 @@ function AccountSelect({
             if (ref.current && !ref.current.contains(document.activeElement)) {
               if (inputValue !== value) onChange(inputValue);
               setOpen(false);
+              setIsTyping(false);
             }
           }, 150);
         }}
