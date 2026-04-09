@@ -28,16 +28,24 @@ function getLastBusinessDay(year: number, month: number): Date {
 
 function calcDueDate(due_rule: string, workingYear: number, workingMonth: number): Date {
   const m0 = workingMonth - 1;
+  const lastDay = new Date(workingYear, m0 + 1, 0);
   switch (due_rule) {
     case "2nd_biz_day": return getNthBusinessDay(workingYear, m0, 2);
-    case "day_5": return new Date(workingYear, m0, 5);
     case "last_biz_day": return getLastBusinessDay(workingYear, m0);
     case "day_1_next_month": {
       const nm = workingMonth === 12 ? 1 : workingMonth + 1;
       const ny = workingMonth === 12 ? workingYear + 1 : workingYear;
       return new Date(ny, nm - 1, 1);
     }
-    default: return new Date(workingYear, m0, 5);
+    default: {
+      const match = due_rule.match(/^day_(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1]);
+        if (n >= 29) return lastDay;
+        return new Date(workingYear, m0, n);
+      }
+      return new Date(workingYear, m0, 5);
+    }
   }
 }
 
