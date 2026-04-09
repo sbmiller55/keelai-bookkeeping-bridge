@@ -779,28 +779,6 @@ export default function ReviewQueuePage() {
           </p>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
-          <div className="flex items-center gap-1">
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-              className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500"
-            >
-              <option value="standard">Sort: Standard</option>
-              <option value="amount">Sort: Amount</option>
-              <option value="confidence">Sort: Confidence</option>
-              <option value="debit">Sort: Debit Account</option>
-              <option value="credit">Sort: Credit Account</option>
-            </select>
-            {sortBy !== "standard" && (
-              <button
-                onClick={() => setSortDir((d) => d === "asc" ? "desc" : "asc")}
-                className="bg-gray-800 border border-gray-700 text-gray-400 hover:text-white text-xs rounded-lg px-2 py-2 transition-colors"
-                title={sortDir === "desc" ? "Descending" : "Ascending"}
-              >
-                {sortDir === "desc" ? "↓" : "↑"}
-              </button>
-            )}
-          </div>
           <button
             onClick={handleSync}
             disabled={syncing || coding || loading}
@@ -820,11 +798,11 @@ export default function ReviewQueuePage() {
           <button
             onClick={handleRunCoding}
             disabled={coding || loading}
-            className="flex items-center gap-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
+            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
           >
             {coding ? (
-              <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Coding…</>
-            ) : "✦ Run AI Coding"}
+              <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />Coding…</>
+            ) : "✦ AI Code"}
           </button>
           {coded.length > 0 && (
             <button
@@ -874,13 +852,33 @@ export default function ReviewQueuePage() {
               <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
                 <th className="px-3 py-2.5 text-left font-medium whitespace-nowrap relative select-none">Date{handle("date")}</th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Description{handle("description")}</th>
-                <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">Amount{handle("amount")}</th>
+                <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">
+                  <button onClick={() => { if (sortBy === "amount") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("amount"); setSortDir("desc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
+                    Amount <span className={sortBy === "amount" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "amount" && sortDir === "asc" ? "↑" : "↓"}</span>
+                  </button>
+                  {handle("amount")}
+                </th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Category{handle("category")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Debit Account{handle("debit")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Credit Account{handle("credit")}</th>
+                <th className="px-3 py-2.5 text-left font-medium relative select-none">
+                  <button onClick={() => { if (sortBy === "debit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("debit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
+                    Debit Account <span className={sortBy === "debit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "debit" && sortDir === "desc" ? "↓" : "↑"}</span>
+                  </button>
+                  {handle("debit")}
+                </th>
+                <th className="px-3 py-2.5 text-left font-medium relative select-none">
+                  <button onClick={() => { if (sortBy === "credit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("credit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
+                    Credit Account <span className={sortBy === "credit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "credit" && sortDir === "desc" ? "↓" : "↑"}</span>
+                  </button>
+                  {handle("credit")}
+                </th>
                 <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{handle("jeAmt")}</th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Memo{handle("memo")}</th>
-                <th className="px-3 py-2.5 text-center font-medium relative select-none">Conf{handle("conf")}</th>
+                <th className="px-3 py-2.5 text-center font-medium relative select-none">
+                  <button onClick={() => { if (sortBy === "confidence") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("confidence"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
+                    Conf <span className={sortBy === "confidence" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "confidence" && sortDir === "desc" ? "↓" : "↑"}</span>
+                  </button>
+                  {handle("conf")}
+                </th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Reasoning{handle("reasoning")}</th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Actions{handle("actions")}</th>
               </tr>
