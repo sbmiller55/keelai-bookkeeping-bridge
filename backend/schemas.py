@@ -253,6 +253,7 @@ class CloseChecklistItemCreate(BaseModel):
     due_rule: str
     order_index: int
     milestone: Optional[str] = None
+    recurrence: str = "monthly"  # "monthly", "quarter_end", "once"
 
 
 class CloseChecklistItemUpdate(BaseModel):
@@ -261,6 +262,7 @@ class CloseChecklistItemUpdate(BaseModel):
     due_rule: Optional[str] = None
     order_index: Optional[int] = None
     milestone: Optional[str] = None
+    recurrence: Optional[str] = None
 
 
 class CloseChecklistItemRead(BaseModel):
@@ -271,6 +273,7 @@ class CloseChecklistItemRead(BaseModel):
     description: Optional[str] = None
     due_rule: str
     milestone: Optional[str] = None
+    recurrence: str = "monthly"
     completed_at: Optional[datetime] = None  # populated when fetching with close_month
 
     model_config = {"from_attributes": True}

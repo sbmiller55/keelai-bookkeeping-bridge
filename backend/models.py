@@ -224,8 +224,10 @@ class CloseChecklistItem(Base):
     title = Column(String, nullable=False)
     description = Column(String, nullable=True)
     due_rule = Column(String, nullable=False)
-    # due_rule values: "2nd_biz_day", "day_5", "last_biz_day", "day_1_next_month"
+    # due_rule values: "2nd_biz_day", "last_biz_day", "day_N" (N=1-31, 29-31 = last day of month)
     milestone = Column(String, nullable=True)  # e.g. "Soft Close completed"
+    recurrence = Column(String, nullable=False, default="monthly")
+    # recurrence values: "monthly", "quarter_end", "once"
 
 
 class CloseChecklistCompletion(Base):

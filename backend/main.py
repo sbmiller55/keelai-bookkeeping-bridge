@@ -54,6 +54,7 @@ def _migrate_db():
         ("journal_entries","qbo_je_id",             "TEXT"),
         ("journal_entries","qbo_object_type",       "TEXT"),
         ("journal_entries","qbo_export_error",      "TEXT"),
+        ("close_checklist_items", "recurrence",     "TEXT DEFAULT 'monthly'"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:

@@ -32,16 +32,25 @@ function getLastBusinessDay(year: number, month: number): Date {
 
 function calcDueDate(due_rule: string, workingYear: number, workingMonth: number): Date {
   const m0 = workingMonth - 1;
+  // Last day of month: new Date(year, month+1, 0) rolls back to last day of month
+  const lastDay = new Date(workingYear, m0 + 1, 0);
   switch (due_rule) {
     case "2nd_biz_day": return getNthBusinessDay(workingYear, m0, 2);
-    case "day_5": return new Date(workingYear, m0, 5);
     case "last_biz_day": return getLastBusinessDay(workingYear, m0);
     case "day_1_next_month": {
       const nm = workingMonth === 12 ? 1 : workingMonth + 1;
       const ny = workingMonth === 12 ? workingYear + 1 : workingYear;
       return new Date(ny, nm - 1, 1);
     }
-    default: return new Date(workingYear, m0, 5);
+    default: {
+      const match = due_rule.match(/^day_(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1]);
+        if (n >= 29) return lastDay;
+        return new Date(workingYear, m0, n);
+      }
+      return new Date(workingYear, m0, 5);
+    }
   }
 }
 
@@ -62,8 +71,14 @@ function formatMonthLabel(closeMonthStr: string): string {
 
 // ── Form ──────────────────────────────────────────────────────────────────────
 
-type FormState = { title: string; description: string; due_rule: string; milestone: string };
-const EMPTY_FORM: FormState = { title: "", description: "", due_rule: "day_5", milestone: "" };
+type FormState = { title: string; description: string; due_rule: string; milestone: string; recurrence: string };
+const EMPTY_FORM: FormState = { title: "", description: "", due_rule: "day_5", milestone: "", recurrence: "monthly" };
+
+function parseDueRule(due_rule: string): { type: "named" | "specific"; namedVal: string; specificDay: number } {
+  const match = due_rule.match(/^day_(\d+)$/);
+  if (match) return { type: "specific", namedVal: "day_5", specificDay: parseInt(match[1]) };
+  return { type: "named", namedVal: due_rule, specificDay: 5 };
+}
 
 function ItemForm({ form, setForm, onSave, onCancel, saving }: {
   form: FormState;
@@ -72,6 +87,28 @@ function ItemForm({ form, setForm, onSave, onCancel, saving }: {
   onCancel: () => void;
   saving: boolean;
 }) {
+  const parsed = parseDueRule(form.due_rule);
+  const isSpecific = parsed.type === "specific" || (form.due_rule !== "2nd_biz_day" && form.due_rule !== "last_biz_day" && form.due_rule !== "day_1_next_month");
+  const specificDay = parsed.specificDay;
+
+  function setDueRuleType(val: string) {
+    if (val === "specific") {
+      setForm((f) => ({ ...f, due_rule: `day_${specificDay}` }));
+    } else {
+      setForm((f) => ({ ...f, due_rule: val }));
+    }
+  }
+
+  function setSpecificDay(n: number) {
+    setForm((f) => ({ ...f, due_rule: `day_${n}` }));
+  }
+
+  const RECURRENCE_OPTIONS = [
+    { value: "monthly", label: "Monthly" },
+    { value: "quarter_end", label: "Quarter-end" },
+    { value: "once", label: "One-time" },
+  ];
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-3">
@@ -93,19 +130,58 @@ function ItemForm({ form, setForm, onSave, onCancel, saving }: {
             onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
           />
         </div>
-        <div>
+        {/* Due rule */}
+        <div className={isSpecific ? "" : "col-span-2"}>
+          <label className="block text-xs text-gray-500 mb-1">Due</label>
           <select
             className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-            value={form.due_rule}
-            onChange={(e) => setForm((f) => ({ ...f, due_rule: e.target.value }))}
+            value={isSpecific ? "specific" : form.due_rule}
+            onChange={(e) => setDueRuleType(e.target.value)}
           >
-            <option value="2nd_biz_day">2nd business day of month</option>
-            <option value="day_5">5th of month</option>
-            <option value="last_biz_day">Last business day of month</option>
+            <option value="2nd_biz_day">2nd business day</option>
+            <option value="last_biz_day">Last business day</option>
             <option value="day_1_next_month">1st of following month</option>
+            <option value="specific">Specific day of month…</option>
           </select>
         </div>
-        <div>
+        {isSpecific && (
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Day of month</label>
+            <select
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+              value={specificDay}
+              onChange={(e) => setSpecificDay(parseInt(e.target.value))}
+            >
+              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                <option key={d} value={d}>Day {d}</option>
+              ))}
+              <option value={29}>Day 29 (last day if shorter month)</option>
+              <option value={30}>Day 30 (last day if shorter month)</option>
+              <option value={31}>Day 31 (last day of month)</option>
+            </select>
+          </div>
+        )}
+        {/* Recurrence */}
+        <div className="col-span-2">
+          <label className="block text-xs text-gray-500 mb-1.5">Recurrence</label>
+          <div className="flex gap-2">
+            {RECURRENCE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setForm((f) => ({ ...f, recurrence: opt.value }))}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                  form.recurrence === opt.value
+                    ? "bg-indigo-600 border-indigo-600 text-white"
+                    : "bg-gray-900 border-gray-700 text-gray-400 hover:border-gray-500"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="col-span-2">
           <input
             className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
             placeholder="Milestone label (optional)"
@@ -184,7 +260,7 @@ export default function MonthlyClosePage() {
   function startEdit(item: CloseChecklistItem) {
     setEditingId(item.id);
     setAddingNew(false);
-    setForm({ title: item.title, description: item.description ?? "", due_rule: item.due_rule, milestone: item.milestone ?? "" });
+    setForm({ title: item.title, description: item.description ?? "", due_rule: item.due_rule, milestone: item.milestone ?? "", recurrence: item.recurrence ?? "monthly" });
   }
 
   function cancelForm() { setEditingId(null); setAddingNew(false); setForm(EMPTY_FORM); }
@@ -195,6 +271,7 @@ export default function MonthlyClosePage() {
       const updated = await updateChecklistItem(clientId, item.id, {
         title: form.title, description: form.description || undefined,
         due_rule: form.due_rule, milestone: form.milestone || undefined,
+        recurrence: form.recurrence,
       });
       setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, ...updated } : i));
       cancelForm();
@@ -218,6 +295,7 @@ export default function MonthlyClosePage() {
       await createChecklistItem(clientId, {
         title: form.title, description: form.description || undefined,
         due_rule: form.due_rule, order_index: maxOrder + 1, milestone: form.milestone || undefined,
+        recurrence: form.recurrence,
       });
       const fresh = await getCloseChecklist(clientId, closeMonthStr);
       setItems(fresh);

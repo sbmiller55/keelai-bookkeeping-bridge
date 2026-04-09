@@ -614,6 +614,7 @@ export type CloseChecklistItem = {
   description: string | null;
   due_rule: string;
   milestone: string | null;
+  recurrence: string;
   completed_at: string | null;
 };
 
@@ -640,6 +641,7 @@ export function createChecklistItem(clientId: number, data: {
   due_rule: string;
   order_index: number;
   milestone?: string;
+  recurrence?: string;
 }): Promise<CloseChecklistItem> {
   return apiFetch<CloseChecklistItem>(`/clients/${clientId}/close-checklist`, {
     method: "POST",
@@ -653,6 +655,7 @@ export function updateChecklistItem(clientId: number, itemId: number, data: Part
   due_rule: string;
   order_index: number;
   milestone: string;
+  recurrence: string;
 }>): Promise<CloseChecklistItem> {
   return apiFetch<CloseChecklistItem>(`/clients/${clientId}/close-checklist/${itemId}`, {
     method: "PUT",

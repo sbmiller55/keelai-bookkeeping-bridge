@@ -53,6 +53,11 @@ def get_checklist(
     )
 
     if close_month:
+        # Filter quarter_end items to only appear in Q-end months (Mar/Jun/Sep/Dec)
+        close_month_num = int(close_month.split("-")[1]) if "-" in close_month else 0
+        quarter_end_months = {3, 6, 9, 12}
+
+        # Get completions for this month
         completions = {
             c.item_id: c.completed_at
             for c in db.query(models.CloseChecklistCompletion).filter(
@@ -60,8 +65,26 @@ def get_checklist(
                 models.CloseChecklistCompletion.close_month == close_month,
             ).all()
         }
+
+        # Get all-time completions for "once" items
+        ever_completed_ids = {
+            c.item_id
+            for c in db.query(models.CloseChecklistCompletion).filter(
+                models.CloseChecklistCompletion.item_id.in_([
+                    i.id for i in items if (i.recurrence or "monthly") == "once"
+                ])
+            ).all()
+        }
+
         result = []
         for item in items:
+            recurrence = item.recurrence or "monthly"
+            # Filter quarter_end to Q-end months only
+            if recurrence == "quarter_end" and close_month_num not in quarter_end_months:
+                continue
+            # Filter once items that have ever been completed
+            if recurrence == "once" and item.id in ever_completed_ids:
+                continue
             d = schemas.CloseChecklistItemRead.model_validate(item)
             d.completed_at = completions.get(item.id)
             result.append(d)
