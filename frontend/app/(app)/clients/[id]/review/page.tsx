@@ -638,7 +638,7 @@ export default function ReviewQueuePage() {
 
   useEffect(() => {
     reload();
-    getChartOfAccounts(clientId).then(setAccounts).catch(() => {});
+    getChartOfAccounts(clientId).then(setAccounts).catch(console.error);
   }, [clientId, reload]);
 
   useEffect(() => {
