@@ -12,6 +12,7 @@ import {
   createRule,
   applyRule,
   codePending,
+  syncMercury,
   TransactionWithEntries,
   JournalEntry,
 } from "@/lib/api";
@@ -577,6 +578,8 @@ export default function ReviewQueuePage() {
   const [coding, setCoding] = useState(false);
   const [codingError, setCodingError] = useState<string | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
 
   // Resize drag logic
@@ -659,6 +662,19 @@ export default function ReviewQueuePage() {
       setCodingError(err instanceof Error ? err.message : "Coding failed");
     } finally {
       setCoding(false);
+    }
+  }
+
+  async function handleSync() {
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      await syncMercury(clientId, "since_last_sync");
+      reload();
+    } catch (err: unknown) {
+      setSyncError(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -746,6 +762,22 @@ export default function ReviewQueuePage() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <button
+            onClick={handleSync}
+            disabled={syncing || coding || loading}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
+          >
+            {syncing ? (
+              <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Sync &amp; Code
+              </>
+            )}
+          </button>
+          <button
             onClick={handleRunCoding}
             disabled={coding || loading}
             className="flex items-center gap-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
@@ -766,9 +798,9 @@ export default function ReviewQueuePage() {
         </div>
       </div>
 
-      {codingError && (
+      {(codingError || syncError) && (
         <div className="mb-3 bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-2.5 text-xs">
-          {codingError}
+          {codingError || syncError}
         </div>
       )}
 
