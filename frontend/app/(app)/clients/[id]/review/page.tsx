@@ -15,6 +15,7 @@ import {
   syncMercury,
   TransactionWithEntries,
   JournalEntry,
+  DateRangeOption,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
@@ -580,6 +581,9 @@ export default function ReviewQueuePage() {
   const [approvingAll, setApprovingAll] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [dateRange, setDateRange] = useState<DateRangeOption>("since_last_sync");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
   const [sortBy, setSortBy] = useState<"standard" | "amount" | "confidence" | "debit" | "credit">("standard");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
@@ -671,7 +675,11 @@ export default function ReviewQueuePage() {
     setSyncing(true);
     setSyncError(null);
     try {
-      await syncMercury(clientId, "since_last_sync");
+      await syncMercury(
+        clientId, dateRange,
+        dateRange === "custom" ? customStart : undefined,
+        dateRange === "custom" ? customEnd : undefined,
+      );
       reload();
     } catch (err: unknown) {
       setSyncError(err instanceof Error ? err.message : "Sync failed");
@@ -770,19 +778,42 @@ export default function ReviewQueuePage() {
   return (
     <div className="w-full">
       {/* Header */}
-      <div className="mb-4 flex items-center justify-between gap-4 flex-wrap">
-        <div>
+      <div className="mb-4 flex items-center gap-3 flex-wrap">
+        <div className="mr-2">
           <h1 className="text-xl font-bold text-white">Review Queue</h1>
           <p className="text-gray-500 text-xs mt-0.5">
             {items.length} pending
             {uncoded.length > 0 && ` · ${uncoded.length} need coding`}
           </p>
         </div>
-        <div className="flex gap-2 flex-wrap items-center">
+
+        {/* Date range + Sync & Code — grouped together */}
+        <div className="flex items-center gap-1.5">
+          <select
+            value={dateRange}
+            onChange={(e) => setDateRange(e.target.value as DateRangeOption)}
+            className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="since_last_sync">Since last sync</option>
+            <option value="last_30">Last 30 days</option>
+            <option value="last_90">Last 90 days</option>
+            <option value="last_180">Last 6 months</option>
+            <option value="last_365">Last 12 months</option>
+            <option value="custom">Custom…</option>
+          </select>
+          {dateRange === "custom" && (
+            <>
+              <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
+                className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500" />
+              <span className="text-gray-600 text-xs">→</span>
+              <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
+                className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500" />
+            </>
+          )}
           <button
             onClick={handleSync}
-            disabled={syncing || coding || loading}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
+            disabled={syncing || coding || loading || (dateRange === "custom" && (!customStart || !customEnd))}
+            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
           >
             {syncing ? (
               <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
@@ -795,6 +826,10 @@ export default function ReviewQueuePage() {
               </>
             )}
           </button>
+        </div>
+
+        {/* Secondary actions */}
+        <div className="flex gap-2 items-center ml-auto">
           <button
             onClick={handleRunCoding}
             disabled={coding || loading}
