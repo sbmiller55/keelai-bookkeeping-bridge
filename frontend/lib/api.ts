@@ -172,7 +172,9 @@ export async function apiFetch<T = unknown>(
       throw new Error("Session expired");
     }
     const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(errorBody.detail ?? "Request failed");
+    const detail = errorBody.detail;
+    const message = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join(", ") : "Request failed";
+    throw new Error(message);
   }
 
   if (res.status === 204) {
