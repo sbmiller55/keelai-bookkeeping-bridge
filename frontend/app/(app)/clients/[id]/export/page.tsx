@@ -268,7 +268,8 @@ export default function ExportPage() {
     setLoading(true);
 
     const txPromise = getTransactionsWithEntries(clientId, "approved")
-      .then((items) => setApproved(items.filter((t) => t.journal_entries.length > 0)));
+      .then((items) => setApproved(items.filter((t) => t.journal_entries.length > 0)))
+      .catch(() => {});
 
     // Check QBO connection status (for showing the Sync button)
     getQboStatus(clientId).then((s) => setQboConnected(s.connected)).catch(() => {});

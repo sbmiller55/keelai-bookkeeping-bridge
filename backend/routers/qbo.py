@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
-from models import Client, JournalEntry, Transaction, TransactionStatus
+from models import Client, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
 
 router = APIRouter(prefix="/clients/{client_id}/qbo", tags=["qbo"])
@@ -27,8 +27,8 @@ router = APIRouter(prefix="/clients/{client_id}/qbo", tags=["qbo"])
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_client(client_id: int, db: Session) -> Client:
-    client = db.query(Client).filter(Client.id == client_id).first()
+def _get_client(client_id: int, user: User, db: Session) -> Client:
+    client = db.query(Client).filter(Client.id == client_id, Client.user_id == user.id).first()
     if not client:
         raise HTTPException(404, "Client not found")
     return client
@@ -79,7 +79,7 @@ class SyncResult(BaseModel):
 @router.get("/auth-url")
 def get_auth_url(
     client_id: int,
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Return the Intuit OAuth URL. The client_id is passed as OAuth state."""
     url = qbo.get_auth_url(state=str(client_id))
@@ -91,10 +91,10 @@ def oauth_callback(
     client_id: int,
     body: CallbackRequest,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Exchange an authorization code for tokens and store them on the client."""
-    client = _get_client(client_id, db)
+    client = _get_client(client_id, current_user, db)
     try:
         data = qbo.exchange_code(body.code)
     except Exception as exc:
@@ -114,7 +114,7 @@ def oauth_callback(
 def get_status(
     client_id: int,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     client    = _get_client(client_id, db)
     connected = bool(client.qbo_access_token and client.qbo_realm_id)
@@ -129,9 +129,9 @@ def get_status(
 def disconnect(
     client_id: int,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    client = _get_client(client_id, db)
+    client = _get_client(client_id, current_user, db)
     client.qbo_access_token     = None
     client.qbo_refresh_token    = None
     client.qbo_realm_id         = None
@@ -144,10 +144,10 @@ def disconnect(
 def get_accounts(
     client_id: int,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Fetch the live Chart of Accounts from QBO (active accounts only)."""
-    client = _get_client(client_id, db)
+    client = _get_client(client_id, current_user, db)
     qbo_c  = _get_qbo_client(client)
     try:
         names = qbo_c.get_coa_names()
@@ -163,7 +163,7 @@ def sync_to_qbo(
     mark_exported: bool = True,
     force: bool = False,
     db: Session = Depends(get_db),
-    _: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Push all approved journal entries to QBO.
@@ -171,7 +171,7 @@ def sync_to_qbo(
     mark_exported: if False, transactions stay in 'approved' state after sync
     (useful for sandbox testing before syncing to production).
     """
-    client = _get_client(client_id, db)
+    client = _get_client(client_id, current_user, db)
     qbo_c  = _get_qbo_client(client)
 
     # Load approved transactions that have journal entries

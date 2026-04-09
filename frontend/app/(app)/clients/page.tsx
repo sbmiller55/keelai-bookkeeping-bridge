@@ -79,8 +79,12 @@ export default function ClientsPage() {
   async function handleDelete(e: React.MouseEvent, id: number) {
     e.stopPropagation();
     if (!confirm("Delete this client and all associated data?")) return;
-    await deleteClient(id).catch(() => {});
-    setClients((prev) => prev.filter((c) => c.id !== id));
+    try {
+      await deleteClient(id);
+      setClients((prev) => prev.filter((c) => c.id !== id));
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to delete client");
+    }
   }
 
   function cancelForm() {
