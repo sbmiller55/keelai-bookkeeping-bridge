@@ -580,6 +580,8 @@ export default function ReviewQueuePage() {
   const [approvingAll, setApprovingAll] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<"standard" | "amount" | "confidence" | "debit" | "credit">("standard");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
 
   // Resize drag logic
@@ -738,8 +740,24 @@ export default function ReviewQueuePage() {
     }
   }
 
-  const coded = items.filter((t) => t.journal_entries.length > 0);
-  const uncoded = items.filter((t) => t.journal_entries.length === 0);
+  const sortedItems = [...items].sort((a, b) => {
+    let cmp = 0;
+    if (sortBy === "amount") {
+      cmp = Math.abs(a.amount) - Math.abs(b.amount);
+    } else if (sortBy === "confidence") {
+      const ca = a.journal_entries[0]?.ai_confidence ?? -1;
+      const cb = b.journal_entries[0]?.ai_confidence ?? -1;
+      cmp = ca - cb;
+    } else if (sortBy === "debit") {
+      cmp = (a.journal_entries[0]?.debit_account ?? "").localeCompare(b.journal_entries[0]?.debit_account ?? "");
+    } else if (sortBy === "credit") {
+      cmp = (a.journal_entries[0]?.credit_account ?? "").localeCompare(b.journal_entries[0]?.credit_account ?? "");
+    }
+    return sortBy === "standard" ? 0 : sortDir === "desc" ? -cmp : cmp;
+  });
+
+  const coded = sortedItems.filter((t) => t.journal_entries.length > 0);
+  const uncoded = sortedItems.filter((t) => t.journal_entries.length === 0);
 
   // Resize handle rendered inside each <th>
   const handle = (col: ColKey) => (
@@ -760,7 +778,29 @@ export default function ReviewQueuePage() {
             {uncoded.length > 0 && ` · ${uncoded.length} need coding`}
           </p>
         </div>
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-2 flex-wrap items-center">
+          <div className="flex items-center gap-1">
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+              className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="standard">Sort: Standard</option>
+              <option value="amount">Sort: Amount</option>
+              <option value="confidence">Sort: Confidence</option>
+              <option value="debit">Sort: Debit Account</option>
+              <option value="credit">Sort: Credit Account</option>
+            </select>
+            {sortBy !== "standard" && (
+              <button
+                onClick={() => setSortDir((d) => d === "asc" ? "desc" : "asc")}
+                className="bg-gray-800 border border-gray-700 text-gray-400 hover:text-white text-xs rounded-lg px-2 py-2 transition-colors"
+                title={sortDir === "desc" ? "Descending" : "Ascending"}
+              >
+                {sortDir === "desc" ? "↓" : "↑"}
+              </button>
+            )}
+          </div>
           <button
             onClick={handleSync}
             disabled={syncing || coding || loading}
@@ -846,7 +886,7 @@ export default function ReviewQueuePage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((tx) =>
+              {sortedItems.map((tx) =>
                 tx.journal_entries.length === 0 ? (
                   <NoJeRow key={tx.id} tx={tx} />
                 ) : (
