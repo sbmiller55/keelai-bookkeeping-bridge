@@ -186,11 +186,19 @@ export async function apiFetch<T = unknown>(
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-export function login(email: string, password: string): Promise<AuthResponse> {
-  return apiFetch<AuthResponse>("/auth/login", {
+export async function login(email: string, password: string): Promise<AuthResponse> {
+  const res = await fetch(`${BASE_URL}/auth/login`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = errorBody.detail;
+    const message = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join(", ") : "Invalid email or password";
+    throw new Error(message);
+  }
+  return res.json();
 }
 
 export function register(
