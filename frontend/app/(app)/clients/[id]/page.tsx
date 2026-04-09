@@ -170,7 +170,6 @@ export default function ClientOverviewPage() {
 
   const pending  = transactions.filter((t) => t.status === "pending").length;
   const approved = transactions.filter((t) => t.status === "approved").length;
-  const exported = transactions.filter((t) => t.status === "exported").length;
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
 
@@ -271,7 +270,7 @@ export default function ClientOverviewPage() {
       {syncResult && <SyncDetail result={syncResult} />}
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
         <Link href={`/clients/${clientId}/review`} className="block bg-yellow-950 border border-yellow-700 hover:border-yellow-500 rounded-xl p-5 transition-colors">
           <p className="text-sm text-yellow-300 font-medium">Pending Review</p>
           <p className="text-4xl font-bold text-yellow-200 mt-1">{pending}</p>
@@ -280,11 +279,7 @@ export default function ClientOverviewPage() {
           <p className="text-sm text-green-300 font-medium">Ready to Export</p>
           <p className="text-4xl font-bold text-green-200 mt-1">{approved}</p>
         </Link>
-        <div className="bg-purple-950 border border-purple-700 rounded-xl p-5">
-          <p className="text-sm text-purple-300 font-medium">Exported</p>
-          <p className="text-4xl font-bold text-purple-200 mt-1">{exported}</p>
-        </div>
-        <Link href={`/clients/${clientId}/close`} className="block bg-indigo-950 border border-indigo-700 hover:border-indigo-500 rounded-xl p-5 transition-colors">
+<Link href={`/clients/${clientId}/close`} className="block bg-indigo-950 border border-indigo-700 hover:border-indigo-500 rounded-xl p-5 transition-colors">
           <p className="text-sm text-indigo-300 font-medium">Remaining To-Dos</p>
           <p className="text-4xl font-bold text-indigo-200 mt-1">{remainingCount}</p>
           <p className="text-xs text-indigo-400 mt-1 truncate">{closeMonthLabel} close</p>
