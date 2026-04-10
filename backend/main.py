@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import Base, engine
-from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo
+from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo, fixed_assets
 
 
 def create_tables():
@@ -40,6 +40,7 @@ app.include_router(email_inbound.router)
 app.include_router(invoices.router)
 app.include_router(close_checklist.router)
 app.include_router(qbo.router)
+app.include_router(fixed_assets.router)
 
 
 def _migrate_db():
@@ -55,6 +56,8 @@ def _migrate_db():
         ("journal_entries","qbo_object_type",       "TEXT"),
         ("journal_entries","qbo_export_error",      "TEXT"),
         ("close_checklist_items", "recurrence",     "TEXT DEFAULT 'monthly'"),
+        ("transactions",          "source",          "TEXT DEFAULT 'mercury'"),
+        ("transactions",          "fixed_asset_id",  "INTEGER"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:

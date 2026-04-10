@@ -715,3 +715,103 @@ export function syncToQbo(clientId: number, markExported = true, force = false):
     { method: "POST" }
   );
 }
+
+// ── Fixed Assets ──────────────────────────────────────────────────────────────
+
+export interface DepreciationPeriod {
+  period: string;   // "2026-04"
+  date: string;     // ISO date, last day of month
+  depreciation: number;
+  accumulated_depreciation: number;
+  net_book_value: number;
+}
+
+export interface FixedAsset {
+  id: number;
+  client_id: number;
+  transaction_id: number | null;
+  name: string;
+  category: string;
+  purchase_date: string;
+  purchase_price: number;
+  salvage_value: number;
+  useful_life_months: number;
+  depreciation_method: string;
+  qbo_asset_account: string | null;
+  qbo_accum_dep_account: string | null;
+  qbo_dep_expense_account: string | null;
+  status: "active" | "fully_depreciated" | "disposed";
+  notes: string | null;
+  created_at: string;
+  monthly_depreciation: number;
+  accumulated_depreciation_to_date: number;
+  net_book_value: number;
+  schedule: DepreciationPeriod[];
+}
+
+export interface FixedAssetCreate {
+  transaction_id?: number;
+  je_id?: number;
+  name: string;
+  category: string;
+  purchase_date: string;
+  purchase_price: number;
+  salvage_value?: number;
+  useful_life_months: number;
+  depreciation_method?: string;
+  qbo_asset_account?: string;
+  qbo_accum_dep_account?: string;
+  qbo_dep_expense_account?: string;
+  notes?: string;
+}
+
+export interface FixedAssetSuggestion {
+  name: string;
+  category: string;
+  purchase_date: string;
+  purchase_price: number;
+  salvage_value: number;
+  useful_life_months: number;
+  depreciation_method: string;
+}
+
+export function getFixedAssets(clientId: number): Promise<FixedAsset[]> {
+  return apiFetch<FixedAsset[]>(`/clients/${clientId}/fixed-assets`);
+}
+
+export function getFixedAsset(clientId: number, assetId: number): Promise<FixedAsset> {
+  return apiFetch<FixedAsset>(`/clients/${clientId}/fixed-assets/${assetId}`);
+}
+
+export function suggestFixedAsset(clientId: number, transactionId: number): Promise<FixedAssetSuggestion> {
+  return apiFetch<FixedAssetSuggestion>(`/clients/${clientId}/fixed-assets/suggest?transaction_id=${transactionId}`);
+}
+
+export function createFixedAsset(clientId: number, data: FixedAssetCreate): Promise<FixedAsset> {
+  return apiFetch<FixedAsset>(`/clients/${clientId}/fixed-assets`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateFixedAsset(clientId: number, assetId: number, data: Partial<FixedAssetCreate> & { status?: string }): Promise<FixedAsset> {
+  return apiFetch<FixedAsset>(`/clients/${clientId}/fixed-assets/${assetId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export function disposeFixedAsset(clientId: number, assetId: number): Promise<FixedAsset> {
+  return apiFetch<FixedAsset>(`/clients/${clientId}/fixed-assets/${assetId}/dispose`, {
+    method: "POST",
+  });
+}
+
+export function generateDepreciationJEs(
+  clientId: number,
+  month: string,
+): Promise<{ created: number; skipped: number; month: string }> {
+  return apiFetch(`/clients/${clientId}/fixed-assets/generate-depreciation?month=${month}`, {
+    method: "POST",
+  });
+}

@@ -85,6 +85,8 @@ class Transaction(Base):
         nullable=False,
     )
     imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    source = Column(String, default="mercury", nullable=True)  # "mercury" | "depreciation" | "invoice"
+    fixed_asset_id = Column(Integer, ForeignKey("fixed_assets.id"), nullable=True)
 
     client = relationship("Client", back_populates="transactions")
     journal_entries = relationship("JournalEntry", back_populates="transaction")
@@ -237,3 +239,24 @@ class CloseChecklistCompletion(Base):
     item_id = Column(Integer, ForeignKey("close_checklist_items.id"), nullable=False)
     close_month = Column(String, nullable=False)  # "2026-02" format
     completed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FixedAsset(Base):
+    __tablename__ = "fixed_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)  # source bank transaction
+    name = Column(String, nullable=False)
+    category = Column(String, nullable=False)  # Equipment, Furniture, Leasehold Improvements, Vehicles, Other
+    purchase_date = Column(String, nullable=False)  # ISO date "YYYY-MM-DD"
+    purchase_price = Column(Float, nullable=False)
+    salvage_value = Column(Float, default=0.0, nullable=False)
+    useful_life_months = Column(Integer, nullable=False)
+    depreciation_method = Column(String, default="straight_line", nullable=False)  # straight_line, double_declining
+    qbo_asset_account = Column(String, nullable=True)
+    qbo_accum_dep_account = Column(String, nullable=True)
+    qbo_dep_expense_account = Column(String, nullable=True)
+    status = Column(String, default="active", nullable=False)  # active, fully_depreciated, disposed
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

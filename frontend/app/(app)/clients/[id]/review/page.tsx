@@ -13,9 +13,12 @@ import {
   applyRule,
   codePending,
   syncMercury,
+  suggestFixedAsset,
+  createFixedAsset,
   TransactionWithEntries,
   JournalEntry,
   DateRangeOption,
+  FixedAssetSuggestion,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
@@ -195,6 +198,191 @@ function ConfBadge({ score, reasoning }: { score: number | null; reasoning?: str
   );
 }
 
+// ── Fixed Asset Panel ─────────────────────────────────────────────────────────
+
+const FA_CATEGORIES = ["Equipment", "Furniture", "Leasehold Improvements", "Vehicles", "Other"];
+const FA_DEP_METHODS = [
+  { value: "straight_line", label: "Straight-Line" },
+  { value: "double_declining", label: "Double-Declining Balance" },
+];
+
+function FixedAssetPanel({
+  tx, jeId, clientId, accounts, onConfirm, onClose,
+}: {
+  tx: TransactionWithEntries;
+  jeId: number;
+  clientId: number;
+  accounts: string[];
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const [suggestion, setSuggestion] = useState<FixedAssetSuggestion | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState(tx.description);
+  const [category, setCategory] = useState("Equipment");
+  const [purchaseDate, setPurchaseDate] = useState(tx.date?.slice(0, 10) ?? "");
+  const [purchasePrice, setPurchasePrice] = useState(String(Math.abs(tx.amount)));
+  const [salvageValue, setSalvageValue] = useState("0");
+  const [usefulLife, setUsefulLife] = useState("60");
+  const [method, setMethod] = useState("straight_line");
+  const [assetAcct, setAssetAcct] = useState("");
+  const [accumAcct, setAccumAcct] = useState("");
+  const [expAcct, setExpAcct] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    suggestFixedAsset(clientId, tx.id)
+      .then((s) => {
+        setSuggestion(s);
+        setName(s.name);
+        setCategory(s.category);
+        setPurchaseDate(s.purchase_date);
+        setPurchasePrice(String(s.purchase_price));
+        setSalvageValue(String(s.salvage_value));
+        setUsefulLife(String(s.useful_life_months));
+        setMethod(s.depreciation_method);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [clientId, tx.id]);
+
+  async function handleConfirm() {
+    setSaving(true);
+    setError(null);
+    try {
+      await createFixedAsset(clientId, {
+        transaction_id: tx.id,
+        je_id: jeId,
+        name,
+        category,
+        purchase_date: purchaseDate,
+        purchase_price: parseFloat(purchasePrice),
+        salvage_value: parseFloat(salvageValue) || 0,
+        useful_life_months: parseInt(usefulLife),
+        depreciation_method: method,
+        qbo_asset_account: assetAcct || undefined,
+        qbo_accum_dep_account: accumAcct || undefined,
+        qbo_dep_expense_account: expAcct || undefined,
+      });
+      onConfirm();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create asset");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const inputCls = "w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg overflow-y-auto max-h-[90vh] shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-white">Mark as Fixed Asset</h2>
+            <p className="text-xs text-gray-500 mt-0.5">{tx.description}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none ml-4">×</button>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center items-center h-32">
+            <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-4">
+            {suggestion && (
+              <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-lg px-3 py-2 text-xs text-indigo-300">
+                ✦ AI pre-filled based on transaction description — review and adjust as needed
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-500 mb-1">Asset Name</label>
+                <input value={name} onChange={e => setName(e.target.value)} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Category</label>
+                <select value={category} onChange={e => setCategory(e.target.value)} className={inputCls}>
+                  {FA_CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Purchase Date</label>
+                <input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Purchase Price ($)</label>
+                <input type="number" step="0.01" value={purchasePrice} onChange={e => setPurchasePrice(e.target.value)} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Salvage Value ($)</label>
+                <input type="number" step="0.01" value={salvageValue} onChange={e => setSalvageValue(e.target.value)} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Useful Life (months)</label>
+                <input type="number" min="1" value={usefulLife} onChange={e => setUsefulLife(e.target.value)} className={inputCls} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Depreciation Method</label>
+                <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls}>
+                  {FA_DEP_METHODS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-3 pt-1 border-t border-gray-800">
+              <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">QBO Accounts</p>
+              {[
+                { label: "Asset Account", value: assetAcct, set: setAssetAcct },
+                { label: "Accumulated Depreciation Account", value: accumAcct, set: setAccumAcct },
+                { label: "Depreciation Expense Account", value: expAcct, set: setExpAcct },
+              ].map(({ label, value, set }) => (
+                <div key={label}>
+                  <label className="block text-xs text-gray-500 mb-1">{label}</label>
+                  <input
+                    value={value}
+                    onChange={e => set(e.target.value)}
+                    list={`fa-accts-${label}`}
+                    className={inputCls}
+                    placeholder="Type to search COA…"
+                  />
+                  <datalist id={`fa-accts-${label}`}>
+                    {accounts.map(a => <option key={a} value={a} />)}
+                  </datalist>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-xs text-gray-500 bg-gray-800 rounded-lg px-3 py-2">
+              This will recode the transaction JE to debit the asset account, approve the transaction, and generate all historical depreciation journal entries for review.
+            </p>
+
+            {error && (
+              <div className="text-xs text-red-400 bg-red-950 border border-red-800 rounded-lg px-3 py-2">{error}</div>
+            )}
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={handleConfirm}
+                disabled={saving || !name || !usefulLife}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded-lg transition-colors"
+              >
+                {saving ? "Creating Asset…" : "Confirm — Create Fixed Asset"}
+              </button>
+              <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── JE Row (always editable) ──────────────────────────────────────────────────
 
 type RulePrompt = {
@@ -216,6 +404,7 @@ function JeRow({
   onApprove,
   onReject,
   onSplit,
+  onMarkAsFixedAsset,
 }: {
   je: JournalEntry;
   tx: TransactionWithEntries;
@@ -228,6 +417,7 @@ function JeRow({
   onApprove: (txId: number) => Promise<void>;
   onReject: (txId: number) => Promise<void>;
   onSplit: (txId: number) => Promise<void>;
+  onMarkAsFixedAsset: (tx: TransactionWithEntries, jeId: number) => void;
 }) {
   const [debit, setDebit] = useState(je.debit_account);
   const [credit, setCredit] = useState(je.credit_account);
@@ -497,6 +687,14 @@ function JeRow({
               >
                 {acting === "reject" ? "…" : "✗"}
               </button>
+              <button
+                onClick={() => onMarkAsFixedAsset(tx, je.id)}
+                disabled={!!acting}
+                className="px-2 py-1 text-gray-500 hover:text-amber-400 hover:bg-gray-700 text-xs rounded transition-colors disabled:opacity-50"
+                title="Mark as Fixed Asset"
+              >
+                🏗
+              </button>
             </>
           )}
         </div>
@@ -594,6 +792,7 @@ export default function ReviewQueuePage() {
   const [sortBy, setSortBy] = useState<"standard" | "amount" | "confidence" | "debit" | "credit">("standard");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
+  const [fixedAssetTarget, setFixedAssetTarget] = useState<{ tx: TransactionWithEntries; jeId: number } | null>(null);
 
   // Resize drag logic
   function startResize(col: ColKey, e: React.MouseEvent) {
@@ -784,6 +983,20 @@ export default function ReviewQueuePage() {
 
   return (
     <div className="w-full">
+      {fixedAssetTarget && (
+        <FixedAssetPanel
+          tx={fixedAssetTarget.tx}
+          jeId={fixedAssetTarget.jeId}
+          clientId={clientId}
+          accounts={accounts}
+          onConfirm={() => {
+            setFixedAssetTarget(null);
+            reload();
+          }}
+          onClose={() => setFixedAssetTarget(null)}
+        />
+      )}
+
       {/* Header */}
       <div className="mb-4 flex items-center gap-3 flex-wrap">
         <div className="mr-2">
@@ -944,6 +1157,7 @@ export default function ReviewQueuePage() {
                       onApprove={handleApprove}
                       onReject={handleReject}
                       onSplit={handleSplit}
+                      onMarkAsFixedAsset={(t, jeId) => setFixedAssetTarget({ tx: t, jeId })}
                     />
                   ))
                 )

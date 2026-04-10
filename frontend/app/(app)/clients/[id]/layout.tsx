@@ -10,6 +10,7 @@ import { ChatContextProvider } from "@/lib/chat-context";
 const NAV_MAIN = [
   { label: "Overview", suffix: "" },
   { label: "Review Queue", suffix: "/review" },
+  { label: "Fixed Assets", suffix: "/fixed-assets" },
   { label: "Monthly Close", suffix: "/close" },
   { label: "Payments", suffix: "/payments" },
   { label: "Export", suffix: "/export" },

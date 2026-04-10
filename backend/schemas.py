@@ -101,6 +101,8 @@ class TransactionRead(BaseModel):
     mercury_status: Optional[str] = None
     status: str
     imported_at: datetime
+    source: Optional[str] = "mercury"
+    fixed_asset_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -281,3 +283,70 @@ class CloseChecklistItemRead(BaseModel):
 
 class CompleteItemRequest(BaseModel):
     close_month: str  # "2026-02"
+
+
+# ── Fixed Asset schemas ───────────────────────────────────────────────────────
+
+class FixedAssetCreate(BaseModel):
+    transaction_id: Optional[int] = None
+    je_id: Optional[int] = None  # JE to recode
+    name: str
+    category: str
+    purchase_date: str  # "YYYY-MM-DD"
+    purchase_price: float
+    salvage_value: float = 0.0
+    useful_life_months: int
+    depreciation_method: str = "straight_line"
+    qbo_asset_account: Optional[str] = None
+    qbo_accum_dep_account: Optional[str] = None
+    qbo_dep_expense_account: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class FixedAssetUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    purchase_date: Optional[str] = None
+    purchase_price: Optional[float] = None
+    salvage_value: Optional[float] = None
+    useful_life_months: Optional[int] = None
+    depreciation_method: Optional[str] = None
+    qbo_asset_account: Optional[str] = None
+    qbo_accum_dep_account: Optional[str] = None
+    qbo_dep_expense_account: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class DepreciationPeriod(BaseModel):
+    period: str
+    date: str
+    depreciation: float
+    accumulated_depreciation: float
+    net_book_value: float
+
+
+class FixedAssetRead(BaseModel):
+    id: int
+    client_id: int
+    transaction_id: Optional[int] = None
+    name: str
+    category: str
+    purchase_date: str
+    purchase_price: float
+    salvage_value: float
+    useful_life_months: int
+    depreciation_method: str
+    qbo_asset_account: Optional[str] = None
+    qbo_accum_dep_account: Optional[str] = None
+    qbo_dep_expense_account: Optional[str] = None
+    status: str
+    notes: Optional[str] = None
+    created_at: datetime
+    # Computed fields
+    monthly_depreciation: float = 0.0
+    accumulated_depreciation_to_date: float = 0.0
+    net_book_value: float = 0.0
+    schedule: list[DepreciationPeriod] = []
+
+    model_config = {"from_attributes": True}
