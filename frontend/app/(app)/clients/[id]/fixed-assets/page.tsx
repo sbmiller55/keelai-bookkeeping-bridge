@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import {
-  getFixedAssets, updateFixedAsset, disposeFixedAsset, generateDepreciationJEs,
-  getChartOfAccounts,
+  getFixedAssets, createFixedAsset, updateFixedAsset, disposeFixedAsset,
+  generateDepreciationJEs, getChartOfAccounts,
   FixedAsset, DepreciationPeriod,
 } from "@/lib/api";
 
@@ -13,23 +13,38 @@ import {
 function fmt(n: number) {
   return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-
 function fmtDate(s: string) {
   return new Date(s + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
-
 function currentMonth() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
-
 function statusBadge(status: string) {
   if (status === "active") return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-900/50 text-green-400 border border-green-800">Active</span>;
   if (status === "fully_depreciated") return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700">Fully Depreciated</span>;
   return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-900/50 text-red-400 border border-red-800">Disposed</span>;
 }
 
-// ── CSV Export ────────────────────────────────────────────────────────────────
+// ── CSV helpers ───────────────────────────────────────────────────────────────
+
+const IMPORT_HEADERS = [
+  "Asset Name", "Category", "Purchase Date", "Purchase Price",
+  "Salvage Value", "Useful Life (months)", "Depreciation Method",
+  "QBO Asset Account", "QBO Accum Dep Account", "QBO Dep Expense Account",
+];
+
+function downloadTemplate() {
+  const rows = [
+    IMPORT_HEADERS.join(","),
+    '"MacBook Pro 14","Equipment","2025-01-15","2499.00","0","60","straight_line","Long-term office equipment","Accumulated Amortization - Domain Name","Depreciation Expense"',
+  ];
+  const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "fixed-assets-import-template.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
 
 function exportScheduleCsv(assets: FixedAsset[]) {
   const rows: string[] = ["Asset Name,Category,Purchase Date,Purchase Price,Salvage Value,Method,Period,Date,Depreciation,Accumulated Depreciation,Net Book Value"];
@@ -45,13 +60,65 @@ function exportScheduleCsv(assets: FixedAsset[]) {
   const blob = new Blob([rows.join("\n")], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = `depreciation-schedule-${currentMonth()}.csv`;
-  a.click();
+  a.href = url; a.download = `depreciation-schedule-${currentMonth()}.csv`; a.click();
   URL.revokeObjectURL(url);
 }
 
-// ── Edit panel ────────────────────────────────────────────────────────────────
+function parseCsv(text: string): Record<string, string>[] {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.replace(/^"|"$/g, "").trim());
+  return lines.slice(1).map(line => {
+    // Simple quoted CSV parse
+    const cols: string[] = [];
+    let cur = "", inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '"') { inQuote = !inQuote; continue; }
+      if (line[i] === "," && !inQuote) { cols.push(cur); cur = ""; continue; }
+      cur += line[i];
+    }
+    cols.push(cur);
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => { row[h] = (cols[i] ?? "").trim(); });
+    return row;
+  }).filter(r => Object.values(r).some(v => v));
+}
+
+type ImportRow = {
+  name: string; category: string; purchase_date: string; purchase_price: number;
+  salvage_value: number; useful_life_months: number; depreciation_method: string;
+  qbo_asset_account: string; qbo_accum_dep_account: string; qbo_dep_expense_account: string;
+  error?: string;
+};
+
+function rowFromCsv(r: Record<string, string>): ImportRow {
+  const name = r["Asset Name"] || r["name"] || "";
+  const price = parseFloat(r["Purchase Price"] || r["purchase_price"] || "0");
+  const salvage = parseFloat(r["Salvage Value"] || r["salvage_value"] || "0");
+  const life = parseInt(r["Useful Life (months)"] || r["useful_life_months"] || "0");
+  const method = (r["Depreciation Method"] || r["depreciation_method"] || "straight_line")
+    .toLowerCase().replace(/[^a-z_]/g, "_");
+  const methodNorm = method.includes("double") ? "double_declining" : "straight_line";
+  const errors: string[] = [];
+  if (!name) errors.push("missing name");
+  if (!price) errors.push("missing price");
+  if (!life) errors.push("missing useful life");
+  return {
+    name,
+    category: r["Category"] || r["category"] || "Equipment",
+    purchase_date: r["Purchase Date"] || r["purchase_date"] || "",
+    purchase_price: price,
+    salvage_value: isNaN(salvage) ? 0 : salvage,
+    useful_life_months: life,
+    depreciation_method: methodNorm,
+    qbo_asset_account: r["QBO Asset Account"] || r["qbo_asset_account"] || "",
+    qbo_accum_dep_account: r["QBO Accum Dep Account"] || r["qbo_accum_dep_account"] || "",
+    qbo_dep_expense_account: r["QBO Dep Expense Account"] || r["qbo_dep_expense_account"] || "",
+    error: errors.length ? errors.join(", ") : undefined,
+  };
+}
+
+// ── Shared form fields ────────────────────────────────────────────────────────
 
 const CATEGORIES = ["Equipment", "Furniture", "Leasehold Improvements", "Vehicles", "Other"];
 const DEP_METHODS = [
@@ -59,39 +126,176 @@ const DEP_METHODS = [
   { value: "double_declining", label: "Double-Declining Balance" },
 ];
 
-function EditPanel({
-  asset, accounts, onSave, onClose,
-}: {
-  asset: FixedAsset;
+type FormState = {
+  name: string; category: string; purchaseDate: string; purchasePrice: string;
+  salvageValue: string; usefulLife: string; method: string;
+  assetAcct: string; accumAcct: string; expAcct: string;
+};
+
+function AssetFormFields({ form, setForm, accounts }: {
+  form: FormState;
+  setForm: (f: FormState) => void;
   accounts: string[];
-  onSave: (a: FixedAsset) => void;
-  onClose: () => void;
 }) {
-  const [name, setName] = useState(asset.name);
-  const [category, setCategory] = useState(asset.category);
-  const [purchaseDate, setPurchaseDate] = useState(asset.purchase_date);
-  const [purchasePrice, setPurchasePrice] = useState(String(asset.purchase_price));
-  const [salvageValue, setSalvageValue] = useState(String(asset.salvage_value));
-  const [usefulLife, setUsefulLife] = useState(String(asset.useful_life_months));
-  const [method, setMethod] = useState(asset.depreciation_method);
-  const [assetAcct, setAssetAcct] = useState(asset.qbo_asset_account ?? "");
-  const [accumAcct, setAccumAcct] = useState(asset.qbo_accum_dep_account ?? "");
-  const [expAcct, setExpAcct] = useState(asset.qbo_dep_expense_account ?? "");
+  const set = (k: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm({ ...form, [k]: e.target.value });
+
+  const cls = "w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500";
+
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2">
+          <label className="block text-xs text-gray-500 mb-1">Asset Name</label>
+          <input value={form.name} onChange={set("name")} className={cls} />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Category</label>
+          <select value={form.category} onChange={set("category")} className={cls}>
+            {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Purchase Date</label>
+          <input type="date" value={form.purchaseDate} onChange={set("purchaseDate")} className={cls} />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Purchase Price ($)</label>
+          <input type="number" step="0.01" value={form.purchasePrice} onChange={set("purchasePrice")} className={cls} />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Salvage Value ($)</label>
+          <input type="number" step="0.01" value={form.salvageValue} onChange={set("salvageValue")} className={cls} />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Useful Life (months)</label>
+          <input type="number" min="1" value={form.usefulLife} onChange={set("usefulLife")} className={cls} />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Depreciation Method</label>
+          <select value={form.method} onChange={set("method")} className={cls}>
+            {DEP_METHODS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="space-y-3 pt-1 border-t border-gray-800">
+        <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">QBO Accounts</p>
+        {([
+          ["Asset Account", "assetAcct"],
+          ["Accumulated Depreciation Account", "accumAcct"],
+          ["Depreciation Expense Account", "expAcct"],
+        ] as [string, keyof FormState][]).map(([label, key]) => (
+          <div key={key}>
+            <label className="block text-xs text-gray-500 mb-1">{label}</label>
+            <input
+              value={form[key] as string}
+              onChange={set(key)}
+              list={`fa-dl-${key}`}
+              className={cls}
+              placeholder="Type to search COA…"
+            />
+            <datalist id={`fa-dl-${key}`}>
+              {accounts.map(a => <option key={a} value={a} />)}
+            </datalist>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ── Add panel ─────────────────────────────────────────────────────────────────
+
+const EMPTY_FORM: FormState = {
+  name: "", category: "Equipment", purchaseDate: "", purchasePrice: "",
+  salvageValue: "0", usefulLife: "60", method: "straight_line",
+  assetAcct: "", accumAcct: "", expAcct: "",
+};
+
+function AddPanel({ clientId, accounts, onAdd, onClose }: {
+  clientId: number; accounts: string[];
+  onAdd: (a: FixedAsset) => void; onClose: () => void;
+}) {
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    setSaving(true); setError(null);
+    try {
+      const asset = await createFixedAsset(clientId, {
+        name: form.name, category: form.category,
+        purchase_date: form.purchaseDate,
+        purchase_price: parseFloat(form.purchasePrice),
+        salvage_value: parseFloat(form.salvageValue) || 0,
+        useful_life_months: parseInt(form.usefulLife),
+        depreciation_method: form.method,
+        qbo_asset_account: form.assetAcct || undefined,
+        qbo_accum_dep_account: form.accumAcct || undefined,
+        qbo_dep_expense_account: form.expAcct || undefined,
+      });
+      onAdd(asset);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const valid = form.name && form.purchaseDate && parseFloat(form.purchasePrice) > 0 && parseInt(form.usefulLife) > 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg overflow-y-auto max-h-[90vh] shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-white">Add Fixed Asset</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <AssetFormFields form={form} setForm={setForm} accounts={accounts} />
+          {error && <p className="text-xs text-red-400 bg-red-950 border border-red-800 rounded-lg px-3 py-2">{error}</p>}
+          <div className="flex gap-2 pt-1">
+            <button onClick={handleSave} disabled={saving || !valid}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded-lg transition-colors">
+              {saving ? "Adding…" : "Add Asset"}
+            </button>
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Edit panel ────────────────────────────────────────────────────────────────
+
+function EditPanel({ asset, accounts, onSave, onClose }: {
+  asset: FixedAsset; accounts: string[];
+  onSave: (a: FixedAsset) => void; onClose: () => void;
+}) {
+  const [form, setForm] = useState<FormState>({
+    name: asset.name, category: asset.category,
+    purchaseDate: asset.purchase_date, purchasePrice: String(asset.purchase_price),
+    salvageValue: String(asset.salvage_value), usefulLife: String(asset.useful_life_months),
+    method: asset.depreciation_method, assetAcct: asset.qbo_asset_account ?? "",
+    accumAcct: asset.qbo_accum_dep_account ?? "", expAcct: asset.qbo_dep_expense_account ?? "",
+  });
   const [saving, setSaving] = useState(false);
 
   async function handleSave() {
     setSaving(true);
     try {
       const updated = await updateFixedAsset(asset.client_id, asset.id, {
-        name, category,
-        purchase_date: purchaseDate,
-        purchase_price: parseFloat(purchasePrice),
-        salvage_value: parseFloat(salvageValue) || 0,
-        useful_life_months: parseInt(usefulLife),
-        depreciation_method: method,
-        qbo_asset_account: assetAcct || undefined,
-        qbo_accum_dep_account: accumAcct || undefined,
-        qbo_dep_expense_account: expAcct || undefined,
+        name: form.name, category: form.category,
+        purchase_date: form.purchaseDate,
+        purchase_price: parseFloat(form.purchasePrice),
+        salvage_value: parseFloat(form.salvageValue) || 0,
+        useful_life_months: parseInt(form.usefulLife),
+        depreciation_method: form.method,
+        qbo_asset_account: form.assetAcct || undefined,
+        qbo_accum_dep_account: form.accumAcct || undefined,
+        qbo_dep_expense_account: form.expAcct || undefined,
       });
       onSave(updated);
     } finally {
@@ -99,101 +303,189 @@ function EditPanel({
     }
   }
 
-  const selectCls = "w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500";
-  const inputCls = selectCls;
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg p-6 space-y-4 overflow-y-auto max-h-[90vh]">
-        <div className="flex items-center justify-between">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg overflow-y-auto max-h-[90vh] shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
           <h2 className="text-base font-semibold text-white">Edit Asset</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
         </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">Asset Name</label>
-            <input value={name} onChange={e => setName(e.target.value)} className={inputCls} />
+        <div className="px-6 py-5 space-y-4">
+          <AssetFormFields form={form} setForm={setForm} accounts={accounts} />
+          <div className="flex gap-2 pt-1">
+            <button onClick={handleSave} disabled={saving}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium py-2.5 rounded-lg transition-colors">
+              {saving ? "Saving…" : "Save Changes"}
+            </button>
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancel</button>
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Category</label>
-            <select value={category} onChange={e => setCategory(e.target.value)} className={selectCls}>
-              {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Purchase Date</label>
-            <input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Purchase Price ($)</label>
-            <input type="number" step="0.01" value={purchasePrice} onChange={e => setPurchasePrice(e.target.value)} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Salvage Value ($)</label>
-            <input type="number" step="0.01" value={salvageValue} onChange={e => setSalvageValue(e.target.value)} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Useful Life (months)</label>
-            <input type="number" value={usefulLife} onChange={e => setUsefulLife(e.target.value)} className={inputCls} />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Depreciation Method</label>
-            <select value={method} onChange={e => setMethod(e.target.value)} className={selectCls}>
-              {DEP_METHODS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-            </select>
-          </div>
-        </div>
-
-        <div className="space-y-3 pt-1 border-t border-gray-800">
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">QBO Accounts</p>
-          {[
-            { label: "Asset Account", value: assetAcct, set: setAssetAcct },
-            { label: "Accumulated Depreciation Account", value: accumAcct, set: setAccumAcct },
-            { label: "Depreciation Expense Account", value: expAcct, set: setExpAcct },
-          ].map(({ label, value, set }) => (
-            <div key={label}>
-              <label className="block text-xs text-gray-500 mb-1">{label}</label>
-              <input
-                value={value}
-                onChange={e => set(e.target.value)}
-                list={`accts-${label}`}
-                className={inputCls}
-                placeholder="Type to search COA…"
-              />
-              <datalist id={`accts-${label}`}>
-                {accounts.map(a => <option key={a} value={a} />)}
-              </datalist>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex gap-2 pt-2">
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium py-2 rounded-lg transition-colors"
-          >
-            {saving ? "Saving…" : "Save Changes"}
-          </button>
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
-            Cancel
-          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Asset row ──────────────────────────────────────────────────────────────────
+// ── CSV Import panel ──────────────────────────────────────────────────────────
 
-function AssetRow({
-  asset, onEdit, onDispose, onUpdate,
-}: {
-  asset: FixedAsset;
-  onEdit: () => void;
-  onDispose: () => void;
-  onUpdate: (a: FixedAsset) => void;
+function ImportPanel({ clientId, onImport, onClose }: {
+  clientId: number; onImport: (assets: FixedAsset[]) => void; onClose: () => void;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [rows, setRows] = useState<ImportRow[] | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [errors, setErrors] = useState<string[]>([]);
+
+  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      const parsed = parseCsv(text).map(rowFromCsv);
+      setRows(parsed);
+    };
+    reader.readAsText(file);
+  }
+
+  async function handleImport() {
+    if (!rows) return;
+    const valid = rows.filter(r => !r.error);
+    setImporting(true);
+    setErrors([]);
+    const created: FixedAsset[] = [];
+    for (let i = 0; i < valid.length; i++) {
+      const r = valid[i];
+      try {
+        const asset = await createFixedAsset(clientId, {
+          name: r.name, category: r.category,
+          purchase_date: r.purchase_date,
+          purchase_price: r.purchase_price,
+          salvage_value: r.salvage_value,
+          useful_life_months: r.useful_life_months,
+          depreciation_method: r.depreciation_method,
+          qbo_asset_account: r.qbo_asset_account || undefined,
+          qbo_accum_dep_account: r.qbo_accum_dep_account || undefined,
+          qbo_dep_expense_account: r.qbo_dep_expense_account || undefined,
+        });
+        created.push(asset);
+      } catch (err: unknown) {
+        setErrors(prev => [...prev, `"${r.name}": ${err instanceof Error ? err.message : "failed"}`]);
+      }
+      setProgress(i + 1);
+    }
+    setImporting(false);
+    if (created.length > 0) onImport(created);
+  }
+
+  const validCount = rows?.filter(r => !r.error).length ?? 0;
+  const invalidCount = rows?.filter(r => r.error).length ?? 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl overflow-y-auto max-h-[90vh] shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-white">Import Fixed Assets from CSV</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+
+          {/* Template download */}
+          <div className="bg-gray-800 rounded-lg px-4 py-3 flex items-center justify-between">
+            <div>
+              <p className="text-sm text-white font-medium">CSV Template</p>
+              <p className="text-xs text-gray-400 mt-0.5">Download the template, fill it in, then upload below.</p>
+            </div>
+            <button onClick={downloadTemplate}
+              className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-700 hover:border-indigo-500 px-3 py-1.5 rounded-lg transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Download Template
+            </button>
+          </div>
+
+          {/* File picker */}
+          <div>
+            <label className="block text-xs text-gray-500 mb-2">Upload CSV file</label>
+            <input ref={fileRef} type="file" accept=".csv" onChange={handleFile}
+              className="block w-full text-xs text-gray-400 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-indigo-700 file:text-white hover:file:bg-indigo-600 cursor-pointer" />
+          </div>
+
+          {/* Preview */}
+          {rows && (
+            <div>
+              <div className="flex items-center gap-3 mb-2">
+                <p className="text-xs text-gray-400">{rows.length} rows parsed</p>
+                {validCount > 0 && <span className="text-xs text-green-400">{validCount} ready to import</span>}
+                {invalidCount > 0 && <span className="text-xs text-red-400">{invalidCount} with errors</span>}
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-gray-800 max-h-64 overflow-y-auto">
+                <table className="w-full text-xs min-w-[600px]">
+                  <thead className="sticky top-0 bg-gray-900">
+                    <tr className="border-b border-gray-800 text-gray-500">
+                      <th className="px-3 py-2 text-left font-medium">Name</th>
+                      <th className="px-3 py-2 text-left font-medium">Category</th>
+                      <th className="px-3 py-2 text-left font-medium">Date</th>
+                      <th className="px-3 py-2 text-right font-medium">Price</th>
+                      <th className="px-3 py-2 text-right font-medium">Life (mo)</th>
+                      <th className="px-3 py-2 text-left font-medium">Method</th>
+                      <th className="px-3 py-2 text-left font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i} className={`border-b border-gray-800 last:border-0 ${r.error ? "bg-red-950/30" : ""}`}>
+                        <td className="px-3 py-1.5 text-white">{r.name || <span className="text-gray-600">—</span>}</td>
+                        <td className="px-3 py-1.5 text-gray-400">{r.category}</td>
+                        <td className="px-3 py-1.5 text-gray-400">{r.purchase_date}</td>
+                        <td className="px-3 py-1.5 text-right text-gray-300 font-mono">{r.purchase_price ? `$${fmt(r.purchase_price)}` : "—"}</td>
+                        <td className="px-3 py-1.5 text-right text-gray-400">{r.useful_life_months || "—"}</td>
+                        <td className="px-3 py-1.5 text-gray-400">{r.depreciation_method === "double_declining" ? "DDB" : "SL"}</td>
+                        <td className="px-3 py-1.5">
+                          {r.error
+                            ? <span className="text-red-400">✗ {r.error}</span>
+                            : <span className="text-green-400">✓ Ready</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Import errors */}
+          {errors.length > 0 && (
+            <div className="bg-red-950 border border-red-800 rounded-lg px-4 py-3 space-y-1">
+              {errors.map((e, i) => <p key={i} className="text-xs text-red-400">{e}</p>)}
+            </div>
+          )}
+
+          {importing && (
+            <p className="text-xs text-indigo-400">Importing {progress} of {validCount}…</p>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={handleImport}
+              disabled={importing || !rows || validCount === 0}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded-lg transition-colors"
+            >
+              {importing ? `Importing… (${progress}/${validCount})` : `Import ${validCount} Asset${validCount !== 1 ? "s" : ""}`}
+            </button>
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Asset row ─────────────────────────────────────────────────────────────────
+
+function AssetRow({ asset, onEdit, onDispose }: {
+  asset: FixedAsset; onEdit: () => void; onDispose: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const today = currentMonth();
@@ -202,10 +494,7 @@ function AssetRow({
     <>
       <tr className="border-b border-gray-800 hover:bg-gray-800/30 transition-colors">
         <td className="px-4 py-3">
-          <button
-            onClick={() => setExpanded(e => !e)}
-            className="flex items-center gap-2 text-left"
-          >
+          <button onClick={() => setExpanded(e => !e)} className="flex items-center gap-2 text-left">
             <svg className={`w-3.5 h-3.5 text-gray-500 transition-transform ${expanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
             </svg>
@@ -281,6 +570,8 @@ export default function FixedAssetsPage() {
   const [assets, setAssets] = useState<FixedAsset[]>([]);
   const [accounts, setAccounts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [editingAsset, setEditingAsset] = useState<FixedAsset | null>(null);
   const [generating, setGenerating] = useState(false);
   const [genResult, setGenResult] = useState<{ created: number; skipped: number } | null>(null);
@@ -299,23 +590,20 @@ export default function FixedAssetsPage() {
   }
 
   async function handleGenerateDepreciation() {
-    setGenerating(true);
-    setGenResult(null);
+    setGenerating(true); setGenResult(null);
     try {
       const result = await generateDepreciationJEs(clientId, currentMonth());
       setGenResult(result);
-      // Reload assets to update accumulated depreciation
-      const updated = await getFixedAssets(clientId);
-      setAssets(updated);
+      setAssets(await getFixedAssets(clientId));
     } finally {
       setGenerating(false);
     }
   }
 
-  // Summary totals
-  const totalGross = assets.filter(a => a.status !== "disposed").reduce((s, a) => s + a.purchase_price, 0);
-  const totalAccum = assets.filter(a => a.status !== "disposed").reduce((s, a) => s + a.accumulated_depreciation_to_date, 0);
-  const totalNBV = assets.filter(a => a.status !== "disposed").reduce((s, a) => s + a.net_book_value, 0);
+  const active = assets.filter(a => a.status !== "disposed");
+  const totalGross = active.reduce((s, a) => s + a.purchase_price, 0);
+  const totalAccum = active.reduce((s, a) => s + a.accumulated_depreciation_to_date, 0);
+  const totalNBV = active.reduce((s, a) => s + a.net_book_value, 0);
 
   if (loading) {
     return (
@@ -327,16 +615,20 @@ export default function FixedAssetsPage() {
 
   return (
     <div>
+      {showAdd && (
+        <AddPanel clientId={clientId} accounts={accounts}
+          onAdd={(a) => { setAssets(prev => [...prev, a]); setShowAdd(false); }}
+          onClose={() => setShowAdd(false)} />
+      )}
+      {showImport && (
+        <ImportPanel clientId={clientId}
+          onImport={(newAssets) => { setAssets(prev => [...prev, ...newAssets]); setShowImport(false); }}
+          onClose={() => setShowImport(false)} />
+      )}
       {editingAsset && (
-        <EditPanel
-          asset={editingAsset}
-          accounts={accounts}
-          onSave={(updated) => {
-            setAssets(prev => prev.map(a => a.id === updated.id ? updated : a));
-            setEditingAsset(null);
-          }}
-          onClose={() => setEditingAsset(null)}
-        />
+        <EditPanel asset={editingAsset} accounts={accounts}
+          onSave={(updated) => { setAssets(prev => prev.map(a => a.id === updated.id ? updated : a)); setEditingAsset(null); }}
+          onClose={() => setEditingAsset(null)} />
       )}
 
       {/* Header */}
@@ -348,25 +640,31 @@ export default function FixedAssetsPage() {
         <div className="flex gap-2 items-center flex-wrap">
           {genResult && (
             <span className="text-xs text-green-400">
-              {genResult.created === 0
-                ? "No new JEs needed"
-                : `${genResult.created} depreciation JE${genResult.created !== 1 ? "s" : ""} added to Review Queue`}
+              {genResult.created === 0 ? "No new JEs needed" : `${genResult.created} JE${genResult.created !== 1 ? "s" : ""} added to Review Queue`}
             </span>
           )}
-          <button
-            onClick={handleGenerateDepreciation}
+          <button onClick={() => setShowAdd(true)}
+            className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            Add Asset
+          </button>
+          <button onClick={() => setShowImport(true)}
+            className="flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-medium px-3 py-2 rounded-lg transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l4-4m0 0l4 4m-4-4v12" />
+            </svg>
+            Import CSV
+          </button>
+          <button onClick={handleGenerateDepreciation}
             disabled={generating || assets.filter(a => a.status === "active").length === 0}
-            className="flex items-center gap-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
-          >
-            {generating ? (
-              <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Generating…</>
-            ) : `Generate ${currentMonth()} Depreciation JEs`}
+            className="flex items-center gap-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors">
+            {generating ? <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Generating…</> : `Generate ${currentMonth()} Dep. JEs`}
           </button>
           {assets.length > 0 && (
-            <button
-              onClick={() => exportScheduleCsv(assets)}
-              className="flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-medium px-3 py-2 rounded-lg transition-colors"
-            >
+            <button onClick={() => exportScheduleCsv(assets)}
+              className="flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-medium px-3 py-2 rounded-lg transition-colors">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
@@ -399,7 +697,7 @@ export default function FixedAssetsPage() {
         <div className="text-center py-20 text-gray-500">
           <p className="text-4xl mb-3">🏗️</p>
           <p className="text-gray-400 font-medium">No fixed assets yet</p>
-          <p className="text-sm mt-1">Mark a transaction as a Fixed Asset in the Review Queue to get started.</p>
+          <p className="text-sm mt-1">Add an asset manually, import a CSV, or mark a transaction as a Fixed Asset in the Review Queue.</p>
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-x-auto">
@@ -420,13 +718,9 @@ export default function FixedAssetsPage() {
             </thead>
             <tbody>
               {assets.map(asset => (
-                <AssetRow
-                  key={asset.id}
-                  asset={asset}
+                <AssetRow key={asset.id} asset={asset}
                   onEdit={() => setEditingAsset(asset)}
-                  onDispose={() => handleDispose(asset)}
-                  onUpdate={(updated) => setAssets(prev => prev.map(a => a.id === updated.id ? updated : a))}
-                />
+                  onDispose={() => handleDispose(asset)} />
               ))}
             </tbody>
           </table>
