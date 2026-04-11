@@ -238,31 +238,32 @@ def create_asset(
 
 
 def _generate_historical_dep_jes(asset: models.FixedAsset, client_id: int, db: Session):
-    """Generate depreciation JEs for all past periods up to (not including) the current month."""
+    """Generate depreciation JEs for all past periods, marked as already exported (assumed in QBO)."""
     schedule = _compute_schedule(asset)
     today_period = date.today().strftime("%Y-%m")
 
+    existing_months = [
+        f"{t.date.year}-{t.date.month:02d}"
+        for t in db.query(models.Transaction).filter(
+            models.Transaction.fixed_asset_id == asset.id,
+            models.Transaction.source == "depreciation",
+        ).all()
+    ]
+
     for period in schedule:
         if period["period"] >= today_period:
-            break  # don't auto-generate future or current month
-
-        # Avoid duplicates
-        existing_months = [
-            f"{t.date.year}-{t.date.month:02d}"
-            for t in db.query(models.Transaction).filter(
-                models.Transaction.fixed_asset_id == asset.id,
-                models.Transaction.source == "depreciation",
-            ).all()
-        ]
+            break  # don't auto-generate current or future months
         if period["period"] in existing_months:
             continue
-
-        _create_dep_transaction(asset, period, client_id, db)
+        _create_dep_transaction(asset, period, client_id, db, status=models.TransactionStatus.exported)
 
     db.commit()
 
 
-def _create_dep_transaction(asset: models.FixedAsset, period: dict, client_id: int, db: Session):
+def _create_dep_transaction(
+    asset: models.FixedAsset, period: dict, client_id: int, db: Session,
+    status: models.TransactionStatus = models.TransactionStatus.pending,
+):
     y, m = int(period["period"].split("-")[0]), int(period["period"].split("-")[1])
     last_day = calendar.monthrange(y, m)[1]
     tx_date = datetime(y, m, last_day)
@@ -274,7 +275,7 @@ def _create_dep_transaction(asset: models.FixedAsset, period: dict, client_id: i
         description=memo,
         amount=period["depreciation"],
         date=tx_date,
-        status=models.TransactionStatus.pending,
+        status=status,
         source="depreciation",
         fixed_asset_id=asset.id,
         imported_at=datetime.utcnow(),
