@@ -1,8 +1,13 @@
 import calendar
+import io
 from datetime import datetime, date
 from typing import List, Optional
 
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
@@ -190,6 +195,176 @@ def list_assets(
         models.FixedAsset.client_id == client_id,
     ).order_by(models.FixedAsset.purchase_date).all()
     return [_enrich(a) for a in assets]
+
+
+@router.get("/{client_id}/fixed-assets/export")
+def export_schedule(
+    client_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download the depreciation schedule as an XLSX file."""
+    _get_client_or_403(client_id, current_user, db)
+    assets = db.query(models.FixedAsset).filter(
+        models.FixedAsset.client_id == client_id,
+    ).order_by(models.FixedAsset.purchase_date).all()
+    enriched = [_enrich(a) for a in assets]
+
+    wb = openpyxl.Workbook()
+
+    # ── Styles ────────────────────────────────────────────────────────────────
+    hdr_fill   = PatternFill("solid", fgColor="1E3A5F")
+    hdr_font   = Font(bold=True, color="FFFFFF", size=10)
+    total_font = Font(bold=True, size=10)
+    title_font = Font(bold=True, size=12)
+    thin       = Side(style="thin", color="CCCCCC")
+    border     = Border(bottom=thin)
+    center     = Alignment(horizontal="center", vertical="center")
+    right      = Alignment(horizontal="right")
+
+    def money(ws, row, col, val):
+        c = ws.cell(row=row, column=col, value=round(val, 2) if val else 0)
+        c.number_format = '#,##0.00'
+        c.alignment = right
+        return c
+
+    def hdr_cell(ws, row, col, val):
+        c = ws.cell(row=row, column=col, value=val)
+        c.fill = hdr_fill
+        c.font = hdr_font
+        c.alignment = center
+        return c
+
+    # ── Sheet 1: Summary (one row per asset, one column per year) ────────────
+    ws1 = wb.active
+    ws1.title = "Schedule"
+
+    # Collect all calendar years
+    year_set: set[int] = set()
+    for a in enriched:
+        for p in a.schedule:
+            year_set.add(int(p.period[:4]))
+    years = sorted(year_set)
+
+    # Title rows
+    ws1.cell(row=1, column=1, value="Depreciation Schedule").font = title_font
+    ws1.cell(row=2, column=1, value="For Financial Reporting Only.")
+    ws1.merge_cells(start_row=4, start_column=7, end_row=4, end_column=max(7, 6 + len(years)))
+    ws1.cell(row=4, column=7, value="Depreciation for Year …").font = Font(italic=True, size=9)
+    ws1.cell(row=4, column=7).alignment = center
+
+    # Header row
+    headers = ["Asset", "Cost", "Year\nAcquired", "Salvage\nValue", "Life\n(Yrs)", "Method"] + [str(y) for y in years]
+    for col, h in enumerate(headers, 1):
+        c = hdr_cell(ws1, 5, col, h)
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    ws1.row_dimensions[5].height = 30
+
+    year_totals: dict[int, float] = {y: 0.0 for y in years}
+    row = 6
+    for asset in enriched:
+        annual: dict[int, float] = {y: 0.0 for y in years}
+        for p in asset.schedule:
+            y = int(p.period[:4])
+            if y in annual:
+                annual[y] = round(annual[y] + p.depreciation, 2)
+
+        method = "SL" if asset.depreciation_method == "straight_line" else "DDB"
+        life = "Indefinite" if asset.is_indefinite_life else (
+            f"{asset.useful_life_months / 12:.1f}" if asset.useful_life_months else "—"
+        )
+        ws1.cell(row=row, column=1, value=asset.name)
+        money(ws1, row, 2, asset.purchase_price)
+        ws1.cell(row=row, column=3, value=int(asset.purchase_date[:4])).alignment = center
+        if asset.is_indefinite_life:
+            ws1.cell(row=row, column=4, value="—").alignment = center
+        else:
+            money(ws1, row, 4, asset.salvage_value)
+        ws1.cell(row=row, column=5, value=life).alignment = center
+        ws1.cell(row=row, column=6, value=method).alignment = center
+        for ci, y in enumerate(years, 7):
+            dep = annual[y]
+            year_totals[y] = round(year_totals[y] + dep, 2)
+            if dep:
+                money(ws1, row, ci, dep)
+            else:
+                ws1.cell(row=row, column=ci, value=" - ").alignment = center
+        row += 1
+
+    # Blank + total row
+    row += 1
+    ws1.cell(row=row, column=6, value="Total:").font = total_font
+    for ci, y in enumerate(years, 7):
+        c = money(ws1, row, ci, year_totals[y])
+        c.font = total_font
+        c.border = Border(top=thin)
+
+    # Column widths
+    col_widths = [34, 13, 10, 11, 9, 8] + [13] * len(years)
+    for ci, w in enumerate(col_widths, 1):
+        ws1.column_dimensions[get_column_letter(ci)].width = w
+
+    # ── Sheet 2: Monthly Detail ───────────────────────────────────────────────
+    ws2 = wb.create_sheet("Monthly Detail")
+    ws2.cell(row=1, column=1, value="Depreciation Schedule — Monthly Detail").font = title_font
+    row2 = 3
+
+    for asset in enriched:
+        # Asset name header
+        c = ws2.cell(row=row2, column=1, value=asset.name)
+        c.font = Font(bold=True, size=11)
+        row2 += 1
+
+        # Meta rows
+        meta = [
+            ("Category", asset.category, "Method", "Straight-Line" if asset.depreciation_method == "straight_line" else "Double-Declining"),
+            ("Purchase Date", asset.purchase_date, "Cost", asset.purchase_price),
+            ("Useful Life", "Indefinite" if asset.is_indefinite_life else f"{asset.useful_life_months} months",
+             "Salvage", "—" if asset.is_indefinite_life else asset.salvage_value),
+        ]
+        for lbl1, val1, lbl2, val2 in meta:
+            ws2.cell(row=row2, column=1, value=lbl1).font = Font(bold=True)
+            ws2.cell(row=row2, column=2, value=val1)
+            ws2.cell(row=row2, column=4, value=lbl2).font = Font(bold=True)
+            ws2.cell(row=row2, column=5, value=val2)
+            row2 += 1
+        row2 += 1
+
+        if asset.is_indefinite_life:
+            ws2.cell(row=row2, column=1, value="No depreciation — indefinite useful life (Goodwill, ASC 350)")
+            row2 += 1
+        else:
+            det_hdrs = ["Period", "Date", "Depreciation", "Accumulated Dep.", "Net Book Value"]
+            for ci, h in enumerate(det_hdrs, 1):
+                hdr_cell(ws2, row2, ci, h)
+            row2 += 1
+            for p in asset.schedule:
+                ws2.cell(row=row2, column=1, value=p.period)
+                ws2.cell(row=row2, column=2, value=p.date)
+                money(ws2, row2, 3, p.depreciation)
+                money(ws2, row2, 4, p.accumulated_depreciation)
+                money(ws2, row2, 5, p.net_book_value)
+                row2 += 1
+
+        row2 += 2
+
+    ws2.column_dimensions["A"].width = 12
+    ws2.column_dimensions["B"].width = 14
+    ws2.column_dimensions["C"].width = 14
+    ws2.column_dimensions["D"].width = 16
+    ws2.column_dimensions["E"].width = 15
+
+    # ── Stream response ───────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    month = date.today().strftime("%Y-%m")
+    filename = f"depreciation-schedule-{month}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{client_id}/fixed-assets/suggest")
