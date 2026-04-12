@@ -58,6 +58,8 @@ def _migrate_db():
         ("close_checklist_items", "recurrence",     "TEXT DEFAULT 'monthly'"),
         ("transactions",          "source",          "TEXT DEFAULT 'mercury'"),
         ("transactions",          "fixed_asset_id",  "INTEGER"),
+        ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
+        ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:

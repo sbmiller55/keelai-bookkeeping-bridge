@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus } from "@/lib/api";
+import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, ensureQboAccounts } from "@/lib/api";
 
 function UploadField({
   label,
@@ -10,12 +10,14 @@ function UploadField({
   fileName,
   uploading,
   onSelect,
+  onRemove,
 }: {
   label: string;
   accept: string;
   fileName: string | null;
   uploading: boolean;
   onSelect: (file: File) => void;
+  onRemove?: () => void;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
@@ -31,10 +33,18 @@ function UploadField({
             </svg>
             <span className="text-sm text-white truncate">{fileName}</span>
           </div>
-          <button type="button" onClick={() => ref.current?.click()}
-            className="text-xs text-indigo-400 hover:text-indigo-300 shrink-0 ml-3 transition-colors">
-            Replace
-          </button>
+          <div className="flex items-center gap-3 shrink-0 ml-3">
+            <button type="button" onClick={() => ref.current?.click()}
+              className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+              Replace
+            </button>
+            {onRemove && (
+              <button type="button" onClick={onRemove}
+                className="text-xs text-red-500 hover:text-red-400 transition-colors">
+                Remove
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <button type="button" onClick={() => ref.current?.click()} disabled={uploading}
@@ -67,6 +77,10 @@ export default function ClientSettingsPage() {
   const [chartName, setChartName] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [qboSyncing, setQboSyncing] = useState(false);
+  const [qboSyncResult, setQboSyncResult] = useState<string | null>(null);
+  const [qboEnsuring, setQboEnsuring] = useState(false);
+  const [qboEnsureResult, setQboEnsureResult] = useState<string | null>(null);
 
   const [qboStatus, setQboStatus] = useState<QboStatus | null>(null);
   const [qboConnecting, setQboConnecting] = useState(false);
@@ -146,6 +160,42 @@ export default function ClientSettingsPage() {
     }
   }
 
+  async function handleRemoveChart() {
+    await updateClient(clientId, { chart_of_accounts_path: null });
+    setChartName(null);
+    setQboSyncResult(null);
+  }
+
+  async function handleQboSync() {
+    setQboSyncing(true);
+    setQboSyncResult(null);
+    try {
+      const accounts = await getQboAccounts(clientId);
+      setQboSyncResult(`${accounts.length} accounts synced from QBO`);
+    } catch (err: unknown) {
+      setQboSyncResult(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setQboSyncing(false);
+    }
+  }
+
+  async function handleEnsureAccounts() {
+    setQboEnsuring(true);
+    setQboEnsureResult(null);
+    try {
+      const result = await ensureQboAccounts(clientId);
+      const msgs = [];
+      if (result.created.length > 0) msgs.push(`Created: ${result.created.join(", ")}`);
+      if (result.already_existed.length > 0) msgs.push(`Already existed: ${result.already_existed.length}`);
+      if (result.errors.length > 0) msgs.push(`Errors: ${result.errors.join("; ")}`);
+      setQboEnsureResult(msgs.join(" · ") || "Done");
+    } catch (err: unknown) {
+      setQboEnsureResult(err instanceof Error ? err.message : "Failed");
+    } finally {
+      setQboEnsuring(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -199,6 +249,20 @@ export default function ClientSettingsPage() {
               <span className="text-sm text-green-400 font-medium">Connected</span>
               <span className="text-xs text-gray-500 ml-1">Realm: {qboStatus.realm_id}</span>
             </div>
+            <div>
+              <button
+                onClick={handleEnsureAccounts}
+                disabled={qboEnsuring}
+                className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {qboEnsuring
+                  ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Setting up…</>
+                  : "Set up depreciation & amortization accounts in QBO"}
+              </button>
+              {qboEnsureResult && (
+                <p className="text-xs text-gray-400 mt-1.5">{qboEnsureResult}</p>
+              )}
+            </div>
             <button
               onClick={handleQboDisconnect}
               disabled={qboDisconnecting}
@@ -233,13 +297,37 @@ export default function ClientSettingsPage() {
         {uploadError && <p className="text-red-400 text-xs mb-3">{uploadError}</p>}
 
         <div className="space-y-4">
-          <UploadField
-            label="Chart of Accounts"
-            accept=".csv,.xlsx,.xls,.pdf,.txt"
-            fileName={chartName}
-            uploading={chartUploading}
-            onSelect={(f) => handleUpload(f, "chart_of_accounts_path")}
-          />
+          <div>
+            <UploadField
+              label="Chart of Accounts"
+              accept=".csv,.xlsx,.xls,.pdf,.txt"
+              fileName={chartName}
+              uploading={chartUploading}
+              onSelect={(f) => handleUpload(f, "chart_of_accounts_path")}
+              onRemove={chartName ? handleRemoveChart : undefined}
+            />
+            {qboStatus?.connected && (
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  onClick={handleQboSync}
+                  disabled={qboSyncing}
+                  className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {qboSyncing
+                    ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Syncing…</>
+                    : <>
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Sync accounts from QBO
+                      </>}
+                </button>
+                {qboSyncResult && (
+                  <span className="text-xs text-green-400">{qboSyncResult}</span>
+                )}
+              </div>
+            )}
+          </div>
           <UploadField
             label="Policy Document"
             accept=".pdf,.docx,.doc,.txt,.md"

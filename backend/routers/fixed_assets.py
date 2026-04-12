@@ -15,7 +15,7 @@ router = APIRouter(prefix="/clients", tags=["fixed_assets"])
 
 # ── Category keyword → (category, useful_life_months, method) ─────────────────
 
-_CATEGORY_RULES = [
+_TANGIBLE_RULES = [
     (["laptop", "macbook", "macmini", "imac", "computer", "server", "workstation",
       "monitor", "display", "printer", "scanner", "projector", "hardware", "ipad",
       "tablet", "camera"], "Equipment", 60, "straight_line"),
@@ -24,13 +24,23 @@ _CATEGORY_RULES = [
     (["vehicle", "car", "truck", "van", "automobile"], "Vehicles", 60, "straight_line"),
     (["renovation", "improvement", "remodel", "construction", "build-out", "buildout",
       "leasehold"], "Leasehold Improvements", 120, "straight_line"),
-    (["software", "license", "saas", "subscription", "domain"], "Equipment", 36, "straight_line"),
+]
+
+_INTANGIBLE_RULES = [
+    (["goodwill"], "Goodwill", 0, "straight_line"),                                   # indefinite life
+    (["patent"], "Patents", 240, "straight_line"),                                    # 20 years
+    (["trademark", "trade mark", "trade-mark"], "Trademarks", 120, "straight_line"), # 10 years
+    (["customer list", "customer relationship"], "Customer Lists", 60, "straight_line"),
+    (["non-compete", "noncompete", "non compete"], "Non-Compete Agreements", 36, "straight_line"),
+    (["software", "saas"], "Capitalized Software", 36, "straight_line"),
+    (["license", "licence", "domain"], "Licenses", 36, "straight_line"),
 ]
 
 
 def _suggest(description: str) -> dict:
     desc_lower = description.lower()
-    for keywords, category, useful_life, method in _CATEGORY_RULES:
+
+    for keywords, category, useful_life, method in _INTANGIBLE_RULES:
         if any(kw in desc_lower for kw in keywords):
             return {
                 "name": description,
@@ -38,13 +48,30 @@ def _suggest(description: str) -> dict:
                 "useful_life_months": useful_life,
                 "depreciation_method": method,
                 "salvage_value": 0.0,
+                "asset_type": "intangible",
+                "is_indefinite_life": category == "Goodwill",
             }
+
+    for keywords, category, useful_life, method in _TANGIBLE_RULES:
+        if any(kw in desc_lower for kw in keywords):
+            return {
+                "name": description,
+                "category": category,
+                "useful_life_months": useful_life,
+                "depreciation_method": method,
+                "salvage_value": 0.0,
+                "asset_type": "tangible",
+                "is_indefinite_life": False,
+            }
+
     return {
         "name": description,
         "category": "Equipment",
         "useful_life_months": 60,
         "depreciation_method": "straight_line",
         "salvage_value": 0.0,
+        "asset_type": "tangible",
+        "is_indefinite_life": False,
     }
 
 
@@ -60,6 +87,9 @@ def _compute_schedule(asset: models.FixedAsset) -> list[dict]:
         start_year, start_month = purchase.year + 1, 1
     else:
         start_year, start_month = purchase.year, purchase.month + 1
+
+    if getattr(asset, "is_indefinite_life", False) or asset.useful_life_months <= 0:
+        return []
 
     depreciable = asset.purchase_price - asset.salvage_value
     nbv = float(asset.purchase_price)
@@ -165,21 +195,27 @@ def list_assets(
 @router.get("/{client_id}/fixed-assets/suggest")
 def suggest_asset(
     client_id: int,
-    transaction_id: int = Query(...),
+    transaction_id: Optional[int] = Query(None),
+    name: Optional[str] = Query(None),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _get_client_or_403(client_id, current_user, db)
-    tx = db.query(models.Transaction).filter(
-        models.Transaction.id == transaction_id,
-        models.Transaction.client_id == client_id,
-    ).first()
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-    suggestion = _suggest(tx.description)
-    suggestion["purchase_date"] = tx.date.strftime("%Y-%m-%d")
-    suggestion["purchase_price"] = abs(tx.amount)
-    return suggestion
+    if transaction_id is not None:
+        tx = db.query(models.Transaction).filter(
+            models.Transaction.id == transaction_id,
+            models.Transaction.client_id == client_id,
+        ).first()
+        if not tx:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        suggestion = _suggest(tx.description)
+        suggestion["purchase_date"] = tx.date.strftime("%Y-%m-%d")
+        suggestion["purchase_price"] = abs(tx.amount)
+        return suggestion
+    elif name:
+        return _suggest(name)
+    else:
+        raise HTTPException(status_code=422, detail="Provide transaction_id or name")
 
 
 @router.post("/{client_id}/fixed-assets", response_model=schemas.FixedAssetRead, status_code=201)
@@ -191,6 +227,13 @@ def create_asset(
 ):
     _get_client_or_403(client_id, current_user, db)
 
+    # Enforce GAAP rules for intangibles
+    dep_method = payload.depreciation_method
+    salvage = payload.salvage_value
+    if payload.asset_type == "intangible":
+        dep_method = "straight_line"
+        salvage = 0.0
+
     asset = models.FixedAsset(
         client_id=client_id,
         transaction_id=payload.transaction_id,
@@ -198,9 +241,11 @@ def create_asset(
         category=payload.category,
         purchase_date=payload.purchase_date,
         purchase_price=payload.purchase_price,
-        salvage_value=payload.salvage_value,
+        salvage_value=salvage,
         useful_life_months=payload.useful_life_months,
-        depreciation_method=payload.depreciation_method,
+        depreciation_method=dep_method,
+        asset_type=payload.asset_type,
+        is_indefinite_life=payload.is_indefinite_life,
         qbo_asset_account=payload.qbo_asset_account,
         qbo_accum_dep_account=payload.qbo_accum_dep_account,
         qbo_dep_expense_account=payload.qbo_dep_expense_account,
@@ -231,8 +276,9 @@ def create_asset(
     db.commit()
     db.refresh(asset)
 
-    # Generate historical depreciation JEs (all periods up to and including this month)
-    _generate_historical_dep_jes(asset, client_id, db)
+    # Generate historical depreciation/amortization JEs (skip indefinite-life assets like Goodwill)
+    if not payload.is_indefinite_life:
+        _generate_historical_dep_jes(asset, client_id, db)
 
     return _enrich(asset)
 
@@ -268,7 +314,8 @@ def _create_dep_transaction(
     last_day = calendar.monthrange(y, m)[1]
     tx_date = datetime(y, m, last_day)
     month_label = tx_date.strftime("%B %Y")
-    memo = f"Depreciation - {asset.name} - {month_label}"
+    term = "Amortization" if getattr(asset, "asset_type", "tangible") == "intangible" else "Depreciation"
+    memo = f"{term} - {asset.name} - {month_label}"
 
     tx = models.Transaction(
         client_id=client_id,
@@ -286,8 +333,8 @@ def _create_dep_transaction(
     je = models.JournalEntry(
         transaction_id=tx.id,
         je_number=next_je_number(db),
-        debit_account=asset.qbo_dep_expense_account or "Depreciation Expense",
-        credit_account=asset.qbo_accum_dep_account or "Accumulated Depreciation",
+        debit_account=asset.qbo_dep_expense_account or f"{term} Expense",
+        credit_account=asset.qbo_accum_dep_account or f"Accumulated {term}",
         amount=period["depreciation"],
         je_date=tx_date,
         memo=memo,

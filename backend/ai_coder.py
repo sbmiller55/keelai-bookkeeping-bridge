@@ -74,6 +74,33 @@ def _read_file_safe(path: Optional[str]) -> Optional[str]:
         return None
 
 
+def _get_qbo_coa(client_obj) -> Optional[str]:
+    """Fetch live COA from QBO when no file is uploaded. Returns newline-joined account names or None."""
+    try:
+        from qbo_client import QBOClient
+        from datetime import datetime as _dt
+        if not getattr(client_obj, "qbo_access_token", None) or not getattr(client_obj, "qbo_realm_id", None):
+            return None
+        qbo = QBOClient(
+            access_token=client_obj.qbo_access_token,
+            refresh_token=client_obj.qbo_refresh_token or "",
+            realm_id=client_obj.qbo_realm_id,
+            token_expires_at=client_obj.qbo_token_expires_at or _dt.utcnow(),
+        )
+        names = qbo.get_coa_names()
+        return "\n".join(names) if names else None
+    except Exception:
+        return None
+
+
+def _resolve_chart(client_obj) -> Optional[str]:
+    """Return COA text: uploaded file first, fall back to live QBO accounts."""
+    chart = _resolve_chart(client_obj)
+    if not chart:
+        chart = _get_qbo_coa(client_obj)
+    return chart
+
+
 # Parent/header accounts that must never appear in journal entries
 _PARENT_ACCOUNTS = {
     "Cash",
@@ -418,7 +445,7 @@ def code_outgoing_payment_with_invoice(transaction, invoice_text: str, client_ob
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
-    chart = _read_file_safe(client_obj.chart_of_accounts_path)
+    chart = _resolve_chart(client_obj)
     policy = _read_file_safe(client_obj.policy_path)
 
     is_pending = getattr(transaction, "mercury_status", None) == "pending"
@@ -587,7 +614,7 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
     if not transactions:
         return []
 
-    chart = _read_file_safe(client_obj.chart_of_accounts_path)
+    chart = _resolve_chart(client_obj)
     policy = _read_file_safe(client_obj.policy_path)
     system = _build_system(chart, policy)
 

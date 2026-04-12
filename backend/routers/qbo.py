@@ -140,6 +140,41 @@ def disconnect(
     return {"ok": True}
 
 
+@router.post("/ensure-accounts")
+def ensure_standard_accounts(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Ensure the standard depreciation/amortization accounts exist in QBO.
+    Creates any that are missing; returns a summary of what was created.
+    """
+    client = _get_client(client_id, current_user, db)
+    qbo_c  = _get_qbo_client(client)
+
+    STANDARD_ACCOUNTS = [
+        ("Depreciation Expense",    "Expense",     "DepreciationAmortization"),
+        ("Amortization Expense",    "Expense",     "DepreciationAmortization"),
+        ("Accumulated Depreciation","OtherAsset",  "AccumulatedAmortization"),
+        ("Accumulated Amortization","OtherAsset",  "AccumulatedAmortization"),
+    ]
+
+    created = []
+    already_existed = []
+    errors = []
+
+    for name, acct_type, sub_type in STANDARD_ACCOUNTS:
+        try:
+            _, was_created = qbo_c.get_or_create_account(name, acct_type, sub_type)
+            (created if was_created else already_existed).append(name)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    _persist_token_refresh(client, qbo_c, db)
+    return {"created": created, "already_existed": already_existed, "errors": errors}
+
+
 @router.get("/accounts")
 def get_accounts(
     client_id: int,

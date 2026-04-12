@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import {
   getTransactionsWithEntries,
   getChartOfAccounts,
+  getQboAccounts,
   updateTransactionStatus,
   updateJournalEntry,
   createJournalEntry,
@@ -53,11 +54,13 @@ function AccountSelect({
   onChange,
   accounts,
   placeholder = "Select account…",
+  className,
 }: {
   value: string;
   onChange: (v: string) => void;
   accounts: string[];
   placeholder?: string;
+  className?: string;
 }) {
   const [inputValue, setInputValue] = useState(value);
   const [open, setOpen] = useState(false);
@@ -151,7 +154,7 @@ function AccountSelect({
             }
           }, 150);
         }}
-        className="w-full bg-transparent border border-transparent hover:border-gray-600 focus:border-indigo-500 focus:outline-none text-white rounded px-2 py-1 text-xs placeholder-gray-500"
+        className={className ?? "w-full bg-transparent border border-transparent hover:border-gray-600 focus:border-indigo-500 focus:outline-none text-white rounded px-2 py-1 text-xs placeholder-gray-500"}
       />
 
       {open && filtered.length > 0 && (
@@ -200,7 +203,14 @@ function ConfBadge({ score, reasoning }: { score: number | null; reasoning?: str
 
 // ── Fixed Asset Panel ─────────────────────────────────────────────────────────
 
-const FA_CATEGORIES = ["Equipment", "Furniture", "Leasehold Improvements", "Vehicles", "Other"];
+const FA_TANGIBLE_CATS = ["Equipment", "Furniture", "Leasehold Improvements", "Vehicles", "Other"];
+const FA_INTANGIBLE_CATS = ["Capitalized Software", "Licenses", "Patents", "Trademarks", "Customer Lists", "Non-Compete Agreements", "Goodwill", "Other Intangibles"];
+const FA_INTANGIBLE_SET = new Set(FA_INTANGIBLE_CATS);
+const FA_INTANGIBLE_LIFE: Record<string, number> = {
+  "Capitalized Software": 36, "Licenses": 36, "Patents": 240,
+  "Trademarks": 120, "Customer Lists": 60, "Non-Compete Agreements": 36,
+  "Other Intangibles": 60, "Goodwill": 0,
+};
 const FA_DEP_METHODS = [
   { value: "straight_line", label: "Straight-Line" },
   { value: "double_declining", label: "Double-Declining Balance" },
@@ -231,6 +241,23 @@ function FixedAssetPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isIntangible = FA_INTANGIBLE_SET.has(category);
+  const isGoodwill = category === "Goodwill";
+  const term = isIntangible ? "Amortization" : "Depreciation";
+
+  function handleCategoryChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const cat = e.target.value;
+    const intangible = FA_INTANGIBLE_SET.has(cat);
+    setCategory(cat);
+    if (intangible) {
+      setMethod("straight_line");
+      setSalvageValue("0");
+      setUsefulLife(String(FA_INTANGIBLE_LIFE[cat] ?? 60));
+    } else if (usefulLife === "0") {
+      setUsefulLife("60");
+    }
+  }
+
   useEffect(() => {
     suggestFixedAsset(clientId, tx.id)
       .then((s) => {
@@ -258,9 +285,11 @@ function FixedAssetPanel({
         category,
         purchase_date: purchaseDate,
         purchase_price: parseFloat(purchasePrice),
-        salvage_value: parseFloat(salvageValue) || 0,
-        useful_life_months: parseInt(usefulLife),
-        depreciation_method: method,
+        salvage_value: isIntangible ? 0 : (parseFloat(salvageValue) || 0),
+        useful_life_months: isGoodwill ? 0 : parseInt(usefulLife),
+        depreciation_method: isIntangible ? "straight_line" : method,
+        asset_type: isIntangible ? "intangible" : "tangible",
+        is_indefinite_life: isGoodwill,
         qbo_asset_account: assetAcct || undefined,
         qbo_accum_dep_account: accumAcct || undefined,
         qbo_dep_expense_account: expAcct || undefined,
@@ -298,6 +327,14 @@ function FixedAssetPanel({
               </div>
             )}
 
+            {isIntangible && (
+              <div className="bg-violet-950/40 border border-violet-800/50 rounded-lg px-3 py-2 text-xs text-violet-300">
+                {isGoodwill
+                  ? "Goodwill has an indefinite useful life — no amortization is recorded. Annual impairment testing required."
+                  : `Intangible asset — straight-line amortization only, no salvage value (GAAP ASC 350).`}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
                 <label className="block text-xs text-gray-500 mb-1">Asset Name</label>
@@ -305,8 +342,13 @@ function FixedAssetPanel({
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Category</label>
-                <select value={category} onChange={e => setCategory(e.target.value)} className={inputCls}>
-                  {FA_CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                <select value={category} onChange={handleCategoryChange} className={inputCls}>
+                  <optgroup label="Tangible Assets">
+                    {FA_TANGIBLE_CATS.map(c => <option key={c}>{c}</option>)}
+                  </optgroup>
+                  <optgroup label="Intangible Assets">
+                    {FA_INTANGIBLE_CATS.map(c => <option key={c}>{c}</option>)}
+                  </optgroup>
                 </select>
               </div>
               <div>
@@ -317,47 +359,52 @@ function FixedAssetPanel({
                 <label className="block text-xs text-gray-500 mb-1">Purchase Price ($)</label>
                 <input type="number" step="0.01" value={purchasePrice} onChange={e => setPurchasePrice(e.target.value)} className={inputCls} />
               </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Salvage Value ($)</label>
-                <input type="number" step="0.01" value={salvageValue} onChange={e => setSalvageValue(e.target.value)} className={inputCls} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Useful Life (months)</label>
-                <input type="number" min="1" value={usefulLife} onChange={e => setUsefulLife(e.target.value)} className={inputCls} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Depreciation Method</label>
-                <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls}>
-                  {FA_DEP_METHODS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
-                </select>
-              </div>
+              {!isIntangible && (
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Salvage Value ($)</label>
+                  <input type="number" step="0.01" value={salvageValue} onChange={e => setSalvageValue(e.target.value)} className={inputCls} />
+                </div>
+              )}
+              {!isGoodwill && (
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Useful Life (months)</label>
+                  <input type="number" min="1" value={usefulLife} onChange={e => setUsefulLife(e.target.value)} className={inputCls} />
+                </div>
+              )}
+              {!isIntangible && (
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Depreciation Method</label>
+                  <select value={method} onChange={e => setMethod(e.target.value)} className={inputCls}>
+                    {FA_DEP_METHODS.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                  </select>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 pt-1 border-t border-gray-800">
               <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">QBO Accounts</p>
               {[
                 { label: "Asset Account", value: assetAcct, set: setAssetAcct },
-                { label: "Accumulated Depreciation Account", value: accumAcct, set: setAccumAcct },
-                { label: "Depreciation Expense Account", value: expAcct, set: setExpAcct },
+                { label: `Accumulated ${term} Account`, value: accumAcct, set: setAccumAcct },
+                { label: `${term} Expense Account`, value: expAcct, set: setExpAcct },
               ].map(({ label, value, set }) => (
                 <div key={label}>
                   <label className="block text-xs text-gray-500 mb-1">{label}</label>
-                  <input
+                  <AccountSelect
                     value={value}
-                    onChange={e => set(e.target.value)}
-                    list={`fa-accts-${label}`}
-                    className={inputCls}
+                    onChange={set}
+                    accounts={accounts}
                     placeholder="Type to search COA…"
+                    className={inputCls}
                   />
-                  <datalist id={`fa-accts-${label}`}>
-                    {accounts.map(a => <option key={a} value={a} />)}
-                  </datalist>
                 </div>
               ))}
             </div>
 
             <p className="text-xs text-gray-500 bg-gray-800 rounded-lg px-3 py-2">
-              This will recode the transaction JE to debit the asset account, approve the transaction, and generate all historical depreciation journal entries for review.
+              {isGoodwill
+                ? "This will recode the transaction JE to debit the Goodwill asset account and approve the transaction. No amortization JEs will be generated."
+                : `This will recode the transaction JE to debit the asset account, approve the transaction, and generate all historical ${term.toLowerCase()} journal entries.`}
             </p>
 
             {error && (
@@ -367,10 +414,10 @@ function FixedAssetPanel({
             <div className="flex gap-2 pt-1">
               <button
                 onClick={handleConfirm}
-                disabled={saving || !name || !usefulLife}
+                disabled={saving || !name || (!isGoodwill && !usefulLife)}
                 className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium py-2.5 rounded-lg transition-colors"
               >
-                {saving ? "Creating Asset…" : "Confirm — Create Fixed Asset"}
+                {saving ? "Creating Asset…" : `Confirm — Create ${isIntangible ? "Intangible" : "Fixed"} Asset`}
               </button>
               <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
                 Cancel
@@ -853,7 +900,10 @@ export default function ReviewQueuePage() {
 
   useEffect(() => {
     reload();
-    getChartOfAccounts(clientId).then(setAccounts).catch(console.error);
+    Promise.all([
+      getChartOfAccounts(clientId).catch(() => [] as string[]),
+      getQboAccounts(clientId).catch(() => [] as string[]),
+    ]).then(([coa, qbo]) => setAccounts(Array.from(new Set([...coa, ...qbo])).sort()));
   }, [clientId, reload]);
 
   useEffect(() => {

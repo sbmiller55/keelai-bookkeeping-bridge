@@ -258,5 +258,7 @@ class FixedAsset(Base):
     qbo_accum_dep_account = Column(String, nullable=True)
     qbo_dep_expense_account = Column(String, nullable=True)
     status = Column(String, default="active", nullable=False)  # active, fully_depreciated, disposed
+    asset_type = Column(String, default="tangible", nullable=True)  # "tangible" | "intangible"
+    is_indefinite_life = Column(Boolean, default=False, nullable=True)  # True for Goodwill
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

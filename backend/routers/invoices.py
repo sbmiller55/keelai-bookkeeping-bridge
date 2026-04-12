@@ -131,7 +131,7 @@ async def upload_invoice(
     if len(file_bytes) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 20 MB)")
 
-    chart = ai_coder._read_file_safe(client_obj.chart_of_accounts_path)
+    chart = ai_coder._resolve_chart(client_obj)
     policy = ai_coder._read_file_safe(client_obj.policy_path)
 
     try:

@@ -295,8 +295,10 @@ class FixedAssetCreate(BaseModel):
     purchase_date: str  # "YYYY-MM-DD"
     purchase_price: float
     salvage_value: float = 0.0
-    useful_life_months: int
+    useful_life_months: int = 0  # 0 = indefinite (Goodwill)
     depreciation_method: str = "straight_line"
+    asset_type: str = "tangible"  # "tangible" | "intangible"
+    is_indefinite_life: bool = False
     qbo_asset_account: Optional[str] = None
     qbo_accum_dep_account: Optional[str] = None
     qbo_dep_expense_account: Optional[str] = None
@@ -311,6 +313,8 @@ class FixedAssetUpdate(BaseModel):
     salvage_value: Optional[float] = None
     useful_life_months: Optional[int] = None
     depreciation_method: Optional[str] = None
+    asset_type: Optional[str] = None
+    is_indefinite_life: Optional[bool] = None
     qbo_asset_account: Optional[str] = None
     qbo_accum_dep_account: Optional[str] = None
     qbo_dep_expense_account: Optional[str] = None
@@ -337,6 +341,8 @@ class FixedAssetRead(BaseModel):
     salvage_value: float
     useful_life_months: int
     depreciation_method: str
+    asset_type: str = "tangible"
+    is_indefinite_life: bool = False
     qbo_asset_account: Optional[str] = None
     qbo_accum_dep_account: Optional[str] = None
     qbo_dep_expense_account: Optional[str] = None

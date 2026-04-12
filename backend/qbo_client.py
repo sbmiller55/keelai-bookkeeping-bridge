@@ -263,13 +263,22 @@ class QBOClient:
         return m
 
     def get_coa_names(self) -> list[str]:
-        """Return sorted list of all active account FullyQualifiedNames."""
+        """
+        Return sorted, deduplicated list of account names.
+        Includes both FullyQualifiedName (e.g. "Expenses:Amortization Expense")
+        AND the short Name (e.g. "Amortization Expense") so users can find
+        accounts by either form.
+        """
         accounts = self.get_active_accounts()
-        names = []
+        seen: set[str] = set()
+        names: list[str] = []
         for acc in accounts:
-            fqn  = acc.get("FullyQualifiedName", "")
-            name = acc.get("Name", "")
-            names.append(fqn or name)
+            fqn  = acc.get("FullyQualifiedName", "").strip()
+            name = acc.get("Name", "").strip()
+            for n in (fqn, name):
+                if n and n not in seen:
+                    seen.add(n)
+                    names.append(n)
         return sorted(names)
 
     # ── Vendors ───────────────────────────────────────────────────────────────
@@ -294,6 +303,29 @@ class QBOClient:
         if vendor_id:
             return vendor_id, False
         return self.create_vendor(display_name), True
+
+    def get_or_create_account(
+        self,
+        name: str,
+        account_type: str,
+        account_sub_type: str,
+        parent_fqn: str = "",
+    ) -> tuple[str, bool]:
+        """
+        Return (account_id, was_created).
+        Looks up by Name; creates in QBO if not found.
+        """
+        accounts = self.get_active_accounts()
+        for acc in accounts:
+            if acc.get("Name", "") == name or acc.get("FullyQualifiedName", "") == name:
+                return acc["Id"], False
+        payload: dict = {
+            "Name": name,
+            "AccountType": account_type,
+            "AccountSubType": account_sub_type,
+        }
+        result = self._post("/account?minorversion=65", payload)
+        return result["Account"]["Id"], True
 
     def delete_object(self, object_type: str, qbo_id: str):
         """Delete a Purchase or JournalEntry from QBO by fetching its SyncToken first."""

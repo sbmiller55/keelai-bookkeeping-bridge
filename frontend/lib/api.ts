@@ -709,6 +709,10 @@ export function getQboAccounts(clientId: number): Promise<string[]> {
     .then((r) => r.accounts);
 }
 
+export function ensureQboAccounts(clientId: number): Promise<{ created: string[]; already_existed: string[]; errors: string[] }> {
+  return apiFetch(`/clients/${clientId}/qbo/ensure-accounts`, { method: "POST" });
+}
+
 export function syncToQbo(clientId: number, markExported = true, force = false): Promise<QboSyncResult> {
   return apiFetch<QboSyncResult>(
     `/clients/${clientId}/qbo/sync?mark_exported=${markExported}&force=${force}`,
@@ -737,6 +741,8 @@ export interface FixedAsset {
   salvage_value: number;
   useful_life_months: number;
   depreciation_method: string;
+  asset_type: string;          // "tangible" | "intangible"
+  is_indefinite_life: boolean; // true for Goodwill
   qbo_asset_account: string | null;
   qbo_accum_dep_account: string | null;
   qbo_dep_expense_account: string | null;
@@ -759,6 +765,8 @@ export interface FixedAssetCreate {
   salvage_value?: number;
   useful_life_months: number;
   depreciation_method?: string;
+  asset_type?: string;
+  is_indefinite_life?: boolean;
   qbo_asset_account?: string;
   qbo_accum_dep_account?: string;
   qbo_dep_expense_account?: string;
@@ -773,6 +781,8 @@ export interface FixedAssetSuggestion {
   salvage_value: number;
   useful_life_months: number;
   depreciation_method: string;
+  asset_type: string;
+  is_indefinite_life: boolean;
 }
 
 export function getFixedAssets(clientId: number): Promise<FixedAsset[]> {
@@ -785,6 +795,10 @@ export function getFixedAsset(clientId: number, assetId: number): Promise<FixedA
 
 export function suggestFixedAsset(clientId: number, transactionId: number): Promise<FixedAssetSuggestion> {
   return apiFetch<FixedAssetSuggestion>(`/clients/${clientId}/fixed-assets/suggest?transaction_id=${transactionId}`);
+}
+
+export function suggestFixedAssetByName(clientId: number, name: string): Promise<FixedAssetSuggestion> {
+  return apiFetch<FixedAssetSuggestion>(`/clients/${clientId}/fixed-assets/suggest?name=${encodeURIComponent(name)}`);
 }
 
 export function createFixedAsset(clientId: number, data: FixedAssetCreate): Promise<FixedAsset> {
