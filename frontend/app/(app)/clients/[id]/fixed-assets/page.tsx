@@ -51,7 +51,7 @@ function r2(n: number) { return Math.round(n * 100) / 100; }
 
 async function exportScheduleXlsx(clientId: number) {
   // Download via backend — avoids client-side xlsx bundling issues
-  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const token = typeof window !== "undefined" ? localStorage.getItem("bb_token") : null;
   const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const url = `${BASE_URL}/clients/${clientId}/fixed-assets/export`;
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
