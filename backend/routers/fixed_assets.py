@@ -304,55 +304,71 @@ def export_schedule(
     for ci, w in enumerate(col_widths, 1):
         ws1.column_dimensions[get_column_letter(ci)].width = w
 
-    # ── Sheet 2: Monthly Detail ───────────────────────────────────────────────
+    # ── Sheet 2: Monthly Detail (pivot — one row per asset, months as columns) ──
     ws2 = wb.create_sheet("Monthly Detail")
     ws2.cell(row=1, column=1, value="Depreciation Schedule — Monthly Detail").font = title_font
-    row2 = 3
+    ws2.cell(row=2, column=1, value="For Financial Reporting Only.")
 
+    # Collect all months across all assets
+    month_set: set[str] = set()
+    for a in enriched:
+        for p in a.schedule:
+            month_set.add(p.period)
+    months = sorted(month_set)
+
+    ws2.merge_cells(start_row=4, start_column=7, end_row=4, end_column=max(7, 6 + len(months)))
+    ws2.cell(row=4, column=7, value="Depreciation for Month …").font = Font(italic=True, size=9)
+    ws2.cell(row=4, column=7).alignment = center
+
+    # Header row
+    m_hdrs = ["Asset", "Cost", "Year\nAcquired", "Salvage\nValue", "Life\n(Yrs)", "Method"] + months
+    for col, h in enumerate(m_hdrs, 1):
+        c = hdr_cell(ws2, 5, col, h)
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    ws2.row_dimensions[5].height = 30
+
+    month_totals: dict[str, float] = {m: 0.0 for m in months}
+    row2 = 6
     for asset in enriched:
-        # Asset name header
-        c = ws2.cell(row=row2, column=1, value=asset.name)
-        c.font = Font(bold=True, size=11)
-        row2 += 1
+        monthly: dict[str, float] = {m: 0.0 for m in months}
+        for p in asset.schedule:
+            if p.period in monthly:
+                monthly[p.period] = p.depreciation
 
-        # Meta rows
-        meta = [
-            ("Category", asset.category, "Method", "Straight-Line" if asset.depreciation_method == "straight_line" else "Double-Declining"),
-            ("Purchase Date", asset.purchase_date, "Cost", asset.purchase_price),
-            ("Useful Life", "Indefinite" if asset.is_indefinite_life else f"{asset.useful_life_months} months",
-             "Salvage", "—" if asset.is_indefinite_life else asset.salvage_value),
-        ]
-        for lbl1, val1, lbl2, val2 in meta:
-            ws2.cell(row=row2, column=1, value=lbl1).font = Font(bold=True)
-            ws2.cell(row=row2, column=2, value=val1)
-            ws2.cell(row=row2, column=4, value=lbl2).font = Font(bold=True)
-            ws2.cell(row=row2, column=5, value=val2)
-            row2 += 1
-        row2 += 1
-
+        method = "SL" if asset.depreciation_method == "straight_line" else "DDB"
+        life = "Indefinite" if asset.is_indefinite_life else (
+            f"{asset.useful_life_months / 12:.1f}" if asset.useful_life_months else "—"
+        )
+        ws2.cell(row=row2, column=1, value=asset.name)
+        money(ws2, row2, 2, asset.purchase_price)
+        ws2.cell(row=row2, column=3, value=int(asset.purchase_date[:4])).alignment = center
         if asset.is_indefinite_life:
-            ws2.cell(row=row2, column=1, value="No depreciation — indefinite useful life (Goodwill, ASC 350)")
-            row2 += 1
+            ws2.cell(row=row2, column=4, value="—").alignment = center
         else:
-            det_hdrs = ["Period", "Date", "Depreciation", "Accumulated Dep.", "Net Book Value"]
-            for ci, h in enumerate(det_hdrs, 1):
-                hdr_cell(ws2, row2, ci, h)
-            row2 += 1
-            for p in asset.schedule:
-                ws2.cell(row=row2, column=1, value=p.period)
-                ws2.cell(row=row2, column=2, value=p.date)
-                money(ws2, row2, 3, p.depreciation)
-                money(ws2, row2, 4, p.accumulated_depreciation)
-                money(ws2, row2, 5, p.net_book_value)
-                row2 += 1
+            money(ws2, row2, 4, asset.salvage_value)
+        ws2.cell(row=row2, column=5, value=life).alignment = center
+        ws2.cell(row=row2, column=6, value=method).alignment = center
+        for ci, m in enumerate(months, 7):
+            dep = monthly[m]
+            month_totals[m] = round(month_totals[m] + dep, 2)
+            if dep:
+                money(ws2, row2, ci, dep)
+            else:
+                ws2.cell(row=row2, column=ci, value=" - ").alignment = center
+        row2 += 1
 
-        row2 += 2
+    # Total row
+    row2 += 1
+    ws2.cell(row=row2, column=6, value="Total:").font = total_font
+    for ci, m in enumerate(months, 7):
+        c = money(ws2, row2, ci, month_totals[m])
+        c.font = total_font
+        c.border = Border(top=thin)
 
-    ws2.column_dimensions["A"].width = 12
-    ws2.column_dimensions["B"].width = 14
-    ws2.column_dimensions["C"].width = 14
-    ws2.column_dimensions["D"].width = 16
-    ws2.column_dimensions["E"].width = 15
+    # Column widths
+    col_widths2 = [34, 13, 10, 11, 9, 8] + [10] * len(months)
+    for ci, w in enumerate(col_widths2, 1):
+        ws2.column_dimensions[get_column_letter(ci)].width = w
 
     # ── Stream response ───────────────────────────────────────────────────────
     buf = io.BytesIO()

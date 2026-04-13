@@ -744,7 +744,9 @@ export default function FixedAssetsPage() {
     const [coa, qboResult] = await Promise.all([
       getChartOfAccounts(clientId).catch(() => [] as string[]),
       getQboAccounts(clientId).catch((e: unknown) => {
-        setAccountsError(e instanceof Error ? e.message : "Failed to load QBO accounts");
+        const msg = e instanceof Error ? e.message : "";
+        if (!msg.includes("not connected") && !msg.includes("not found"))
+          setAccountsError(msg || "Failed to load QBO accounts");
         return [] as string[];
       }),
     ]);
