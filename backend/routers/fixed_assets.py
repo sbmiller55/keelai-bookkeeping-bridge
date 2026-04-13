@@ -261,18 +261,26 @@ def export_schedule(
     ws1.row_dimensions[5].height = 30
 
     year_totals: dict[int, float] = {y: 0.0 for y in years}
+    sub_font = Font(italic=True, size=9, color="888888")
     row = 6
     for asset in enriched:
-        annual: dict[int, float] = {y: 0.0 for y in years}
+        # Build annual buckets for dep, accum dep (end of year), nbv (end of year)
+        annual_dep:   dict[int, float] = {y: 0.0 for y in years}
+        annual_accum: dict[int, float] = {y: 0.0 for y in years}
+        annual_nbv:   dict[int, float] = {y: asset.purchase_price for y in years}
         for p in asset.schedule:
             y = int(p.period[:4])
-            if y in annual:
-                annual[y] = round(annual[y] + p.depreciation, 2)
+            if y in annual_dep:
+                annual_dep[y] = round(annual_dep[y] + p.depreciation, 2)
+                annual_accum[y] = p.accumulated_depreciation
+                annual_nbv[y]   = p.net_book_value
 
         method = "SL" if asset.depreciation_method == "straight_line" else "DDB"
         life = "Indefinite" if asset.is_indefinite_life else (
             f"{asset.useful_life_months / 12:.1f}" if asset.useful_life_months else "—"
         )
+
+        # Row 1: Depreciation
         ws1.cell(row=row, column=1, value=asset.name)
         money(ws1, row, 2, asset.purchase_price)
         ws1.cell(row=row, column=3, value=int(asset.purchase_date[:4])).alignment = center
@@ -283,16 +291,29 @@ def export_schedule(
         ws1.cell(row=row, column=5, value=life).alignment = center
         ws1.cell(row=row, column=6, value=method).alignment = center
         for ci, y in enumerate(years, 7):
-            dep = annual[y]
+            dep = annual_dep[y]
             year_totals[y] = round(year_totals[y] + dep, 2)
             if dep:
                 money(ws1, row, ci, dep)
             else:
                 ws1.cell(row=row, column=ci, value=" - ").alignment = center
-        row += 1
 
-    # Blank + total row
-    row += 1
+        # Row 2: Accumulated Depreciation
+        ws1.cell(row=row+1, column=6, value="Accum. Dep.").font = sub_font
+        for ci, y in enumerate(years, 7):
+            v = annual_accum[y]
+            c = money(ws1, row+1, ci, v) if v else ws1.cell(row=row+1, column=ci, value=" - ")
+            c.font = sub_font
+
+        # Row 3: Net Book Value
+        ws1.cell(row=row+2, column=6, value="Net Book Value").font = sub_font
+        for ci, y in enumerate(years, 7):
+            c = money(ws1, row+2, ci, annual_nbv[y])
+            c.font = sub_font
+
+        row += 4  # dep + accum + nbv + blank
+
+    # Total row (depreciation only)
     ws1.cell(row=row, column=6, value="Total:").font = total_font
     for ci, y in enumerate(years, 7):
         c = money(ws1, row, ci, year_totals[y])
@@ -330,15 +351,21 @@ def export_schedule(
     month_totals: dict[str, float] = {m: 0.0 for m in months}
     row2 = 6
     for asset in enriched:
-        monthly: dict[str, float] = {m: 0.0 for m in months}
+        monthly_dep:   dict[str, float] = {m: 0.0 for m in months}
+        monthly_accum: dict[str, float] = {m: 0.0 for m in months}
+        monthly_nbv:   dict[str, float] = {m: asset.purchase_price for m in months}
         for p in asset.schedule:
-            if p.period in monthly:
-                monthly[p.period] = p.depreciation
+            if p.period in monthly_dep:
+                monthly_dep[p.period]   = p.depreciation
+                monthly_accum[p.period] = p.accumulated_depreciation
+                monthly_nbv[p.period]   = p.net_book_value
 
         method = "SL" if asset.depreciation_method == "straight_line" else "DDB"
         life = "Indefinite" if asset.is_indefinite_life else (
             f"{asset.useful_life_months / 12:.1f}" if asset.useful_life_months else "—"
         )
+
+        # Row 1: Depreciation
         ws2.cell(row=row2, column=1, value=asset.name)
         money(ws2, row2, 2, asset.purchase_price)
         ws2.cell(row=row2, column=3, value=int(asset.purchase_date[:4])).alignment = center
@@ -349,16 +376,29 @@ def export_schedule(
         ws2.cell(row=row2, column=5, value=life).alignment = center
         ws2.cell(row=row2, column=6, value=method).alignment = center
         for ci, m in enumerate(months, 7):
-            dep = monthly[m]
+            dep = monthly_dep[m]
             month_totals[m] = round(month_totals[m] + dep, 2)
             if dep:
                 money(ws2, row2, ci, dep)
             else:
                 ws2.cell(row=row2, column=ci, value=" - ").alignment = center
-        row2 += 1
+
+        # Row 2: Accumulated Depreciation
+        ws2.cell(row=row2+1, column=6, value="Accum. Dep.").font = sub_font
+        for ci, m in enumerate(months, 7):
+            v = monthly_accum[m]
+            c = money(ws2, row2+1, ci, v) if v else ws2.cell(row=row2+1, column=ci, value=" - ")
+            c.font = sub_font
+
+        # Row 3: Net Book Value
+        ws2.cell(row=row2+2, column=6, value="Net Book Value").font = sub_font
+        for ci, m in enumerate(months, 7):
+            c = money(ws2, row2+2, ci, monthly_nbv[m])
+            c.font = sub_font
+
+        row2 += 4
 
     # Total row
-    row2 += 1
     ws2.cell(row=row2, column=6, value="Total:").font = total_font
     for ci, m in enumerate(months, 7):
         c = money(ws2, row2, ci, month_totals[m])
