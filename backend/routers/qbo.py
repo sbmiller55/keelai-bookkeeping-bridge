@@ -116,7 +116,7 @@ def get_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    client    = _get_client(client_id, db)
+    client    = _get_client(client_id, current_user, db)
     connected = bool(client.qbo_access_token and client.qbo_realm_id)
     return QboStatus(
         connected=connected,
