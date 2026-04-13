@@ -35,8 +35,8 @@ export interface ClientCreate {
   name: string;
   mercury_api_key_encrypted?: string;
   qbo_oauth_token?: string;
-  chart_of_accounts_path?: string;
-  policy_path?: string;
+  chart_of_accounts_path?: string | null;
+  policy_path?: string | null;
 }
 
 export interface Transaction {
