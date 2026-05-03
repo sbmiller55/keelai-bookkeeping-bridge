@@ -595,15 +595,15 @@ def get_payments(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
 
-    _TRANSFER_KINDS = ("treasuryTransfer", "internalTransfer", "externalTransfer")
+    _INTERNAL_KINDS = ("treasuryTransfer", "internalTransfer")
     payments = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status != models.TransactionStatus.transfer,
-            ~models.Transaction.kind.in_(_TRANSFER_KINDS),
-            (models.Transaction.kind == "outgoingPayment") |
-            (models.Transaction.mercury_status == "pending"),
+            models.Transaction.source == "mercury",
+            models.Transaction.amount < 0,
+            ~models.Transaction.kind.in_(_INTERNAL_KINDS),
         )
         .order_by(models.Transaction.date.desc())
         .all()
