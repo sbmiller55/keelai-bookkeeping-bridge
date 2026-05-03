@@ -13,7 +13,7 @@ import models
 
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production-bookkeeping-bridge")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 7
+ACCESS_TOKEN_EXPIRE_DAYS = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer()
