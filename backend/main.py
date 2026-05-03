@@ -1,10 +1,11 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import Base, engine
+from auth import get_current_user
 from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo, fixed_assets, accruals, revenue, billcom
 
 
@@ -200,14 +201,14 @@ def root():
 
 
 @app.post("/admin/backup")
-def trigger_backup(current_user=Depends(__import__("auth").get_current_user)):
+def trigger_backup(current_user=Depends(get_current_user)):
     """Manually trigger a database backup to S3."""
     from backup import run_backup
     return run_backup(label="manual")
 
 
 @app.get("/admin/backups")
-def list_backups_endpoint(current_user=Depends(__import__("auth").get_current_user)):
+def list_backups_endpoint(current_user=Depends(get_current_user)):
     """List available S3 backups."""
     from backup import list_backups
     return list_backups()
