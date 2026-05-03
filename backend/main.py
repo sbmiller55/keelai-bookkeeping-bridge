@@ -190,6 +190,7 @@ def _seed_contextbridge_rules():
         ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest earned",              True,  "expense"),
         ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest Earned",              True,  "expense"),
         ("description_contains",  "Mercury IO Cashback",    "Mercury Checking (9882) - 1",       "Credit Card Rewards",          True,  "expense"),
+        ("counterparty_contains", "Buckner",                "Accrued Expenses",                  "Mercury Checking (9882) - 1",  True,  "expense"),
     ]
 
     db = SessionLocal()
@@ -260,6 +261,14 @@ def _seed_contextbridge_standing_rules():
             "expense_account": "Accounting, Tax & Finance fees",
             "accrued_account": "Accrued Expenses",
             "amount": None,
+            "active": True,
+        },
+        {
+            "vendor_name": "The Buckner Company",
+            "description": "Key man & director insurance, amortized monthly Apr 2026 - Mar 2027",
+            "expense_account": "Officers' life insurance",
+            "accrued_account": "Accrued Expenses",
+            "amount": 372.29,
             "active": True,
         },
     ]
