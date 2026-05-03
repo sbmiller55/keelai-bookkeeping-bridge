@@ -1051,6 +1051,44 @@ export function generateFromStandingRules(clientId: number, month?: string): Pro
   return apiFetch(`/clients/${clientId}/accruals/standing-rules/generate${qs}`, { method: "POST" });
 }
 
+export interface AccrualSetupContext {
+  transaction: {
+    id: number;
+    date: string | null;
+    amount: number;
+    vendor: string;
+    mercury_account_name: string | null;
+  };
+  open_accruals: AccruedExpense[];
+  matching_rules: StandingAccrualRule[];
+}
+
+export interface PrepaidConfig {
+  account: string;
+  amount: number;
+  monthly_amount: number;
+  start_period: string;
+  end_period: string;
+  description: string;
+  expense_account: string;
+}
+
+export function getAccrualSetupContext(clientId: number, transactionId: number): Promise<AccrualSetupContext> {
+  return apiFetch(`/clients/${clientId}/accruals/setup-context?transaction_id=${transactionId}`);
+}
+
+export function setupAccrualPayment(clientId: number, data: {
+  transaction_id: number;
+  clearings: { accrual_id: number; amount: number }[];
+  prepaid?: PrepaidConfig;
+  bank_account?: string;
+}): Promise<{ transaction_id: number; jes_created: number; je_ids: number[]; amortization_entries?: number }> {
+  return apiFetch(`/clients/${clientId}/accruals/setup-payment`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 // ── Revenue Recognition ───────────────────────────────────────────────────────
 
 export type BillingType =

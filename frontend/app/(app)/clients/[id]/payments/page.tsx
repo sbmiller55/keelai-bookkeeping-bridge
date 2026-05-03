@@ -7,8 +7,8 @@ import {
   getPayments, syncMercury, getInboundEmailAddress, PaymentTransaction,
   getAccruals, createAccrual, updateAccrual, deleteAccrual, analyzeForAccruals, releaseAccrual,
   getStandingRules, createStandingRule, updateStandingRule, deleteStandingRule,
-  generateFromStandingRules,
-  AccruedExpense, AccrualSummary, AccrualSuggestion, StandingAccrualRule,
+  generateFromStandingRules, getAccrualSetupContext, setupAccrualPayment,
+  AccruedExpense, AccrualSummary, AccrualSuggestion, StandingAccrualRule, AccrualSetupContext,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
@@ -95,10 +95,13 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
   const [expanded, setExpanded] = useState<number | null>(null);
   const [inboundEmail, setInboundEmail] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [standingRules, setStandingRules] = useState<StandingAccrualRule[]>([]);
+  const [setupTxId, setSetupTxId] = useState<number | null>(null);
 
   useEffect(() => {
     loadPayments();
     getInboundEmailAddress().then((r) => setInboundEmail(r.address || null)).catch(() => {});
+    getStandingRules(clientId).then(setStandingRules).catch(() => {});
   }, [clientId]);
 
   function loadPayments() {
@@ -132,11 +135,26 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
     }
   }
 
+  function isAccrualVendor(p: PaymentTransaction): boolean {
+    const vendor = (p.counterparty_name || p.description || "").toLowerCase();
+    return standingRules.some(
+      (r) => vendor.includes(r.vendor_name.toLowerCase()) || r.vendor_name.toLowerCase().includes(vendor)
+    );
+  }
+
   const sentPayments = payments.filter((p) => p.mercury_status !== "pending");
   const pendingPayments = payments.filter((p) => p.mercury_status === "pending");
 
   return (
     <>
+      {setupTxId !== null && (
+        <AccrualSetupModal
+          clientId={clientId}
+          transactionId={setupTxId}
+          onClose={() => setSetupTxId(null)}
+          onDone={() => { setSetupTxId(null); loadPayments(); }}
+        />
+      )}
       <div className="mb-6 flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Payments</h1>
@@ -199,7 +217,7 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
               <h2 className="text-sm font-semibold text-yellow-400 uppercase tracking-wider mb-3">
                 Pending / Scheduled ({pendingPayments.length})
               </h2>
-              <PaymentsTable payments={pendingPayments} expanded={expanded} setExpanded={setExpanded} />
+              <PaymentsTable payments={pendingPayments} expanded={expanded} setExpanded={setExpanded} isAccrualVendor={isAccrualVendor} onSetupAccrual={setSetupTxId} />
             </section>
           )}
           {sentPayments.length > 0 && (
@@ -207,7 +225,7 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
               <h2 className="text-sm font-semibold text-green-400 uppercase tracking-wider mb-3">
                 Sent Payments ({sentPayments.length})
               </h2>
-              <PaymentsTable payments={sentPayments} expanded={expanded} setExpanded={setExpanded} />
+              <PaymentsTable payments={sentPayments} expanded={expanded} setExpanded={setExpanded} isAccrualVendor={isAccrualVendor} onSetupAccrual={setSetupTxId} />
             </section>
           )}
         </div>
@@ -216,10 +234,12 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
   );
 }
 
-function PaymentsTable({ payments, expanded, setExpanded }: {
+function PaymentsTable({ payments, expanded, setExpanded, isAccrualVendor, onSetupAccrual }: {
   payments: PaymentTransaction[];
   expanded: number | null;
   setExpanded: (id: number | null) => void;
+  isAccrualVendor: (p: PaymentTransaction) => boolean;
+  onSetupAccrual: (txId: number) => void;
 }) {
   return (
     <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
@@ -261,9 +281,19 @@ function PaymentsTable({ payments, expanded, setExpanded }: {
                   </span>
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${p.je_count > 0 ? "bg-indigo-900 text-indigo-300 border border-indigo-700" : "bg-gray-800 text-gray-500 border border-gray-700"}`}>
-                    {p.je_count > 0 ? `${p.je_count} JE${p.je_count > 1 ? "s" : ""}` : "Uncoded"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${p.je_count > 0 ? "bg-indigo-900 text-indigo-300 border border-indigo-700" : "bg-gray-800 text-gray-500 border border-gray-700"}`}>
+                      {p.je_count > 0 ? `${p.je_count} JE${p.je_count > 1 ? "s" : ""}` : "Uncoded"}
+                    </span>
+                    {isAccrualVendor(p) && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onSetupAccrual(p.id); }}
+                        className="px-2 py-0.5 text-xs bg-amber-900/60 hover:bg-amber-800 text-amber-300 border border-amber-700 rounded-full transition-colors whitespace-nowrap"
+                      >
+                        Set Up Accrual
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
               {expanded === p.id && (
@@ -288,6 +318,285 @@ function PaymentsTable({ payments, expanded, setExpanded }: {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── Accrual Setup Modal ───────────────────────────────────────────────────────
+
+function AccrualSetupModal({ clientId, transactionId, onClose, onDone }: {
+  clientId: number;
+  transactionId: number;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [ctx, setCtx] = useState<AccrualSetupContext | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Clearing amounts keyed by accrual id
+  const [clearingAmounts, setClearingAmounts] = useState<Record<number, string>>({});
+  const [selectedAccruals, setSelectedAccruals] = useState<Set<number>>(new Set());
+
+  // Prepaid config
+  const [hasPrepaid, setHasPrepaid] = useState(false);
+  const [prepaid, setPrepaid] = useState({
+    account: "Prepaid Insurance",
+    monthly_amount: "",
+    start_period: currentMonth(),
+    end_period: "",
+    description: "",
+    expense_account: "",
+  });
+
+  const [bankAccount, setBankAccount] = useState("Mercury Checking");
+
+  useEffect(() => {
+    setLoading(true);
+    getAccrualSetupContext(clientId, transactionId)
+      .then((data) => {
+        setCtx(data);
+        // Pre-select all open accruals and pre-fill their amounts
+        const sel = new Set<number>();
+        const amounts: Record<number, string> = {};
+        for (const ae of data.open_accruals) {
+          sel.add(ae.id);
+          amounts[ae.id] = String(ae.amount);
+        }
+        setSelectedAccruals(sel);
+        setClearingAmounts(amounts);
+        // Pre-fill prepaid description from vendor
+        setPrepaid((p) => ({ ...p, description: `Prepaid: ${data.transaction.vendor}` }));
+        // Pre-fill expense account from matching rule if available
+        if (data.matching_rules.length > 0) {
+          setPrepaid((p) => ({ ...p, expense_account: data.matching_rules[0].expense_account }));
+        }
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [clientId, transactionId]);
+
+  const txAmount = ctx ? Math.abs(ctx.transaction.amount) : 0;
+  const clearingTotal = Array.from(selectedAccruals).reduce((sum, id) => {
+    return sum + (parseFloat(clearingAmounts[id] || "0") || 0);
+  }, 0);
+  const prepaidAmount = hasPrepaid ? (txAmount - clearingTotal) : 0;
+  const remainder = txAmount - clearingTotal - (hasPrepaid ? prepaidAmount : 0);
+  const isBalanced = Math.abs(remainder) < 0.02;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!ctx) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const clearings = Array.from(selectedAccruals).map((id) => ({
+        accrual_id: id,
+        amount: parseFloat(clearingAmounts[id] || "0"),
+      }));
+
+      const payload: Parameters<typeof setupAccrualPayment>[1] = {
+        transaction_id: transactionId,
+        clearings,
+        bank_account: bankAccount,
+      };
+
+      if (hasPrepaid && prepaidAmount > 0) {
+        payload.prepaid = {
+          account: prepaid.account,
+          amount: prepaidAmount,
+          monthly_amount: parseFloat(prepaid.monthly_amount || "0"),
+          start_period: prepaid.start_period,
+          end_period: prepaid.end_period,
+          description: prepaid.description,
+          expense_account: prepaid.expense_account,
+        };
+      }
+
+      await setupAccrualPayment(clientId, payload);
+      onDone();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Setup failed");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <h2 className="text-base font-semibold text-white">Accrual Payment Setup</h2>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center items-center h-40">
+            <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : !ctx ? (
+          <div className="p-6 text-red-400 text-sm">{error || "Failed to load context"}</div>
+        ) : (
+          <form onSubmit={handleSubmit} className="p-6 space-y-6">
+            {/* Transaction summary */}
+            <div className="bg-gray-800 rounded-xl p-4 text-xs">
+              <p className="text-gray-400 mb-1">Payment</p>
+              <p className="text-white font-medium">{ctx.transaction.vendor}</p>
+              <p className="text-red-400 font-mono text-lg font-bold mt-1">{formatAmount(ctx.transaction.amount)}</p>
+              <p className="text-gray-500 mt-0.5">{formatDate(ctx.transaction.date)} · {ctx.transaction.mercury_account_name || "Mercury"}</p>
+            </div>
+
+            {/* Open accruals to clear */}
+            <div>
+              <h3 className="text-sm font-semibold text-white mb-3">Clear Accruals</h3>
+              {ctx.open_accruals.length === 0 ? (
+                <p className="text-gray-500 text-xs">No open accruals found for this vendor.</p>
+              ) : (
+                <div className="space-y-2">
+                  {ctx.open_accruals.map((ae) => (
+                    <div key={ae.id} className="flex items-center gap-3 bg-gray-800 rounded-lg px-3 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedAccruals.has(ae.id)}
+                        onChange={(e) => {
+                          const next = new Set(selectedAccruals);
+                          if (e.target.checked) next.add(ae.id); else next.delete(ae.id);
+                          setSelectedAccruals(next);
+                        }}
+                        className="w-4 h-4 accent-indigo-500"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white text-xs font-medium">{ae.vendor_name} <span className="text-gray-500 font-mono ml-1">{ae.service_period}</span></p>
+                        <p className="text-gray-500 text-xs truncate">{ae.description || ""}</p>
+                      </div>
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full border font-medium ${ACCRUAL_STATUS_BADGE[ae.status] ?? "text-gray-400 border-gray-700"}`}>
+                        {ae.status}
+                      </span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={clearingAmounts[ae.id] ?? ""}
+                        onChange={(e) => setClearingAmounts({ ...clearingAmounts, [ae.id]: e.target.value })}
+                        disabled={!selectedAccruals.has(ae.id)}
+                        className="w-28 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-40"
+                        placeholder="Amount"
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Prepaid split */}
+            <div>
+              <label className="flex items-center gap-2 text-sm font-semibold text-white cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasPrepaid}
+                  onChange={(e) => setHasPrepaid(e.target.checked)}
+                  className="w-4 h-4 accent-indigo-500"
+                />
+                Book remainder as Prepaid Expense
+              </label>
+              {hasPrepaid && (
+                <div className="mt-3 space-y-3 bg-gray-800/60 rounded-xl p-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">Prepaid Account</label>
+                      <input
+                        value={prepaid.account}
+                        onChange={(e) => setPrepaid({ ...prepaid, account: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+                        placeholder="Prepaid Insurance"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">Expense Account (monthly DR)</label>
+                      <input
+                        value={prepaid.expense_account}
+                        onChange={(e) => setPrepaid({ ...prepaid, expense_account: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+                        placeholder="Officers' life insurance"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">Monthly Amortization Amount</label>
+                      <input
+                        type="number" step="0.01"
+                        value={prepaid.monthly_amount}
+                        onChange={(e) => setPrepaid({ ...prepaid, monthly_amount: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
+                        placeholder="372.29"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">Description</label>
+                      <input
+                        value={prepaid.description}
+                        onChange={(e) => setPrepaid({ ...prepaid, description: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+                        placeholder="Prepaid Insurance premium"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">Start Period (YYYY-MM)</label>
+                      <input
+                        type="month"
+                        value={prepaid.start_period}
+                        onChange={(e) => setPrepaid({ ...prepaid, start_period: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 mb-1 block">End Period (YYYY-MM)</label>
+                      <input
+                        type="month"
+                        value={prepaid.end_period}
+                        onChange={(e) => setPrepaid({ ...prepaid, end_period: e.target.value })}
+                        className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+                  {prepaidAmount > 0 && (
+                    <p className="text-xs text-amber-400 font-mono">Prepaid amount: {formatAmount(prepaidAmount)}</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Bank account */}
+            <div>
+              <label className="text-xs text-gray-400 mb-1 block">Bank / Credit Account</label>
+              <input
+                value={bankAccount}
+                onChange={(e) => setBankAccount(e.target.value)}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            {/* Balance check */}
+            <div className={`rounded-lg px-4 py-3 text-xs font-mono ${isBalanced ? "bg-green-950 border border-green-800 text-green-300" : "bg-red-950 border border-red-800 text-red-300"}`}>
+              {isBalanced
+                ? `Balanced: ${formatAmount(txAmount)} = ${formatAmount(clearingTotal)} cleared${hasPrepaid && prepaidAmount > 0 ? ` + ${formatAmount(prepaidAmount)} prepaid` : ""}`
+                : `Unbalanced: ${formatAmount(clearingTotal + (hasPrepaid ? prepaidAmount : 0))} allocated of ${formatAmount(txAmount)} (${formatAmount(Math.abs(remainder))} ${remainder > 0 ? "under" : "over"})`
+              }
+            </div>
+
+            {error && <div className="bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-xs">{error}</div>}
+
+            <div className="flex gap-3 justify-end">
+              <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200 transition-colors">Cancel</button>
+              <button
+                type="submit"
+                disabled={saving || !isBalanced}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {saving ? "Saving…" : "Save Journal Entries"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
     </div>
   );
 }

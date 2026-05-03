@@ -649,6 +649,245 @@ def update_standing_rule(
     return StandingAccrualRuleRead.model_validate(rule)
 
 
+# ── Accrual Setup (payment processing with split JEs) ─────────────────────────
+
+@router.get("/setup-context")
+def get_setup_context(
+    client_id: int,
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return open accruals + standing rule context for a given payment transaction."""
+    _get_client(client_id, current_user, db)
+
+    tx = db.query(Transaction).filter(
+        Transaction.id == transaction_id,
+        Transaction.client_id == client_id,
+    ).first()
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+
+    vendor = tx.counterparty_name or tx.description or ""
+
+    # Find matching standing rules (case-insensitive vendor match)
+    rules = (
+        db.query(StandingAccrualRule)
+        .filter(
+            StandingAccrualRule.client_id == client_id,
+            StandingAccrualRule.active == True,
+        )
+        .all()
+    )
+    matching_rules = [
+        r for r in rules
+        if vendor.lower() in r.vendor_name.lower() or r.vendor_name.lower() in vendor.lower()
+    ]
+
+    # Find open accruals for any matching vendor names
+    vendor_names = {r.vendor_name for r in matching_rules} or {vendor}
+    open_accruals = (
+        db.query(AccruedExpense)
+        .filter(
+            AccruedExpense.client_id == client_id,
+            AccruedExpense.status.in_([AccruedExpenseStatus.accrued, AccruedExpenseStatus.partially_paid]),
+            AccruedExpense.vendor_name.in_(list(vendor_names)),
+        )
+        .order_by(AccruedExpense.service_period.asc())
+        .all()
+    )
+
+    return {
+        "transaction": {
+            "id": tx.id,
+            "date": tx.date.isoformat() if tx.date else None,
+            "amount": tx.amount,
+            "vendor": vendor,
+            "mercury_account_name": tx.mercury_account_name,
+        },
+        "open_accruals": [AccruedExpenseRead.model_validate(a) for a in open_accruals],
+        "matching_rules": [StandingAccrualRuleRead.model_validate(r) for r in matching_rules],
+    }
+
+
+@router.post("/setup-payment")
+def setup_payment(
+    client_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Process an accrual payment with split JEs.
+
+    Body:
+      transaction_id: int
+      clearings: [{accrual_id: int, amount: float}]
+      prepaid: optional {
+        account: str,          # e.g. "Prepaid Insurance"
+        monthly_amount: float,
+        start_period: str,     # "YYYY-MM"
+        end_period: str,       # "YYYY-MM"
+        description: str,
+        expense_account: str,  # DR each month, e.g. "Officers' life insurance"
+      }
+      bank_account: str  # default "Mercury Checking"
+    """
+    _get_client(client_id, current_user, db)
+
+    transaction_id = body.get("transaction_id")
+    clearings = body.get("clearings", [])   # [{accrual_id, amount}]
+    prepaid = body.get("prepaid")           # optional prepaid config
+    bank_account = body.get("bank_account", "Mercury Checking")
+
+    tx = db.query(Transaction).filter(
+        Transaction.id == transaction_id,
+        Transaction.client_id == client_id,
+    ).first()
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+
+    total_payment = abs(tx.amount)
+
+    # Validate amounts
+    clearing_total = sum(c["amount"] for c in clearings)
+    prepaid_amount = prepaid["amount"] if prepaid else 0.0
+    if abs(clearing_total + prepaid_amount - total_payment) > 0.02:
+        raise HTTPException(400, f"Split amounts ({clearing_total + prepaid_amount:.2f}) do not equal transaction amount ({total_payment:.2f})")
+
+    # Delete existing JEs on this transaction
+    db.query(JournalEntry).filter(JournalEntry.transaction_id == transaction_id).delete()
+    db.flush()
+
+    pay_date = tx.date if tx.date else datetime.utcnow()
+    created_jes = []
+
+    # Create a clearing JE for each accrual
+    for c in clearings:
+        accrual_id = c["accrual_id"]
+        amount = float(c["amount"])
+
+        ae = db.query(AccruedExpense).filter(
+            AccruedExpense.id == accrual_id,
+            AccruedExpense.client_id == client_id,
+        ).first()
+        if not ae:
+            raise HTTPException(404, f"AccruedExpense {accrual_id} not found")
+
+        # Find the accrued_account from the standing rule if available
+        accrued_account = "Accrued Expenses"
+        if ae.standing_rule_id:
+            rule = db.query(StandingAccrualRule).filter(StandingAccrualRule.id == ae.standing_rule_id).first()
+            if rule:
+                accrued_account = rule.accrued_account
+
+        je = JournalEntry(
+            transaction_id=transaction_id,
+            je_number=next_je_number(db),
+            debit_account=accrued_account,
+            credit_account=bank_account,
+            amount=amount,
+            je_date=pay_date,
+            memo=f"Clear accrual: {ae.vendor_name} ({ae.service_period})"[:80],
+            ai_confidence=1.0,
+            ai_reasoning="Accrual payment setup.",
+        )
+        db.add(je)
+        db.flush()
+        created_jes.append(je.id)
+
+        # Update accrual status
+        if abs(amount - ae.amount) < 0.01:
+            ae.status = AccruedExpenseStatus.cleared
+            ae.payment_je_id = je.id
+        else:
+            ae.status = AccruedExpenseStatus.partially_paid
+            ae.amount = round(ae.amount - amount, 2)
+
+    # Create prepaid JE if configured
+    amort_transactions: list = []
+    if prepaid:
+        prepaid_account = prepaid.get("account", "Prepaid Insurance")
+        prepaid_amt = float(prepaid.get("amount", prepaid_amount))
+        prepaid_desc = prepaid.get("description", f"Prepaid: {tx.counterparty_name or tx.description}")
+
+        je = JournalEntry(
+            transaction_id=transaction_id,
+            je_number=next_je_number(db),
+            debit_account=prepaid_account,
+            credit_account=bank_account,
+            amount=prepaid_amt,
+            je_date=pay_date,
+            memo=prepaid_desc[:80],
+            ai_confidence=1.0,
+            ai_reasoning="Prepaid expense from accrual payment setup.",
+        )
+        db.add(je)
+        db.flush()
+        created_jes.append(je.id)
+
+        # Generate monthly amortization entries if start/end period provided
+        start_period = prepaid.get("start_period")
+        end_period = prepaid.get("end_period")
+        expense_account = prepaid.get("expense_account", "Officers' life insurance")
+        monthly_amount = float(prepaid.get("monthly_amount", 0))
+
+        if start_period and end_period and monthly_amount:
+            try:
+                cur = datetime.strptime(start_period, "%Y-%m")
+                end = datetime.strptime(end_period, "%Y-%m")
+            except ValueError:
+                raise HTTPException(400, "start_period and end_period must be YYYY-MM")
+
+            while cur <= end:
+                last_day = calendar.monthrange(cur.year, cur.month)[1]
+                amort_date = datetime(cur.year, cur.month, last_day)
+                period_str = cur.strftime("%Y-%m")
+
+                amort_tx = Transaction(
+                    client_id=client_id,
+                    date=amort_date,
+                    description=f"Amortize prepaid: {tx.counterparty_name or 'prepaid'} ({period_str})",
+                    amount=-monthly_amount,
+                    status=TransactionStatus.pending,
+                    source="accrual",
+                )
+                db.add(amort_tx)
+                db.flush()
+
+                amort_je = JournalEntry(
+                    transaction_id=amort_tx.id,
+                    je_number=next_je_number(db),
+                    debit_account=expense_account,
+                    credit_account=prepaid_account,
+                    amount=monthly_amount,
+                    je_date=amort_date,
+                    memo=f"Prepaid amortization: {period_str}"[:80],
+                    ai_confidence=1.0,
+                    ai_reasoning="Auto-generated prepaid amortization from accrual setup.",
+                )
+                db.add(amort_je)
+                db.flush()
+                amort_transactions.append({"period": period_str, "tx_id": amort_tx.id, "je_id": amort_je.id})
+
+                # advance month
+                if cur.month == 12:
+                    cur = cur.replace(year=cur.year + 1, month=1)
+                else:
+                    cur = cur.replace(month=cur.month + 1)
+
+    db.commit()
+
+    result: dict = {
+        "transaction_id": transaction_id,
+        "jes_created": len(created_jes),
+        "je_ids": created_jes,
+    }
+    if prepaid:
+        result["amortization_entries"] = len(amort_transactions)
+    return result
+
+
 @router.delete("/standing-rules/{rule_id}")
 def delete_standing_rule(
     client_id: int,
