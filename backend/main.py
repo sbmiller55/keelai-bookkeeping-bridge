@@ -222,6 +222,70 @@ def _seed_contextbridge_rules():
         db.close()
 
 
+def _seed_contextbridge_standing_rules():
+    """Restore ContextBridge's standing accrual rules if they've been wiped."""
+    from database import SessionLocal
+    from models import Client, StandingAccrualRule
+
+    # Reconstructed from JE history: vendors whose payment JEs debit "Accrued Expenses"
+    # (clearing a previously-set-up accrual liability)
+    STANDING_RULES = [
+        {
+            "vendor_name": "MORRISON & FOERSTER LLP",
+            "description": "Monthly legal retainer — invoice arrives after month end",
+            "expense_account": "Legal Fees",
+            "accrued_account": "Accrued Expenses",
+            "amount": None,  # variable — set manually each month
+            "active": True,
+        },
+        {
+            "vendor_name": "c2Design",
+            "description": "Monthly design/advisory fees — invoice arrives after month end",
+            "expense_account": "Advisory & Consulting",
+            "accrued_account": "Accrued Expenses",
+            "amount": None,
+            "active": True,
+        },
+        {
+            "vendor_name": "UNITED FRONT STUDIO, LLC",
+            "description": "Monthly contractor fees",
+            "expense_account": "Advisory & Consulting",
+            "accrued_account": "Accrued Expenses",
+            "amount": None,
+            "active": True,
+        },
+    ]
+
+    db = SessionLocal()
+    try:
+        client = (
+            db.query(Client).filter(Client.name == "ContextBridge").first()
+            or db.query(Client).filter(Client.id == 2).first()
+        )
+        if not client:
+            return
+        existing = db.query(StandingAccrualRule).filter(StandingAccrualRule.client_id == client.id).count()
+        if existing > 0:
+            return
+        for r in STANDING_RULES:
+            db.add(StandingAccrualRule(
+                client_id=client.id,
+                vendor_name=r["vendor_name"],
+                description=r["description"],
+                expense_account=r["expense_account"],
+                accrued_account=r["accrued_account"],
+                amount=r["amount"],
+                active=r["active"],
+            ))
+        db.commit()
+        print(f"[seed] Created {len(STANDING_RULES)} ContextBridge standing accrual rules")
+    except Exception as exc:
+        db.rollback()
+        print(f"[seed] ContextBridge standing rules seed failed: {exc}")
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def on_startup():
     """Run DB setup in a background thread so uvicorn is never blocked."""
@@ -250,6 +314,8 @@ def on_startup():
             _seed_admin()
             _log("[startup] seeding ContextBridge rules...")
             _seed_contextbridge_rules()
+            _log("[startup] seeding ContextBridge standing accrual rules...")
+            _seed_contextbridge_standing_rules()
             _log("[startup] starting scheduler...")
 
             from apscheduler.schedulers.background import BackgroundScheduler
