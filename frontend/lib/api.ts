@@ -1,4 +1,4 @@
-import { getToken, removeToken } from "./auth";
+import { getToken, setToken, removeToken } from "./auth";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -147,6 +147,31 @@ export interface AuditLog {
 
 // ── Core fetch helper ─────────────────────────────────────────────────────────
 
+let _refreshing: Promise<string | null> | null = null;
+
+async function _tryRefreshToken(): Promise<string | null> {
+  if (_refreshing) return _refreshing;
+  _refreshing = (async () => {
+    try {
+      const token = getToken();
+      if (!token) return null;
+      const res = await fetch(`${BASE_URL}/auth/refresh`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      setToken(data.access_token);
+      return data.access_token as string;
+    } catch {
+      return null;
+    } finally {
+      _refreshing = null;
+    }
+  })();
+  return _refreshing;
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   options: RequestInit = {}
@@ -167,6 +192,18 @@ export async function apiFetch<T = unknown>(
 
   if (!res.ok) {
     if (res.status === 401) {
+      const newToken = await _tryRefreshToken();
+      if (newToken) {
+        // Retry the original request with the new token
+        const retryRes = await fetch(`${BASE_URL}${path}`, {
+          ...options,
+          headers: { ...headers, "Authorization": `Bearer ${newToken}` },
+        });
+        if (retryRes.ok) {
+          if (retryRes.status === 204) return undefined as unknown as T;
+          return retryRes.json() as Promise<T>;
+        }
+      }
       removeToken();
       window.location.href = "/login";
       throw new Error("Session expired");

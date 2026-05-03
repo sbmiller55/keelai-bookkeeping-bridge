@@ -54,6 +54,17 @@ def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/refresh", response_model=schemas.Token)
+def refresh_token(current_user: models.User = Depends(get_current_user)):
+    """Issue a fresh token for the currently authenticated user."""
+    token = create_access_token({"sub": str(current_user.id)})
+    return schemas.Token(
+        access_token=token,
+        token_type="bearer",
+        user=schemas.UserRead.model_validate(current_user),
+    )
+
+
 @router.get("/me", response_model=schemas.UserRead)
 def me(current_user: models.User = Depends(get_current_user)):
     return current_user
