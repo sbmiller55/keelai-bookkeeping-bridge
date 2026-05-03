@@ -94,10 +94,10 @@ def _get_qbo_coa(client_obj) -> Optional[str]:
 
 
 def _resolve_chart(client_obj) -> Optional[str]:
-    """Return COA text: uploaded file first, fall back to live QBO accounts."""
-    chart = _read_file_safe(client_obj.chart_of_accounts_path)
+    """Return COA text: live QBO accounts first (authoritative), fall back to uploaded file."""
+    chart = _get_qbo_coa(client_obj)
     if not chart:
-        chart = _get_qbo_coa(client_obj)
+        chart = _read_file_safe(client_obj.chart_of_accounts_path)
     return chart
 
 

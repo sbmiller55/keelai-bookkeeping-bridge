@@ -141,6 +141,84 @@ def _seed_admin():
         db.close()
 
 
+def _seed_contextbridge_rules():
+    """Restore ContextBridge's coding rules if they've been wiped."""
+    from database import SessionLocal
+    from models import Client, Rule
+
+    RULES = [
+        ("counterparty_contains", "RIPPLING",               "Payroll Liabilities - Rippling",    "Mercury Checking (9882) - 1",  False, "reject"),
+        ("counterparty_contains", "Amazon Web Services",    "Cloud Infrastructure",              "$source_account",              True,  "expense"),
+        ("counterparty_contains", "OpenAI",                 "AI & Data Services",                "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Anthropic",              "AI & Data Services",                "$source_account",              True,  "expense"),
+        ("counterparty_contains", "GitHub",                 "Developer Tools",                   "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Sentry",                 "Developer Tools",                   "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Cursor",                 "Developer Tools",                   "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Figma",                  "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Clerk",                  "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Attio",                  "Sales Tools & CRM",                 "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Google",                 "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Namecheap",              "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Mary Gallagher",         "Accounting , Tax & Finance fees",   "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Morrison & Foerster",    "Legal Fees",                        "Accrued Expenses",             True,  "expense"),
+        ("counterparty_contains", "c2Design",               "Advisory & Consulting",             "Accrued Expenses",             True,  "expense"),
+        ("counterparty_contains", "Relentful",              "Accrued Expenses",                  "Mercury Checking (9882) - 1",  True,  "expense"),
+        ("counterparty_contains", "Donald Flood",           "Bridge Loan from Founder",          "Mercury Checking (9882) - 1",  True,  "expense"),
+        ("counterparty_contains", "Amazon",                 "Office Supplies & Equipment",       "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Home Depot",             "Office Supplies & Equipment",       "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Office Depot",           "Office Supplies & Equipment",       "$source_account",              True,  "expense"),
+        ("counterparty_contains", "L&L Hawaiian",           "Meals & Team Events",               "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Whole Foods",            "Meals & Team Events",               "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Bronze Petal",           "Meals & Team Events",               "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Mercury Credit",         "Mercury Credit - 1",                "Mercury Checking (9882) - 1",  True,  "expense"),
+        ("category_equals",       "Software",               "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("category_equals",       "Developer Tools",        "Developer Tools",                   "$source_account",              True,  "expense"),
+        ("category_equals",       "AI & Data Services",     "AI & Data Services",                "$source_account",              True,  "expense"),
+        ("category_equals",       "Office Supplies & Equipment", "Office Supplies & Equipment",  "$source_account",              True,  "expense"),
+        ("category_equals",       "Team Meals & Team Events",    "Meals & Team Events",          "$source_account",              True,  "expense"),
+        ("category_equals",       "Grocery",                "Meals & Team Events",               "$source_account",              True,  "expense"),
+        ("category_equals",       "Payroll",                "Payroll Liabilities - Rippling",    "$source_account",              True,  "reject"),
+        ("category_equals",       "Accounting Finance & Tax Services", "Accounting , Tax & Finance fees", "$source_account",     True,  "expense"),
+        ("category_equals",       "Credit Card Rewards",    "Mercury Checking (9882) - 1",       "Other Revenue",                False, "expense"),
+        ("has_category",          "*",                      "$category",                         "$source_account",              True,  "expense"),
+        ("kind",                  "treasuryTransfer",       "Mercury Checking (9882) - 1",       "Mercury Treasury - 1",         True,  "expense"),
+        ("description_contains",  "GLOBAL_PAY",             "Uncoded",                           "Uncoded",                      True,  "reject"),
+        ("description_contains",  "PEO_CONSOL",             "Uncoded",                           "Uncoded",                      True,  "reject"),
+        ("description_contains",  "PEO_EPLI",               "Uncoded",                           "Uncoded",                      True,  "reject"),
+        ("description_contains",  "PEO_WORKER",             "Uncoded",                           "Uncoded",                      True,  "reject"),
+        ("description_contains",  "HSACONTRBT",             "Uncoded",                           "Uncoded",                      True,  "reject"),
+        ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest earned",              True,  "expense"),
+        ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest Earned",              True,  "expense"),
+        ("description_contains",  "Mercury IO Cashback",    "Mercury Checking (9882) - 1",       "Credit Card Rewards",          True,  "expense"),
+    ]
+
+    db = SessionLocal()
+    try:
+        client = db.query(Client).filter(Client.name == "ContextBridge").first()
+        if not client:
+            return
+        existing = db.query(Rule).filter(Rule.client_id == client.id).count()
+        if existing > 0:
+            return
+        for match_type, match_value, debit_account, credit_account, active, rule_action in RULES:
+            db.add(Rule(
+                client_id=client.id,
+                match_type=match_type,
+                match_value=match_value,
+                debit_account=debit_account,
+                credit_account=credit_account,
+                active=active,
+                rule_action=rule_action,
+            ))
+        db.commit()
+        print(f"[seed] Created {len(RULES)} ContextBridge coding rules")
+    except Exception as exc:
+        db.rollback()
+        print(f"[seed] ContextBridge rules seed failed: {exc}")
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def on_startup():
     """Run DB setup in a background thread so uvicorn is never blocked."""
@@ -167,6 +245,8 @@ def on_startup():
             _migrate_db()
             _log("[startup] seeding admin...")
             _seed_admin()
+            _log("[startup] seeding ContextBridge rules...")
+            _seed_contextbridge_rules()
             _log("[startup] starting scheduler...")
 
             from apscheduler.schedulers.background import BackgroundScheduler
