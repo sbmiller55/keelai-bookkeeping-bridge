@@ -586,7 +586,12 @@ def get_payments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Return outgoing payment transactions (those with invoice_text or mercury_status=pending)."""
+    """
+    Return Mercury transactions that are part of the accrual workflow:
+    - Outgoing payments (kind=outgoingPayment) — formal vendor bill payments
+    - Pending/scheduled invoices (mercury_status in pending/scheduled)
+    - Transactions whose JEs debit 'Accrued Expenses' — payments clearing accruals
+    """
     client = (
         db.query(models.Client)
         .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
@@ -595,15 +600,25 @@ def get_payments(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
 
-    _INTERNAL_KINDS = ("treasuryTransfer", "internalTransfer")
+    from sqlalchemy import or_, exists
+    from models import JournalEntry
+
+    clears_accrual = exists().where(
+        JournalEntry.transaction_id == models.Transaction.id,
+        JournalEntry.debit_account.ilike("Accrued Expenses%"),
+    )
+
     payments = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status != models.TransactionStatus.transfer,
             models.Transaction.source == "mercury",
-            models.Transaction.amount < 0,
-            ~models.Transaction.kind.in_(_INTERNAL_KINDS),
+            or_(
+                models.Transaction.kind == "outgoingPayment",
+                models.Transaction.mercury_status.in_(["pending", "scheduled"]),
+                clears_accrual,
+            ),
         )
         .order_by(models.Transaction.date.desc())
         .all()
