@@ -254,6 +254,14 @@ def _seed_contextbridge_standing_rules():
             "amount": None,
             "active": True,
         },
+        {
+            "vendor_name": "Relentful, LLC",
+            "description": "Fractional CFO services",
+            "expense_account": "Accounting, Tax & Finance fees",
+            "accrued_account": "Accrued Expenses",
+            "amount": None,
+            "active": True,
+        },
     ]
 
     db = SessionLocal()
