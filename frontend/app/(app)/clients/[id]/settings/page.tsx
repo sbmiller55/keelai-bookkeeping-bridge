@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, ensureQboAccounts } from "@/lib/api";
+import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, ensureQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings } from "@/lib/api";
 
 function UploadField({
   label,
@@ -87,6 +87,14 @@ export default function ClientSettingsPage() {
   const [qboDisconnecting, setQboDisconnecting] = useState(false);
   const [qboError, setQboError] = useState<string | null>(null);
 
+  const [billcomSettings, setBillcomSettings] = useState<RevenueIntegrationSettings | null>(null);
+  const [billcomForm, setBillcomForm] = useState({ username: "", password: "", org_id: "", dev_key: "", enabled: false });
+  const [billcomSaving, setBillcomSaving] = useState(false);
+  const [billcomSaved, setBillcomSaved] = useState(false);
+  const [billcomTesting, setBillcomTesting] = useState(false);
+  const [billcomTestMsg, setBillcomTestMsg] = useState<string | null>(null);
+  const [billcomError, setBillcomError] = useState<string | null>(null);
+
   useEffect(() => {
     getClient(clientId).then((c) => {
       setClient(c);
@@ -95,6 +103,10 @@ export default function ClientSettingsPage() {
       setPolicyName(c.policy_path ? c.policy_path.split("/").pop() ?? null : null);
     }).finally(() => setLoading(false));
     getQboStatus(clientId).then(setQboStatus).catch(() => {});
+    getRevenueIntegrationSettings(clientId).then((s) => {
+      setBillcomSettings(s);
+      setBillcomForm({ username: s.billcom_username ?? "", password: "", org_id: s.billcom_org_id ?? "", dev_key: "", enabled: s.billcom_enabled });
+    }).catch(() => {});
 
     // Refresh QBO status when the tab regains focus (user closes callback tab)
     function onFocus() {
@@ -196,6 +208,42 @@ export default function ClientSettingsPage() {
     }
   }
 
+  async function handleSaveBillcom() {
+    setBillcomSaving(true);
+    setBillcomError(null);
+    setBillcomSaved(false);
+    try {
+      const payload: Record<string, unknown> = {
+        billcom_enabled: billcomForm.enabled,
+        billcom_username: billcomForm.username || undefined,
+        billcom_org_id: billcomForm.org_id || undefined,
+      };
+      if (billcomForm.password) payload.billcom_password = billcomForm.password;
+      if (billcomForm.dev_key) payload.billcom_dev_key = billcomForm.dev_key;
+      await updateRevenueIntegrationSettings(clientId, payload);
+      setBillcomSaved(true);
+      setBillcomTestMsg(null);
+      setTimeout(() => setBillcomSaved(false), 3000);
+    } catch (e: unknown) {
+      setBillcomError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setBillcomSaving(false);
+    }
+  }
+
+  async function handleTestBillcom() {
+    setBillcomTesting(true);
+    setBillcomTestMsg(null);
+    try {
+      const result = await testBillcomConnection(clientId);
+      setBillcomTestMsg(result.ok ? "Connected successfully" : "Connection failed");
+    } catch (e: unknown) {
+      setBillcomTestMsg(e instanceof Error ? e.message : "Connection failed");
+    } finally {
+      setBillcomTesting(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -287,6 +335,65 @@ export default function ClientSettingsPage() {
             {qboConnecting ? "Redirecting to QuickBooks…" : "Connect QuickBooks Online"}
           </button>
         )}
+      </section>
+
+      {/* Bill.com */}
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
+        <div className="flex items-start justify-between mb-1">
+          <h2 className="text-base font-semibold text-white">Bill.com</h2>
+          <button type="button"
+            onClick={() => setBillcomForm((f) => ({ ...f, enabled: !f.enabled }))}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${billcomForm.enabled ? "bg-indigo-600" : "bg-gray-700"}`}>
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${billcomForm.enabled ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">Connect Bill.com to sync AR invoices and AP bills.</p>
+        {billcomError && <p className="text-red-400 text-xs mb-3">{billcomError}</p>}
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Username</label>
+            <input placeholder="email@company.com" value={billcomForm.username}
+              onChange={(e) => setBillcomForm((f) => ({ ...f, username: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Password</label>
+            <input type="password"
+              placeholder={billcomSettings?.billcom_username ? "••••••• (saved)" : "••••••••"}
+              value={billcomForm.password}
+              onChange={(e) => setBillcomForm((f) => ({ ...f, password: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Organization ID</label>
+            <input placeholder="00802…" value={billcomForm.org_id}
+              onChange={(e) => setBillcomForm((f) => ({ ...f, org_id: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Developer Key</label>
+            <input type="password"
+              placeholder={billcomSettings?.billcom_dev_key ? "••••••• (saved)" : "••••••••"}
+              value={billcomForm.dev_key}
+              onChange={(e) => setBillcomForm((f) => ({ ...f, dev_key: e.target.value }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={handleSaveBillcom} disabled={billcomSaving}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
+            {billcomSaving ? "Saving…" : billcomSaved ? "Saved ✓" : "Save"}
+          </button>
+          <button type="button" onClick={handleTestBillcom} disabled={billcomTesting}
+            className="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 rounded-lg transition-colors">
+            {billcomTesting ? "Testing…" : "Test Connection"}
+          </button>
+          {billcomTestMsg && (
+            <span className={`text-xs ${billcomTestMsg.includes("success") ? "text-green-400" : "text-red-400"}`}>
+              {billcomTestMsg}
+            </span>
+          )}
+        </div>
       </section>
 
       {/* File uploads */}

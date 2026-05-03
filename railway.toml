@@ -9,7 +9,7 @@ source = "backend"
 buildCommand = "pip install -r requirements.txt"
 
 [services.deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+startCommand = "python -u -m uvicorn main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 
 [[services]]

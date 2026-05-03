@@ -95,10 +95,40 @@ def _get_qbo_coa(client_obj) -> Optional[str]:
 
 def _resolve_chart(client_obj) -> Optional[str]:
     """Return COA text: uploaded file first, fall back to live QBO accounts."""
-    chart = _resolve_chart(client_obj)
+    chart = _read_file_safe(client_obj.chart_of_accounts_path)
     if not chart:
         chart = _get_qbo_coa(client_obj)
     return chart
+
+
+# Accounts that are always valid regardless of COA (canonical fallbacks / GAAP standards)
+_ALWAYS_VALID_ACCOUNTS = {
+    "Interest Earned",
+    "Interest Expense",
+    "Uncoded",
+}
+
+
+def _parse_coa_set(chart: Optional[str]) -> Optional[set]:
+    """Return a lowercase set of account names from chart text, or None if no chart."""
+    if not chart:
+        return None
+    return {line.strip().lower() for line in chart.splitlines() if line.strip()}
+
+
+def _validate_account(name: str, coa_set: Optional[set]) -> str:
+    """
+    Return name unchanged if it's in the COA (or no COA loaded).
+    Return 'Uncoded' with a warning prefix if it looks invented.
+    """
+    if coa_set is None:
+        return name  # no COA to validate against
+    if name.lower() in coa_set:
+        return name
+    if name in _ALWAYS_VALID_ACCOUNTS:
+        return name
+    # Account not found in COA — flag it so the reviewer notices
+    return f"Uncoded [{name}]"
 
 
 # Parent/header accounts that must never appear in journal entries
@@ -169,7 +199,7 @@ def generate_prepaid_jes(
     period_label = f"{start.strftime('%b %Y')}–{end.strftime('%b %Y')}"
     recur_end = _last_day(end.year, end.month)
 
-    return [
+    jes = [
         # JE 1: cash payment → prepaid asset
         {
             "debit_account": prepaid_account,
@@ -183,22 +213,28 @@ def generate_prepaid_jes(
             "service_period_end": recur_end,
             "is_recurring": False,
         },
-        # JE 2: recurring monthly amortization template
-        {
+    ]
+
+    # One JE per month for the amortization schedule
+    for i in range(n_months):
+        month_dt = _add_months(start, i)
+        month_end = _last_day(month_dt.year, month_dt.month)
+        # Last month gets any rounding remainder
+        amount = round(total_amount - monthly * (n_months - 1), 2) if i == n_months - 1 else monthly
+        jes.append({
             "debit_account": expense_account,
             "credit_account": prepaid_account,
-            "amount": monthly,
-            "je_date": _last_day(start.year, start.month),  # first recurrence date
-            "memo": f"{vendor} monthly amortization"[:80],
+            "amount": amount,
+            "je_date": month_end,
+            "memo": f"{vendor} {month_dt.strftime('%b %Y')} amortization"[:80],
             "ai_confidence": confidence,
-            "ai_reasoning": f"Recurring monthly amortization of prepaid {vendor} over {n_months} months. {reasoning}",
-            "service_period_start": start,
-            "service_period_end": recur_end,
-            "is_recurring": True,
-            "recur_frequency": "MONTHLY",
-            "recur_end_date": recur_end,
-        },
-    ]
+            "ai_reasoning": f"Month {i + 1} of {n_months}: amortization of prepaid {vendor}. {reasoning}",
+            "service_period_start": month_dt,
+            "service_period_end": month_end,
+            "is_recurring": False,
+        })
+
+    return jes
 
 
 def generate_asset_jes(
@@ -318,14 +354,15 @@ def _build_system(chart_of_accounts: Optional[str], policy: Optional[str]) -> st
         "",
         "## General Rules",
         "- Income (positive amount): DR the bank/cash account, CR the revenue account",
+        "- Bank interest income: DR the bank account, CR 'Interest Earned' — this is ALWAYS the correct account name for bank interest",
         "- Internal transfers between Mercury accounts: DR receiving account, CR sending account",
         "- Payroll (kind=outgoingPayment to payroll processor): DR Payroll Liability or Salaries, CR Checking",
         "- Loan repayments: split into principal (DR the loan liability account) + interest (DR 'Interest Expense'), CR checking",
         "- confidence: 0.0=total guess, 1.0=certain. Be honest.",
         "- memo: under 80 characters",
-        "- CRITICAL: Use EXACT account names from the Chart of Accounts. Never invent names like",
-        "  'Computer Equipment', 'Depreciation Expense', 'Software and Technology', etc. — use what is in the COA.",
-        "- Exception: 'Interest Expense' is a valid account for loan interest charges.",
+        "- CRITICAL: Every account name you return MUST appear verbatim in the Chart of Accounts provided.",
+        "  Never invent account names. If you are unsure, pick the closest match from the COA list.",
+        "- Exception: 'Interest Expense' for loan interest and 'Interest Earned' for bank interest are always valid.",
         "- NEVER use parent/header accounts. Use the most specific child account.",
         "- Use the specific bank account name (e.g. 'Mercury Checking (9882) - 1'), never a parent like 'Cash'.",
     ]
@@ -337,7 +374,7 @@ def _build_system(chart_of_accounts: Optional[str], policy: Optional[str]) -> st
     return "\n".join(parts)
 
 
-def _code_one(txn_dict: dict, system: str, api_key: str) -> list[dict]:
+def _code_one(txn_dict: dict, system: str, api_key: str, coa_set: Optional[set] = None) -> list[dict]:
     """Call Claude Sonnet to code a single transaction. Returns list of JE dicts (1 for standard, N for prepaid)."""
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
@@ -405,9 +442,11 @@ def _code_one(txn_dict: dict, system: str, api_key: str) -> list[dict]:
             )
 
         # cc_payment and standard expense both produce a single JE
+        raw_debit = str(data.get("debit_account", "Uncoded"))[:255]
+        raw_credit = str(data.get("credit_account", "Uncoded"))[:255]
         return [{
-            "debit_account": str(data.get("debit_account", "Uncoded"))[:255],
-            "credit_account": str(data.get("credit_account", "Uncoded"))[:255],
+            "debit_account": _validate_account(raw_debit, coa_set),
+            "credit_account": _validate_account(raw_credit, coa_set),
             "amount": abs(float(txn_dict.get("amount", 0))),
             "je_date": None,
             "memo": str(data.get("memo", ""))[:500],
@@ -482,7 +521,16 @@ def code_outgoing_payment_with_invoice(transaction, invoice_text: str, client_ob
             '{"type": "accrual_sent", "vendor": "Vendor Name", "service_period": "Month YYYY", "expense_account": "Account Name", "accrued_account": "Accrued Expenses", "bank_account": "Mercury Checking", "confidence": 0.9, "reasoning": "explanation"}',
         ]
 
-    system_parts += ["", "Rules:", "- Use type=fixed_asset when invoice is for a capital asset (hardware, equipment, perpetual software license, vehicles, furniture, intangibles) over $2,500", "- Use type=prepaid when invoice covers 2+ months: annual (12mo), semi-annual (6mo), quarterly (3mo), or any multi-month period", "- service_start/service_end: first and last month of coverage (e.g. 'January 2025', 'March 2025' for Q1)", "- Use EXACT account names from the Chart of Accounts if provided.", "- confidence: 0.0=total guess, 1.0=certain"]
+    system_parts += [
+        "",
+        "Rules:",
+        "- Use type=fixed_asset when invoice is for a capital asset (hardware, equipment, perpetual software license, vehicles, furniture, intangibles) over $2,500",
+        "- Use type=prepaid when invoice covers 2+ months: annual (12mo), semi-annual (6mo), quarterly (3mo), or any multi-month period",
+        "- service_start/service_end: first and last month of coverage (e.g. 'January 2025', 'March 2025' for Q1)",
+        "- CRITICAL: Every account name you return MUST appear verbatim in the Chart of Accounts provided. Never invent account names — pick the closest match from the COA.",
+        "- Bank interest income always uses 'Interest Earned' as the credit account.",
+        "- confidence: 0.0=total guess, 1.0=certain",
+    ]
 
     if chart:
         parent_note = "\n\n## Parent Accounts — DO NOT USE\n" + "\n".join(f"- {a}" for a in sorted(_PARENT_ACCOUNTS))
@@ -617,6 +665,7 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
     chart = _resolve_chart(client_obj)
     policy = _read_file_safe(client_obj.policy_path)
     system = _build_system(chart, policy)
+    coa_set = _parse_coa_set(chart)
 
     _CC_KINDS = {"creditCardTransaction", "cardTransaction"}
 
@@ -640,7 +689,7 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
     max_workers = min(8, len(txn_dicts))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_id = {
-            pool.submit(_code_one, td, system, api_key): td["id"]
+            pool.submit(_code_one, td, system, api_key, coa_set): td["id"]
             for td in txn_dicts
         }
         for future in as_completed(future_to_id):
@@ -659,3 +708,209 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
                 }]))
 
     return results
+
+
+# ── Revenue recognition analysis ─────────────────────────────────────────────
+
+def analyze_revenue_contract(contract: dict, revenue_streams: list[dict], client_obj) -> dict:
+    """
+    Given an imported invoice/payment, determine:
+    - Which revenue stream it belongs to
+    - Service period start and end
+    - Recognition schedule
+
+    Returns a dict:
+    {
+      "revenue_stream_id": int or None,
+      "service_period_start": "YYYY-MM-DD" or None,
+      "service_period_end": "YYYY-MM-DD" or None,
+      "confidence": float,
+      "reasoning": str,
+      "flag_for_review": bool,
+      "flag_reason": str or None,
+    }
+    """
+    import anthropic
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"revenue_stream_id": None, "service_period_start": None,
+                "service_period_end": None, "confidence": 0.0,
+                "reasoning": "ANTHROPIC_API_KEY not set", "flag_for_review": True,
+                "flag_reason": "AI not configured"}
+
+    chart = _resolve_chart(client_obj)
+    policy = _read_file_safe(client_obj.policy_path)
+
+    streams_text = "\n".join(
+        f"  ID {s['id']}: {s['name']} (billing: {s['billing_type']}, "
+        f"revenue_account: {s['revenue_account']}, deferred: {s['deferred_revenue_account']})"
+        for s in revenue_streams
+    ) or "  (no streams configured)"
+
+    system = "\n".join([
+        "You are an expert revenue recognition accountant specializing in ASC 606.",
+        "Analyze the incoming invoice/payment and match it to the correct revenue stream.",
+        "Respond with ONLY valid JSON — no markdown, no explanation.",
+        "",
+        "Return this JSON object:",
+        '{"revenue_stream_id": <int or null>, "service_period_start": "YYYY-MM-DD or null", '
+        '"service_period_end": "YYYY-MM-DD or null", "confidence": 0.9, '
+        '"reasoning": "explanation", "flag_for_review": false, "flag_reason": null}',
+        "",
+        "Rules:",
+        "- Match to a revenue stream by comparing customer, amount, and description",
+        "- For annual subscriptions: service_period is 12 months from billing date",
+        "- For quarterly: 3 months from billing date",
+        "- For monthly advance/arrears: 1 month",
+        "- For invoice_completion: service_period_end = invoice date",
+        "- flag_for_review=true if confidence < 0.7 or no matching stream found",
+        "- If no stream matches, set revenue_stream_id=null and flag_for_review=true",
+        "",
+        f"## Configured Revenue Streams\n{streams_text}",
+        *([ f"\n## Chart of Accounts\n{chart[:2000]}" ] if chart else []),
+        *([ f"\n## Accounting Policy\n{policy[:1000]}" ] if policy else []),
+    ])
+
+    billing_date = contract.get("billing_date") or ""
+    if isinstance(billing_date, datetime):
+        billing_date = billing_date.strftime("%Y-%m-%d")
+
+    user_msg = (
+        f"Analyze this invoice for revenue recognition:\n"
+        f"Customer: {contract.get('customer_name', '')}\n"
+        f"Amount: ${contract.get('total_contract_value', 0):.2f}\n"
+        f"Invoice #: {contract.get('invoice_number', '')}\n"
+        f"Billing Date: {billing_date}\n"
+        f"Description: {contract.get('description', '')}\n"
+        f"Source: {contract.get('source', 'manual')}\n"
+    )
+    if contract.get("raw"):
+        import json as _json
+        user_msg += f"Raw data: {_json.dumps(contract['raw'], default=str)[:800]}\n"
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=MODEL, max_tokens=600, system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        return json.loads(raw)
+    except Exception as exc:
+        return {
+            "revenue_stream_id": None,
+            "service_period_start": None,
+            "service_period_end": None,
+            "confidence": 0.0,
+            "reasoning": f"AI analysis failed: {exc}",
+            "flag_for_review": True,
+            "flag_reason": "AI error",
+        }
+
+
+# ── Accrual analysis ──────────────────────────────────────────────────────────
+
+def analyze_for_accrual(transactions: list, client_obj) -> list[dict]:
+    """
+    Analyze a list of pending/recent payment transactions and determine which
+    ones require accrual journal entries.
+
+    Returns a list of dicts:
+      {
+        "transaction_id": int,
+        "vendor_name": str,
+        "description": str,
+        "service_period": "YYYY-MM",
+        "amount": float,
+        "expense_account": str,
+        "accrued_account": str,
+        "confidence": float,
+        "reasoning": str,
+        "needs_accrual": bool,
+      }
+    """
+    import anthropic
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    if not transactions:
+        return []
+
+    chart = _resolve_chart(client_obj)
+    policy = _read_file_safe(client_obj.policy_path)
+
+    system_parts = [
+        "You are an expert bookkeeper specializing in accrual accounting.",
+        "For each transaction, determine whether it requires an accrual journal entry.",
+        "An accrual is needed when the expense relates to a specific service period that may differ from the payment date.",
+        "Respond with ONLY a JSON array — no markdown, no explanation.",
+        "",
+        "For each transaction, return an object:",
+        '{"transaction_id": 123, "needs_accrual": true, "vendor_name": "Vendor", "description": "Brief description", "service_period": "2026-03", "expense_account": "Professional Services", "accrued_account": "Accrued Expenses", "confidence": 0.9, "reasoning": "explanation"}',
+        "",
+        "Rules:",
+        "- needs_accrual=true for: professional services, subscriptions, rent, utilities, payroll, insurance",
+        "- needs_accrual=false for: one-time purchases of goods, asset purchases, transfers",
+        "- service_period: the month the service was rendered (YYYY-MM format). If unclear, use the payment month.",
+        "- Use EXACT account names from the Chart of Accounts if provided.",
+        "- confidence: 0.0=total guess, 1.0=certain",
+    ]
+    if chart:
+        system_parts.append(f"\n## Chart of Accounts\n{chart[:3000]}")
+    if policy:
+        system_parts.append(f"\n## Accounting Policy\n{policy[:2000]}")
+
+    system = "\n".join(system_parts)
+
+    txn_list = [
+        {
+            "transaction_id": t.id,
+            "date": t.date.strftime("%Y-%m-%d") if t.date else "",
+            "description": t.description or "",
+            "amount": abs(t.amount),
+            "counterparty": t.counterparty_name or "",
+            "mercury_status": getattr(t, "mercury_status", "") or "",
+            "invoice_text": (getattr(t, "invoice_text", "") or "")[:500],
+        }
+        for t in transactions
+    ]
+
+    user_msg = (
+        f"Analyze these {len(txn_list)} payment transactions for accrual requirements:\n"
+        f"{json.dumps(txn_list, indent=2)}"
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        results = json.loads(raw)
+        if not isinstance(results, list):
+            results = []
+        return results
+    except Exception as exc:
+        return [
+            {
+                "transaction_id": t.id,
+                "needs_accrual": False,
+                "vendor_name": t.counterparty_name or t.description or "",
+                "description": "",
+                "service_period": t.date.strftime("%Y-%m") if t.date else "",
+                "expense_account": "Professional Services",
+                "accrued_account": "Accrued Expenses",
+                "confidence": 0.0,
+                "reasoning": f"Analysis failed: {exc}",
+            }
+            for t in transactions
+        ]

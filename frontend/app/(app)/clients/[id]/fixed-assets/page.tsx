@@ -4,10 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   getFixedAssets, createFixedAsset, updateFixedAsset, disposeFixedAsset,
-  generateDepreciationJEs, getChartOfAccounts, getQboAccounts,
+  generateDepreciationJEs,
   suggestFixedAssetByName,
   FixedAsset, DepreciationPeriod, FixedAssetSuggestion,
 } from "@/lib/api";
+import { useAccounts } from "@/lib/useAccounts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -730,8 +731,7 @@ export default function FixedAssetsPage() {
   const clientId = Number(id);
 
   const [assets, setAssets] = useState<FixedAsset[]>([]);
-  const [accounts, setAccounts] = useState<string[]>([]);
-  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const { accounts, error: accountsError } = useAccounts(clientId);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -739,27 +739,9 @@ export default function FixedAssetsPage() {
   const [generating, setGenerating] = useState(false);
   const [genResult, setGenResult] = useState<{ created: number; skipped: number } | null>(null);
 
-  const loadAccounts = useCallback(async () => {
-    setAccountsError(null);
-    const [coa, qboResult] = await Promise.all([
-      getChartOfAccounts(clientId).catch(() => [] as string[]),
-      getQboAccounts(clientId).catch((e: unknown) => {
-        const msg = e instanceof Error ? e.message : "";
-        if (!msg.includes("not connected") && !msg.includes("not found"))
-          setAccountsError(msg || "Failed to load QBO accounts");
-        return [] as string[];
-      }),
-    ]);
-    const merged = Array.from(new Set([...coa, ...qboResult])).sort();
-    setAccounts(merged);
-  }, [clientId]);
-
   useEffect(() => {
-    Promise.all([
-      getFixedAssets(clientId).then(setAssets),
-      loadAccounts(),
-    ]).finally(() => setLoading(false));
-  }, [clientId, loadAccounts]);
+    getFixedAssets(clientId).then(setAssets).finally(() => setLoading(false));
+  }, [clientId]);
 
   async function handleDispose(asset: FixedAsset) {
     if (!confirm(`Mark "${asset.name}" as disposed? This cannot be undone.`)) return;
@@ -818,7 +800,7 @@ export default function FixedAssetsPage() {
             {accountsError ? (
               <span className="text-xs text-red-400 flex items-center gap-1.5">
                 ⚠ COA: {accountsError}
-                <button onClick={loadAccounts} className="underline text-indigo-400 hover:text-indigo-300">Retry</button>
+                <button onClick={() => window.location.reload()} className="underline text-indigo-400 hover:text-indigo-300">Retry</button>
               </span>
             ) : accounts.length > 0 ? (
               <span className="text-xs text-gray-600">{accounts.length} accounts loaded</span>

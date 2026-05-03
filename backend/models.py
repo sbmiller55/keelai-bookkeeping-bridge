@@ -241,6 +241,142 @@ class CloseChecklistCompletion(Base):
     completed_at = Column(DateTime, default=datetime.utcnow)
 
 
+class BillingType(str, enum.Enum):
+    annual_upfront = "annual_upfront"
+    quarterly_upfront = "quarterly_upfront"
+    monthly_advance = "monthly_advance"
+    monthly_arrears = "monthly_arrears"
+    invoice_completion = "invoice_completion"
+
+
+class RevenueContractStatus(str, enum.Enum):
+    active = "active"
+    fully_recognized = "fully_recognized"
+    cancelled = "cancelled"
+
+
+class RevenueStream(Base):
+    __tablename__ = "revenue_streams"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    name = Column(String, nullable=False)
+    billing_type = Column(SAEnum(BillingType), nullable=False)
+    revenue_account = Column(String, nullable=False)
+    deferred_revenue_account = Column(String, default="Deferred Revenue", nullable=False)
+    ar_account = Column(String, default="Accounts Receivable", nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RevenueContract(Base):
+    __tablename__ = "revenue_contracts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    revenue_stream_id = Column(Integer, ForeignKey("revenue_streams.id"), nullable=True)
+    customer_name = Column(String, nullable=False)
+    external_id = Column(String, nullable=True, index=True)  # Stripe invoice ID, Mercury tx ID, etc.
+    source = Column(String, nullable=False, default="manual")  # mercury, stripe, billcom, manual
+    invoice_number = Column(String, nullable=True)
+    total_contract_value = Column(Float, nullable=False)
+    billing_date = Column(DateTime, nullable=True)
+    due_date = Column(DateTime, nullable=True)
+    service_period_start = Column(DateTime, nullable=True)
+    service_period_end = Column(DateTime, nullable=True)
+    amount_recognized = Column(Float, default=0.0, nullable=False)
+    payment_received = Column(Boolean, default=False, nullable=False)
+    payment_date = Column(DateTime, nullable=True)
+    status = Column(
+        SAEnum(RevenueContractStatus),
+        default=RevenueContractStatus.active,
+        nullable=False,
+    )
+    ai_confidence = Column(Float, nullable=True)
+    ai_reasoning = Column(Text, nullable=True)
+    raw_data = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RevenueScheduleEntry(Base):
+    __tablename__ = "revenue_schedule_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contract_id = Column(Integer, ForeignKey("revenue_contracts.id"), nullable=False)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    period = Column(String(7), nullable=False)  # "YYYY-MM"
+    amount = Column(Float, nullable=False)
+    je_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    recognized = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RevenueIntegrationSettings(Base):
+    __tablename__ = "revenue_integration_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, unique=True)
+    mercury_revenue_enabled = Column(Boolean, default=False, nullable=False)
+    stripe_enabled = Column(Boolean, default=False, nullable=False)
+    stripe_api_key = Column(Text, nullable=True)
+    billcom_enabled = Column(Boolean, default=False, nullable=False)
+    billcom_username = Column(String, nullable=True)
+    billcom_password = Column(Text, nullable=True)
+    billcom_org_id = Column(String, nullable=True)
+    billcom_dev_key = Column(String, nullable=True)
+    last_stripe_sync = Column(DateTime, nullable=True)
+    last_billcom_sync = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AccruedExpenseStatus(str, enum.Enum):
+    accrued = "accrued"
+    partially_paid = "partially_paid"
+    cleared = "cleared"
+
+
+class AccruedExpense(Base):
+    __tablename__ = "accrued_expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    vendor_name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    service_period = Column(String(7), nullable=False)  # "YYYY-MM"
+    amount = Column(Float, nullable=False)
+    source_transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
+    accrual_je_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    payment_je_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    expected_payment_date = Column(DateTime, nullable=True)
+    status = Column(
+        SAEnum(AccruedExpenseStatus),
+        default=AccruedExpenseStatus.accrued,
+        nullable=False,
+    )
+    ai_confidence = Column(Float, nullable=True)
+    ai_reasoning = Column(Text, nullable=True)
+    standing_rule_id = Column(Integer, ForeignKey("standing_accrual_rules.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Prepaid amortization accounts — stored so the JE can be created on-demand each month
+    debit_account = Column(String, nullable=True)
+    credit_account = Column(String, nullable=True)
+
+
+class StandingAccrualRule(Base):
+    __tablename__ = "standing_accrual_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    vendor_name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    expense_account = Column(String, nullable=False)
+    accrued_account = Column(String, default="Accrued Expenses", nullable=False)
+    amount = Column(Float, nullable=True)  # None = variable / prompt each month
+    active = Column(Boolean, default=True, nullable=False)
+    last_generated = Column(String(7), nullable=True)  # "YYYY-MM"
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class FixedAsset(Base):
     __tablename__ = "fixed_assets"
 

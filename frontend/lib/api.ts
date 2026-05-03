@@ -517,6 +517,12 @@ export interface InvoiceUploadResult {
     status: string;
   };
   journal_entries: InvoiceJE[];
+  // Prepaid-only fields
+  invoice_type?: string;
+  service_start?: string;
+  service_end?: string;
+  expense_account?: string;
+  prepaid_account?: string;
 }
 
 export async function uploadInvoice(clientId: number, file: File): Promise<InvoiceUploadResult> {
@@ -534,6 +540,25 @@ export async function uploadInvoice(clientId: number, file: File): Promise<Invoi
     throw new Error(err.detail ?? "Upload failed");
   }
   return res.json();
+}
+
+export async function recalculatePrepaid(
+  transactionId: number,
+  serviceStart: string,
+  serviceEnd: string,
+  expenseAccount: string,
+  prepaidAccount: string,
+): Promise<InvoiceUploadResult> {
+  return apiFetch<InvoiceUploadResult>("/invoices/recalculate", {
+    method: "POST",
+    body: JSON.stringify({
+      transaction_id: transactionId,
+      service_start: serviceStart,
+      service_end: serviceEnd,
+      expense_account: expenseAccount,
+      prepaid_account: prepaidAccount,
+    }),
+  });
 }
 
 export function syncMercury(
@@ -576,6 +601,7 @@ export interface VendorWithClass {
   count: number;
   last_seen: string;
   class_name: VendorClass | null;
+  skipped: boolean;
 }
 
 export function getVendorClasses(clientId: number): Promise<VendorWithClass[]> {
@@ -590,6 +616,20 @@ export function setVendorClass(
   return apiFetch("/transactions/vendor-classes", {
     method: "POST",
     body: JSON.stringify({ client_id: clientId, vendor_name: vendorName, class_name: className }),
+  });
+}
+
+export function skipVendor(clientId: number, name: string): Promise<void> {
+  return apiFetch("/transactions/vendor-classes/skip", {
+    method: "POST",
+    body: JSON.stringify({ client_id: clientId, name }),
+  });
+}
+
+export function unskipVendor(clientId: number, name: string): Promise<void> {
+  return apiFetch("/transactions/vendor-classes/unskip", {
+    method: "POST",
+    body: JSON.stringify({ client_id: clientId, name }),
   });
 }
 
@@ -828,4 +868,328 @@ export function generateDepreciationJEs(
   return apiFetch(`/clients/${clientId}/fixed-assets/generate-depreciation?month=${month}`, {
     method: "POST",
   });
+}
+
+// ── Accrued Expenses ──────────────────────────────────────────────────────────
+
+export interface AccruedExpense {
+  id: number;
+  client_id: number;
+  vendor_name: string;
+  description: string | null;
+  service_period: string; // "YYYY-MM"
+  amount: number;
+  source_transaction_id: number | null;
+  accrual_je_id: number | null;
+  payment_je_id: number | null;
+  expected_payment_date: string | null;
+  status: "accrued" | "partially_paid" | "cleared";
+  ai_confidence: number | null;
+  ai_reasoning: string | null;
+  standing_rule_id: number | null;
+  debit_account: string | null;
+  credit_account: string | null;
+  created_at: string;
+}
+
+export interface AccrualSummary {
+  total_accrued: number;
+  pending_payment_count: number;
+  cleared_this_month: number;
+  cleared_this_month_amount: number;
+}
+
+export interface AccrualSuggestion {
+  transaction_id: number;
+  needs_accrual: boolean;
+  vendor_name: string;
+  description: string;
+  service_period: string;
+  expense_account: string;
+  accrued_account: string;
+  confidence: number;
+  reasoning: string;
+  amount?: number;
+}
+
+export interface StandingAccrualRule {
+  id: number;
+  client_id: number;
+  vendor_name: string;
+  description: string | null;
+  expense_account: string;
+  accrued_account: string;
+  amount: number | null;
+  active: boolean;
+  last_generated: string | null;
+  created_at: string;
+}
+
+export function getAccruals(clientId: number, status?: string): Promise<{ summary: AccrualSummary; accruals: AccruedExpense[] }> {
+  const qs = status ? `?status=${status}` : "";
+  return apiFetch(`/clients/${clientId}/accruals${qs}`);
+}
+
+export function createAccrual(clientId: number, data: {
+  vendor_name: string;
+  description?: string;
+  service_period: string;
+  amount: number;
+  source_transaction_id?: number;
+  expected_payment_date?: string;
+  expense_account: string;
+  accrued_account: string;
+}): Promise<AccruedExpense> {
+  return apiFetch(`/clients/${clientId}/accruals`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateAccrual(clientId: number, aeId: number, data: {
+  status?: string;
+  expected_payment_date?: string | null;
+  description?: string;
+  amount?: number;
+}): Promise<AccruedExpense> {
+  return apiFetch(`/clients/${clientId}/accruals/${aeId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteAccrual(clientId: number, aeId: number): Promise<void> {
+  return apiFetch(`/clients/${clientId}/accruals/${aeId}`, { method: "DELETE" });
+}
+
+export function releaseAccrual(clientId: number, aeId: number): Promise<{ accrual_id: number; transaction_id: number; je_id: number; service_period: string }> {
+  return apiFetch(`/clients/${clientId}/accruals/${aeId}/release`, { method: "POST" });
+}
+
+export function analyzeForAccruals(clientId: number): Promise<{ suggestions: AccrualSuggestion[] }> {
+  return apiFetch(`/clients/${clientId}/accruals/analyze`, { method: "POST" });
+}
+
+export function getStandingRules(clientId: number): Promise<StandingAccrualRule[]> {
+  return apiFetch(`/clients/${clientId}/accruals/standing-rules`);
+}
+
+export function createStandingRule(clientId: number, data: {
+  vendor_name: string;
+  description?: string;
+  expense_account: string;
+  accrued_account?: string;
+  amount?: number;
+}): Promise<StandingAccrualRule> {
+  return apiFetch(`/clients/${clientId}/accruals/standing-rules`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateStandingRule(clientId: number, ruleId: number, data: Partial<{
+  vendor_name: string;
+  description: string;
+  expense_account: string;
+  accrued_account: string;
+  amount: number | null;
+  active: boolean;
+}>): Promise<StandingAccrualRule> {
+  return apiFetch(`/clients/${clientId}/accruals/standing-rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteStandingRule(clientId: number, ruleId: number): Promise<void> {
+  return apiFetch(`/clients/${clientId}/accruals/standing-rules/${ruleId}`, { method: "DELETE" });
+}
+
+export function generateFromStandingRules(clientId: number, month?: string): Promise<{
+  generated: string[];
+  skipped: string[];
+  month: string;
+}> {
+  const qs = month ? `?month=${month}` : "";
+  return apiFetch(`/clients/${clientId}/accruals/standing-rules/generate${qs}`, { method: "POST" });
+}
+
+// ── Revenue Recognition ───────────────────────────────────────────────────────
+
+export type BillingType =
+  | "annual_upfront"
+  | "quarterly_upfront"
+  | "monthly_advance"
+  | "monthly_arrears"
+  | "invoice_completion";
+
+export const BILLING_TYPE_LABELS: Record<BillingType, string> = {
+  annual_upfront:    "Annual Upfront",
+  quarterly_upfront: "Quarterly Upfront",
+  monthly_advance:   "Monthly in Advance",
+  monthly_arrears:   "Monthly in Arrears",
+  invoice_completion:"Invoice at Completion",
+};
+
+export interface RevenueStream {
+  id: number;
+  client_id: number;
+  name: string;
+  billing_type: BillingType;
+  revenue_account: string;
+  deferred_revenue_account: string;
+  ar_account: string;
+  active: boolean;
+  created_at: string;
+}
+
+export interface RevenueScheduleEntry {
+  id: number;
+  contract_id: number;
+  period: string;       // "YYYY-MM"
+  amount: number;
+  je_id: number | null;
+  recognized: boolean;
+  created_at: string;
+}
+
+export interface RevenueContract {
+  id: number;
+  client_id: number;
+  revenue_stream_id: number | null;
+  customer_name: string;
+  external_id: string | null;
+  source: string;
+  invoice_number: string | null;
+  total_contract_value: number;
+  billing_date: string | null;
+  due_date: string | null;
+  service_period_start: string | null;
+  service_period_end: string | null;
+  amount_recognized: number;
+  amount_deferred: number;
+  payment_received: boolean;
+  payment_date: string | null;
+  status: "active" | "fully_recognized" | "cancelled";
+  ai_confidence: number | null;
+  ai_reasoning: string | null;
+  created_at: string;
+  schedule: RevenueScheduleEntry[];
+}
+
+export interface RevenueSummary {
+  recognized_this_month: number;
+  total_deferred: number;
+  total_ar_outstanding: number;
+  invoices_overdue: number;
+}
+
+export interface ArAgingRow {
+  id: number;
+  customer_name: string;
+  invoice_number: string | null;
+  billing_date: string | null;
+  due_date: string | null;
+  amount: number;
+  days_outstanding: number;
+  days_past_due: number;
+  aging_bucket: "current" | "1-30" | "31-60" | "61-90" | "over-90";
+  source: string;
+}
+
+export interface RevenueIntegrationSettings {
+  client_id: number;
+  mercury_revenue_enabled: boolean;
+  stripe_enabled: boolean;
+  stripe_api_key: string | null;
+  billcom_enabled: boolean;
+  billcom_username: string | null;
+  billcom_org_id: string | null;
+  billcom_dev_key: string | null;
+  last_stripe_sync: string | null;
+  last_billcom_sync: string | null;
+}
+
+// Revenue Streams
+export function getRevenueStreams(clientId: number): Promise<RevenueStream[]> {
+  return apiFetch(`/clients/${clientId}/revenue/streams`);
+}
+export function createRevenueStream(clientId: number, data: {
+  name: string; billing_type: BillingType;
+  revenue_account: string; deferred_revenue_account: string; ar_account: string;
+}): Promise<RevenueStream> {
+  return apiFetch(`/clients/${clientId}/revenue/streams`, { method: "POST", body: JSON.stringify(data) });
+}
+export function updateRevenueStream(clientId: number, streamId: number, data: Partial<{
+  name: string; billing_type: BillingType; revenue_account: string;
+  deferred_revenue_account: string; ar_account: string; active: boolean;
+}>): Promise<RevenueStream> {
+  return apiFetch(`/clients/${clientId}/revenue/streams/${streamId}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export function deleteRevenueStream(clientId: number, streamId: number): Promise<void> {
+  return apiFetch(`/clients/${clientId}/revenue/streams/${streamId}`, { method: "DELETE" });
+}
+
+// Revenue Contracts
+export function getRevenueSummary(clientId: number): Promise<RevenueSummary> {
+  return apiFetch(`/clients/${clientId}/revenue/summary`);
+}
+export function getRevenueContracts(clientId: number, status?: string): Promise<RevenueContract[]> {
+  const qs = status ? `?status=${status}` : "";
+  return apiFetch(`/clients/${clientId}/revenue/contracts${qs}`);
+}
+export function createRevenueContract(clientId: number, data: {
+  customer_name: string; revenue_stream_id?: number; invoice_number?: string;
+  total_contract_value: number; billing_date?: string; due_date?: string;
+  service_period_start?: string; service_period_end?: string;
+  payment_received?: boolean; payment_date?: string; source?: string;
+}): Promise<RevenueContract> {
+  return apiFetch(`/clients/${clientId}/revenue/contracts`, { method: "POST", body: JSON.stringify(data) });
+}
+export function updateRevenueContract(clientId: number, contractId: number, data: Partial<{
+  status: string; revenue_stream_id: number; service_period_start: string;
+  service_period_end: string; payment_received: boolean; payment_date: string; due_date: string;
+}>): Promise<RevenueContract> {
+  return apiFetch(`/clients/${clientId}/revenue/contracts/${contractId}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export function deleteRevenueContract(clientId: number, contractId: number): Promise<void> {
+  return apiFetch(`/clients/${clientId}/revenue/contracts/${contractId}`, { method: "DELETE" });
+}
+export function generateRevenueJEs(clientId: number, contractId: number, period?: string): Promise<{ created: string[]; contract_id: number }> {
+  const qs = period ? `?period=${period}` : "";
+  return apiFetch(`/clients/${clientId}/revenue/contracts/${contractId}/generate-jes${qs}`, { method: "POST" });
+}
+
+// AR Aging
+export function getArAging(clientId: number): Promise<ArAgingRow[]> {
+  return apiFetch(`/clients/${clientId}/revenue/ar-aging`);
+}
+
+// Integration Settings
+export function getRevenueIntegrationSettings(clientId: number): Promise<RevenueIntegrationSettings> {
+  return apiFetch(`/clients/${clientId}/revenue/integration-settings`);
+}
+export function updateRevenueIntegrationSettings(clientId: number, data: Partial<{
+  mercury_revenue_enabled: boolean; stripe_enabled: boolean; stripe_api_key: string;
+  billcom_enabled: boolean; billcom_username: string; billcom_password: string;
+  billcom_org_id: string; billcom_dev_key: string;
+}>): Promise<{ ok: boolean }> {
+  return apiFetch(`/clients/${clientId}/revenue/integration-settings`, { method: "PUT", body: JSON.stringify(data) });
+}
+export function syncRevenueSources(clientId: number): Promise<{ imported: number; contracts: string[]; errors: string[] }> {
+  return apiFetch(`/clients/${clientId}/revenue/sync`, { method: "POST" });
+}
+export function bulkMatchContracts(clientId: number, streamId: number): Promise<{ updated: number }> {
+  return apiFetch(`/clients/${clientId}/revenue/contracts/bulk-match`, { method: "POST", body: JSON.stringify({ stream_id: streamId }) });
+}
+export function generateAllJEs(clientId: number): Promise<{ created: number; errors: string[] }> {
+  return apiFetch(`/clients/${clientId}/revenue/generate-all-jes`, { method: "POST" });
+}
+
+// Bill.com
+export function testBillcomConnection(clientId: number): Promise<{ ok: boolean; message: string }> {
+  return apiFetch(`/clients/${clientId}/billcom/test`, { method: "POST" });
+}
+export function syncBillcomAP(clientId: number): Promise<{ imported: number; skipped: number }> {
+  return apiFetch(`/clients/${clientId}/billcom/sync-ap`, { method: "POST" });
 }

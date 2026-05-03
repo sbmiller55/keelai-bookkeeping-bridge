@@ -55,12 +55,15 @@ QBO_PARENT: dict[str, str] = {
     "Travel meals":                           "Travel",
     "Vehicle rental":                         "Travel",
     "Series Seed":                            "Preferred stock",
+    "Interest Earned":                        "Other Income",
 }
 
 # Mercury API name normalization — same as frontend MERCURY_NAME_MAP
 MERCURY_NAME_MAP: dict[str, str] = {
     "Mercury Checking ••9882": "Mercury Checking (9882) - 1",
+    "Mercury Checking":        "Mercury Checking (9882) - 1",
     "Mercury Savings ••3117":  "Mercury Savings (3117) - 1",
+    "Mercury Savings":         "Mercury Savings (3117) - 1",
     "Mercury Treasury":        "Mercury Treasury - 1",
 }
 
@@ -258,8 +261,11 @@ class QBOClient:
             name   = acc.get("Name", "")
             if fqn:
                 m[fqn] = acc_id
+                m[fqn.lower()] = acc_id          # case-insensitive fallback
             if name and name not in m:
                 m[name] = acc_id
+                if name.lower() not in m:
+                    m[name.lower()] = acc_id     # case-insensitive fallback
         return m
 
     def get_coa_names(self) -> list[str]:

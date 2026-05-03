@@ -1,3 +1,5 @@
+import re
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -156,45 +158,163 @@ VENDOR_CLASSES = {
 }
 
 
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+def _normalize_vendor_name(counterparty_name: str | None, description: str) -> str | None:
+    """
+    Return a cleaned vendor name, preferring counterparty_name over description.
+    Strips transaction-specific noise; returns title-cased result.
+    """
+    raw = (counterparty_name or "").strip() or (description or "").strip()
+    if not raw:
+        return None
+
+    name = raw
+    # Strip everything after * (e.g. "AMZN MKTP US*1A2B3C" → "AMZN MKTP US")
+    name = re.sub(r'\*.*', '', name)
+    # Strip trailing digit-heavy tokens (order IDs, phone numbers, zip codes)
+    name = re.sub(r'[\s\-]+\d[\d\-\.]+$', '', name.strip())
+    # Strip US city/state suffixes like "SAN FRANCISCO CA" or "SEATTLE WA 98109"
+    name = re.sub(r'[\s,]+[A-Z]{2}\s*\d{0,5}$', '', name.strip())
+    # Strip trailing month names (e.g. "Depreciation - Domain Name - February")
+    name = re.sub(
+        r'[\s\-]+(?:' + '|'.join(_MONTHS) + r')(?:\s+\d{4})?$',
+        '', name.strip(), flags=re.IGNORECASE,
+    )
+    # Strip trailing punctuation / dashes
+    name = re.sub(r'[\s\-\.,]+$', '', name).strip()
+
+    name = name.title()
+
+    _NOISE = {
+        "In", "Out", "Transfer", "Debit", "Credit", "Fee", "Ach",
+        "Wire", "Check", "Payment", "Deposit", "Withdrawal", "Pending",
+        "Hold", "Return", "Refund", "Void", "Memo", "Note", "Other",
+        "Unknown", "N/A", "Na", "None",
+    }
+    if len(name) < 3 or re.match(r'^\d+$', name) or name in _NOISE:
+        return None
+
+    return name
+
+
 @router.get("/vendor-classes")
 def get_vendor_classes(
     client_id: int = Query(...),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return all vendors ever seen for a client, with their class assignment if set."""
+    """Return all vendors ever seen for a client, with their class assignment and skip status."""
     _assert_client_owned(client_id, current_user, db)
-    from sqlalchemy import func
-    rows = (
+
+    txns = (
         db.query(
             models.Transaction.counterparty_name,
-            func.count(models.Transaction.id).label("count"),
-            func.max(models.Transaction.date).label("last_seen"),
+            models.Transaction.description,
+            models.Transaction.date,
         )
         .filter(
             models.Transaction.client_id == client_id,
-            models.Transaction.counterparty_name.isnot(None),
-            models.Transaction.counterparty_name != "",
+            models.Transaction.status != models.TransactionStatus.transfer,
+            models.Transaction.status != models.TransactionStatus.rejected,
         )
-        .group_by(models.Transaction.counterparty_name)
-        .order_by(models.Transaction.counterparty_name)
         .all()
     )
+
+    # Group by normalized (title-cased) vendor name — case-insensitive by construction
+    groups: dict[str, dict] = {}
+    for txn in txns:
+        name = _normalize_vendor_name(txn.counterparty_name, txn.description)
+        if not name:
+            continue
+        if name not in groups:
+            groups[name] = {"count": 0, "last_seen": txn.date}
+        groups[name]["count"] += 1
+        if txn.date > groups[name]["last_seen"]:
+            groups[name]["last_seen"] = txn.date
+
+    # Case-insensitive lookups so stored "ATTIO INC" matches display "Attio Inc"
     classifications = {
-        r.vendor_name: r.class_name
+        r.vendor_name.lower(): r.class_name
         for r in db.query(models.VendorClassification)
         .filter(models.VendorClassification.client_id == client_id)
         .all()
     }
-    return [
-        {
-            "name": r.counterparty_name,
-            "count": r.count,
-            "last_seen": r.last_seen.strftime("%Y-%m-%d"),
-            "class_name": classifications.get(r.counterparty_name),
-        }
-        for r in rows
-    ]
+    skipped = {
+        r.name.lower()
+        for r in db.query(models.DismissedVendor.name)
+        .filter(
+            models.DismissedVendor.client_id == client_id,
+            models.DismissedVendor.reason == "skipped",
+        )
+        .all()
+    }
+
+    return sorted(
+        [
+            {
+                "name": name,
+                "count": data["count"],
+                "last_seen": data["last_seen"].strftime("%Y-%m-%d"),
+                "class_name": classifications.get(name.lower()),
+                "skipped": name.lower() in skipped,
+            }
+            for name, data in groups.items()
+        ],
+        key=lambda r: r["name"],
+    )
+
+
+class VendorSkipRequest(BaseModel):
+    client_id: int
+    name: str
+
+
+@router.post("/vendor-classes/skip", status_code=status.HTTP_204_NO_CONTENT)
+def skip_vendor(
+    payload: VendorSkipRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a vendor as skipped so it is hidden from the classification view."""
+    _assert_client_owned(payload.client_id, current_user, db)
+    existing = (
+        db.query(models.DismissedVendor)
+        .filter(
+            models.DismissedVendor.client_id == payload.client_id,
+            models.DismissedVendor.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        existing.reason = "skipped"
+        existing.dismissed_at = datetime.utcnow()
+    else:
+        db.add(models.DismissedVendor(
+            client_id=payload.client_id,
+            name=payload.name,
+            reason="skipped",
+        ))
+    db.commit()
+
+
+@router.post("/vendor-classes/unskip", status_code=status.HTTP_204_NO_CONTENT)
+def unskip_vendor(
+    payload: VendorSkipRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove a vendor from the skipped list."""
+    _assert_client_owned(payload.client_id, current_user, db)
+    db.query(models.DismissedVendor).filter(
+        models.DismissedVendor.client_id == payload.client_id,
+        models.DismissedVendor.name == payload.name,
+        models.DismissedVendor.reason == "skipped",
+    ).delete()
+    db.commit()
 
 
 class VendorClassRequest(BaseModel):

@@ -322,6 +322,218 @@ class FixedAssetUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+# ── Revenue schemas ───────────────────────────────────────────────────────────
+
+class RevenueStreamCreate(BaseModel):
+    name: str
+    billing_type: str  # annual_upfront | quarterly_upfront | monthly_advance | monthly_arrears | invoice_completion
+    revenue_account: str
+    deferred_revenue_account: str = "Deferred Revenue"
+    ar_account: str = "Accounts Receivable"
+
+
+class RevenueStreamUpdate(BaseModel):
+    name: Optional[str] = None
+    billing_type: Optional[str] = None
+    revenue_account: Optional[str] = None
+    deferred_revenue_account: Optional[str] = None
+    ar_account: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class RevenueStreamRead(BaseModel):
+    id: int
+    client_id: int
+    name: str
+    billing_type: str
+    revenue_account: str
+    deferred_revenue_account: str
+    ar_account: str
+    active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RevenueContractCreate(BaseModel):
+    customer_name: str
+    revenue_stream_id: Optional[int] = None
+    external_id: Optional[str] = None
+    source: str = "manual"
+    invoice_number: Optional[str] = None
+    total_contract_value: float
+    billing_date: Optional[datetime] = None
+    due_date: Optional[datetime] = None
+    service_period_start: Optional[datetime] = None
+    service_period_end: Optional[datetime] = None
+    payment_received: bool = False
+    payment_date: Optional[datetime] = None
+
+
+class RevenueContractUpdate(BaseModel):
+    customer_name: Optional[str] = None
+    revenue_stream_id: Optional[int] = None
+    status: Optional[str] = None
+    service_period_start: Optional[datetime] = None
+    service_period_end: Optional[datetime] = None
+    payment_received: Optional[bool] = None
+    payment_date: Optional[datetime] = None
+    due_date: Optional[datetime] = None
+    amount_recognized: Optional[float] = None
+
+
+class RevenueScheduleEntryRead(BaseModel):
+    id: int
+    contract_id: int
+    period: str
+    amount: float
+    je_id: Optional[int] = None
+    recognized: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class RevenueContractRead(BaseModel):
+    id: int
+    client_id: int
+    revenue_stream_id: Optional[int] = None
+    customer_name: str
+    external_id: Optional[str] = None
+    source: str
+    invoice_number: Optional[str] = None
+    total_contract_value: float
+    billing_date: Optional[datetime] = None
+    due_date: Optional[datetime] = None
+    service_period_start: Optional[datetime] = None
+    service_period_end: Optional[datetime] = None
+    amount_recognized: float
+    payment_received: bool
+    payment_date: Optional[datetime] = None
+    status: str
+    ai_confidence: Optional[float] = None
+    ai_reasoning: Optional[str] = None
+    created_at: datetime
+    schedule: list[RevenueScheduleEntryRead] = []
+
+    model_config = {"from_attributes": True}
+
+
+class RevenueSummary(BaseModel):
+    recognized_this_month: float
+    total_deferred: float
+    total_ar_outstanding: float
+    invoices_overdue: int
+
+
+class RevenueIntegrationSettingsRead(BaseModel):
+    client_id: int
+    mercury_revenue_enabled: bool
+    stripe_enabled: bool
+    stripe_api_key: Optional[str] = None  # masked
+    billcom_enabled: bool
+    billcom_username: Optional[str] = None
+    billcom_org_id: Optional[str] = None
+    billcom_dev_key: Optional[str] = None
+    last_stripe_sync: Optional[datetime] = None
+    last_billcom_sync: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class RevenueIntegrationSettingsUpdate(BaseModel):
+    mercury_revenue_enabled: Optional[bool] = None
+    stripe_enabled: Optional[bool] = None
+    stripe_api_key: Optional[str] = None
+    billcom_enabled: Optional[bool] = None
+    billcom_username: Optional[str] = None
+    billcom_password: Optional[str] = None
+    billcom_org_id: Optional[str] = None
+    billcom_dev_key: Optional[str] = None
+
+
+# ── Accrued Expense schemas ───────────────────────────────────────────────────
+
+class AccruedExpenseCreate(BaseModel):
+    vendor_name: str
+    description: Optional[str] = None
+    service_period: str  # "YYYY-MM"
+    amount: float
+    source_transaction_id: Optional[int] = None
+    expected_payment_date: Optional[datetime] = None
+    expense_account: str = "Professional Services"
+    accrued_account: str = "Accrued Expenses"
+    bank_account: Optional[str] = None  # needed when creating payment JE immediately
+
+
+class AccruedExpenseUpdate(BaseModel):
+    status: Optional[str] = None
+    expected_payment_date: Optional[datetime] = None
+    description: Optional[str] = None
+    amount: Optional[float] = None
+
+
+class AccruedExpenseRead(BaseModel):
+    id: int
+    client_id: int
+    vendor_name: str
+    description: Optional[str] = None
+    service_period: str
+    amount: float
+    source_transaction_id: Optional[int] = None
+    accrual_je_id: Optional[int] = None
+    payment_je_id: Optional[int] = None
+    expected_payment_date: Optional[datetime] = None
+    status: str
+    ai_confidence: Optional[float] = None
+    ai_reasoning: Optional[str] = None
+    standing_rule_id: Optional[int] = None
+    created_at: datetime
+    debit_account: Optional[str] = None
+    credit_account: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class AccrualSummary(BaseModel):
+    total_accrued: float
+    pending_payment_count: int
+    cleared_this_month: int
+    cleared_this_month_amount: float
+
+
+class StandingAccrualRuleCreate(BaseModel):
+    vendor_name: str
+    description: Optional[str] = None
+    expense_account: str
+    accrued_account: str = "Accrued Expenses"
+    amount: Optional[float] = None
+
+
+class StandingAccrualRuleUpdate(BaseModel):
+    vendor_name: Optional[str] = None
+    description: Optional[str] = None
+    expense_account: Optional[str] = None
+    accrued_account: Optional[str] = None
+    amount: Optional[float] = None
+    active: Optional[bool] = None
+
+
+class StandingAccrualRuleRead(BaseModel):
+    id: int
+    client_id: int
+    vendor_name: str
+    description: Optional[str] = None
+    expense_account: str
+    accrued_account: str
+    amount: Optional[float] = None
+    active: bool
+    last_generated: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class DepreciationPeriod(BaseModel):
     period: str
     date: str

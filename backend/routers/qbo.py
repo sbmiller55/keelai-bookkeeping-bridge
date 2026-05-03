@@ -209,12 +209,17 @@ def sync_to_qbo(
     client = _get_client(client_id, current_user, db)
     qbo_c  = _get_qbo_client(client)
 
-    # Load approved transactions that have journal entries
+    # Load approved transactions (+ exported when force=True) that have journal entries
+    status_filter = (
+        Transaction.status.in_([TransactionStatus.approved, TransactionStatus.exported])
+        if force else
+        Transaction.status == TransactionStatus.approved
+    )
     transactions = (
         db.query(Transaction)
         .filter(
             Transaction.client_id == client_id,
-            Transaction.status    == TransactionStatus.approved,
+            status_filter,
         )
         .all()
     )

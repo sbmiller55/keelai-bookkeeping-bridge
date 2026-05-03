@@ -97,6 +97,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             <NavLink key={suffix} label={label} suffix={suffix} />
           ))}
 
+          <NavLink label="Revenue" suffix="/revenue" />
+
           {/* More toggle */}
           <button
             onClick={() => setMoreOpen((o) => !o)}

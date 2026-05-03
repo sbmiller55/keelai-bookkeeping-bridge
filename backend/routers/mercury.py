@@ -195,6 +195,12 @@ def _sync_one_client(
             skipped += 1
             continue
 
+        _TRANSFER_KINDS = {"treasuryTransfer", "internalTransfer", "externalTransfer"}
+        initial_status = (
+            models.TransactionStatus.transfer
+            if txn.get("kind") in _TRANSFER_KINDS
+            else models.TransactionStatus.pending
+        )
         new_txn = models.Transaction(
             client_id=client.id,
             mercury_transaction_id=mid or None,
@@ -210,7 +216,7 @@ def _sync_one_client(
             invoice_number=txn.get("invoice_number"),
             raw_data=txn.get("raw_data"),
             mercury_status=txn.get("mercury_status"),
-            status=models.TransactionStatus.pending,
+            status=initial_status,
             imported_at=datetime.utcnow(),
         )
 
@@ -589,10 +595,13 @@ def get_payments(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
 
+    _TRANSFER_KINDS = ("treasuryTransfer", "internalTransfer", "externalTransfer")
     payments = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.client_id == client_id,
+            models.Transaction.status != models.TransactionStatus.transfer,
+            ~models.Transaction.kind.in_(_TRANSFER_KINDS),
             (models.Transaction.kind == "outgoingPayment") |
             (models.Transaction.mercury_status == "pending"),
         )

@@ -7,6 +7,7 @@ from typing import Optional
 
 import anthropic
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import ai_coder
@@ -169,6 +170,9 @@ async def upload_invoice(
     je_data_list: list[dict] = []
     conf = min(1.0, max(0.0, float(data.get("confidence") or 0.7)))
     reasoning_str = str(data.get("reasoning", ""))[:1000]
+    _prepaid_schedule: list[dict] = []
+    _prepaid_expense_account = ""
+    _prepaid_prepaid_account = ""
 
     if invoice_type == "fixed_asset":
         je_data_list = generate_asset_jes(
@@ -188,18 +192,27 @@ async def upload_invoice(
         service_start = _parse_month(str(data.get("service_start", ""))) or invoice_date.replace(day=1)
         service_end = _parse_month(str(data.get("service_end", ""))) or _add_months(service_start, 11)
         bank_account = client_obj.mercury_account_name if hasattr(client_obj, "mercury_account_name") else "Mercury Checking"
-        je_data_list = generate_prepaid_jes(
+        expense_account = str(data.get("expense_account", "Professional Services"))[:255]
+        prepaid_account = str(data.get("prepaid_account", "Prepaid Expenses"))[:255]
+        all_jes = generate_prepaid_jes(
             total_amount=total_amount,
             payment_date=invoice_date,
             bank_account=bank_account,
-            expense_account=str(data.get("expense_account", "Professional Services"))[:255],
-            prepaid_account=str(data.get("prepaid_account", "Prepaid Expenses"))[:255],
+            expense_account=expense_account,
+            prepaid_account=prepaid_account,
             service_start=service_start,
             service_end=service_end,
             vendor=vendor,
             confidence=conf,
             reasoning=reasoning_str,
         )
+        # Only the payment JE (index 0) goes on the transaction.
+        # Monthly amortization JEs are created on-demand via the Accruals tab.
+        je_data_list = all_jes[:1]
+        # Store the amortization schedule in AccruedExpense records (no JE yet).
+        _prepaid_schedule = all_jes[1:]
+        _prepaid_expense_account = expense_account
+        _prepaid_prepaid_account = prepaid_account
     else:
         je_data_list = data.get("journal_entries") or [{
             "debit_account": "Professional Services",
@@ -242,10 +255,49 @@ async def upload_invoice(
         db.add(je)
         created_jes.append(je)
 
+    db.flush()
+
+    # For prepaid invoices, create AccruedExpense records for each monthly
+    # amortization period. No JE is created yet — the JE is created on-demand
+    # when the user releases the accrual to the Review Queue each month.
+    if invoice_type == "prepaid":
+        for jd in _prepaid_schedule:
+            jd_date = jd.get("je_date")
+            je_date = jd_date if isinstance(jd_date, datetime) else (
+                datetime.strptime(jd_date, "%Y-%m-%d") if jd_date else invoice_date
+            )
+            period_str = je_date.strftime("%Y-%m")
+            accrued = models.AccruedExpense(
+                client_id=client_id,
+                vendor_name=vendor,
+                description=description[:255],
+                service_period=period_str,
+                amount=abs(float(jd.get("amount") or 0)),
+                source_transaction_id=txn.id,
+                accrual_je_id=None,   # created on-demand via release endpoint
+                debit_account=_prepaid_expense_account,
+                credit_account=_prepaid_prepaid_account,
+                status=models.AccruedExpenseStatus.accrued,
+                ai_confidence=conf,
+                ai_reasoning=reasoning_str[:1000],
+            )
+            db.add(accrued)
+
     db.commit()
     db.refresh(txn)
     for je in created_jes:
         db.refresh(je)
+
+    # Include prepaid metadata so the frontend can show an edit form
+    extra: dict = {}
+    if invoice_type == "prepaid":
+        extra = {
+            "invoice_type": "prepaid",
+            "service_start": data.get("service_start", ""),
+            "service_end": data.get("service_end", ""),
+            "expense_account": str(data.get("expense_account", ""))[:255],
+            "prepaid_account": str(data.get("prepaid_account", "Prepaid Expenses"))[:255],
+        }
 
     return {
         "transaction": {
@@ -256,6 +308,149 @@ async def upload_invoice(
             "amount": txn.amount,
             "status": txn.status,
         },
+        "journal_entries": [
+            {
+                "id": je.id,
+                "debit_account": je.debit_account,
+                "credit_account": je.credit_account,
+                "amount": je.amount,
+                "je_date": je.je_date.strftime("%Y-%m-%d") if je.je_date else None,
+                "memo": je.memo,
+                "ai_confidence": je.ai_confidence,
+                "ai_reasoning": je.ai_reasoning,
+            }
+            for je in created_jes
+        ],
+        **extra,
+    }
+
+
+class RecalculateRequest(BaseModel):
+    transaction_id: int
+    service_start: str   # "April 2026" or "2026-04"
+    service_end: str     # "April 2027" or "2027-04"
+    expense_account: str
+    prepaid_account: str
+
+
+@router.post("/recalculate")
+def recalculate_prepaid(
+    req: RecalculateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Regenerate JEs and accruals for a prepaid transaction with new service period / accounts."""
+    txn = db.query(models.Transaction).filter(
+        models.Transaction.id == req.transaction_id,
+        models.Transaction.client_id == models.Transaction.client_id,
+    ).first()
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    # Verify ownership
+    from models import Client
+    client_obj = db.query(Client).filter(
+        Client.id == txn.client_id,
+        Client.user_id == current_user.id,
+    ).first()
+    if not client_obj:
+        raise HTTPException(404, "Transaction not found")
+
+    service_start = _parse_month(req.service_start)
+    service_end = _parse_month(req.service_end)
+    if not service_start or not service_end:
+        raise HTTPException(400, "Invalid service_start or service_end format")
+
+    total_amount = abs(txn.amount)
+    vendor = txn.counterparty_name or txn.description or "Unknown"
+    invoice_date = txn.date
+
+    bank_account = client_obj.mercury_account_name if hasattr(client_obj, "mercury_account_name") else "Mercury Checking"
+
+    # Delete existing JEs and accruals
+    from sqlalchemy import text
+    db.execute(text("DELETE FROM accrued_expenses WHERE source_transaction_id = :tid"), {"tid": txn.id})
+    existing_jes = db.query(models.JournalEntry).filter(models.JournalEntry.transaction_id == txn.id).all()
+    for je in existing_jes:
+        db.delete(je)
+    db.flush()
+
+    # Regenerate
+    je_data_list = generate_prepaid_jes(
+        total_amount=total_amount,
+        payment_date=invoice_date,
+        bank_account=bank_account,
+        expense_account=req.expense_account,
+        prepaid_account=req.prepaid_account,
+        service_start=service_start,
+        service_end=service_end,
+        vendor=vendor,
+        confidence=0.9,
+        reasoning=f"Recalculated: {req.service_start} – {req.service_end}",
+    )
+
+    # Only put the payment JE (index 0) on the transaction.
+    # Monthly JEs are created on-demand via the Accruals tab release endpoint.
+    payment_jd = je_data_list[0]
+    monthly_schedule = je_data_list[1:]
+
+    jd_date = payment_jd.get("je_date")
+    je_date = jd_date if isinstance(jd_date, datetime) else (
+        datetime.strptime(jd_date, "%Y-%m-%d") if jd_date else invoice_date
+    )
+    payment_je = models.JournalEntry(
+        transaction_id=txn.id,
+        debit_account=str(payment_jd.get("debit_account", "Uncoded"))[:255],
+        credit_account=str(payment_jd.get("credit_account", "Uncoded"))[:255],
+        amount=abs(float(payment_jd.get("amount") or total_amount)),
+        je_date=je_date,
+        memo=str(payment_jd.get("memo", ""))[:500],
+        ai_confidence=float(payment_jd.get("ai_confidence") or 0.9),
+        ai_reasoning=str(payment_jd.get("ai_reasoning") or "")[:1000],
+        is_recurring=False,
+    )
+    db.add(payment_je)
+    created_jes = [payment_je]
+    db.flush()
+
+    for jd in monthly_schedule:
+        jd_date = jd.get("je_date")
+        period_dt = jd_date if isinstance(jd_date, datetime) else (
+            datetime.strptime(jd_date, "%Y-%m-%d") if jd_date else invoice_date
+        )
+        period_str = period_dt.strftime("%Y-%m")
+        accrued = models.AccruedExpense(
+            client_id=txn.client_id,
+            vendor_name=vendor,
+            description=txn.description[:255] if txn.description else vendor[:255],
+            service_period=period_str,
+            amount=abs(float(jd.get("amount") or 0)),
+            source_transaction_id=txn.id,
+            accrual_je_id=None,
+            debit_account=req.expense_account,
+            credit_account=req.prepaid_account,
+            status=models.AccruedExpenseStatus.accrued,
+            ai_confidence=0.9,
+            ai_reasoning=f"Recalculated: {req.service_start} – {req.service_end}",
+        )
+        db.add(accrued)
+
+    db.commit()
+    db.refresh(payment_je)
+    db.refresh(txn)
+    return {
+        "transaction": {
+            "id": txn.id,
+            "date": txn.date.strftime("%Y-%m-%d"),
+            "description": txn.description,
+            "vendor": vendor,
+            "amount": txn.amount,
+            "status": txn.status,
+        },
+        "invoice_type": "prepaid",
+        "service_start": req.service_start,
+        "service_end": req.service_end,
+        "expense_account": req.expense_account,
+        "prepaid_account": req.prepaid_account,
         "journal_entries": [
             {
                 "id": je.id,

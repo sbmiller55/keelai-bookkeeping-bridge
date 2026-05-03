@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
+import { useAccounts } from "@/lib/useAccounts";
 import {
   getTransactionsWithEntries,
-  getChartOfAccounts,
   getQboStatus,
-  getQboAccounts,
   syncToQbo,
   updateTransactionStatus,
+  updateJournalEntry,
   TransactionWithEntries,
   QboSyncResult,
 } from "@/lib/api";
@@ -47,7 +47,9 @@ function triggerDownload(content: string, type: string, filename: string) {
 // of the parenthetical format used in QBO. Normalize to the QBO COA name.
 const MERCURY_NAME_MAP: Record<string, string> = {
   "Mercury Checking ••9882": "Mercury Checking (9882) - 1",
+  "Mercury Checking":        "Mercury Checking (9882) - 1",
   "Mercury Savings ••3117":  "Mercury Savings (3117) - 1",
+  "Mercury Savings":         "Mercury Savings (3117) - 1",
   "Mercury Treasury":        "Mercury Treasury - 1",
 };
 
@@ -114,6 +116,9 @@ function validateAccounts(
   rows: TransactionWithEntries[],
   coa: Set<string>,
 ): AccountError[] {
+  // Build a lowercase version for case-insensitive matching
+  const coaLower = new Set(Array.from(coa).map((a) => a.toLowerCase()));
+
   // Map: normalizedName → { rawName, jeNumbers[] }
   const bad = new Map<string, AccountError>();
 
@@ -122,7 +127,8 @@ function validateAccounts(
       const jeRef = String(je.je_number ?? je.id);
       for (const raw of [je.debit_account, je.credit_account]) {
         const normalized = normalizeMercuryName(raw);
-        if (!coa.has(normalized)) {
+        // Case-insensitive check — capitalization mismatches aren't real errors
+        if (!coaLower.has(normalized.toLowerCase())) {
           if (!bad.has(normalized)) {
             bad.set(normalized, { rawName: raw, normalizedName: normalized, jeNumbers: [] });
           }
@@ -250,12 +256,41 @@ export default function ExportPage() {
   const clientId = Number(id);
 
   const [approved, setApproved] = useState<TransactionWithEntries[]>([]);
-  const [coaSet, setCoaSet] = useState<Set<string>>(new Set());
-  const [coaLoaded, setCoaLoaded] = useState(false);
-  const [coaError, setCoaError] = useState<string | null>(null);
+  const { accounts: coaAccounts, loading: coaLoading, error: coaError } = useAccounts(clientId);
+  const coaSet = new Set(coaAccounts);
+  const coaLoaded = !coaLoading;
   const [loading, setLoading] = useState(true);
   const [markingExported, setMarkingExported] = useState(false);
   const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
+
+  // inline account-name fix: maps normalizedName → draft replacement value
+  const [fixing, setFixing] = useState<Record<string, string>>({});
+  const [fixSaving, setFixSaving] = useState<Set<string>>(new Set());
+
+  const handleFix = useCallback(async (err: AccountError) => {
+    const replacement = (fixing[err.normalizedName] ?? "").trim();
+    if (!replacement) return;
+    setFixSaving((prev) => new Set(prev).add(err.normalizedName));
+    try {
+      // Find all JEs that use this bad account name and patch them
+      const updates: Promise<unknown>[] = [];
+      for (const tx of approved) {
+        for (const je of tx.journal_entries) {
+          const patches: Record<string, string> = {};
+          if (normalizeMercuryName(je.debit_account) === err.normalizedName) patches.debit_account = replacement;
+          if (normalizeMercuryName(je.credit_account) === err.normalizedName) patches.credit_account = replacement;
+          if (Object.keys(patches).length > 0) updates.push(updateJournalEntry(je.id, patches));
+        }
+      }
+      await Promise.all(updates);
+      // Reload approved transactions so validation re-runs
+      const fresh = await getTransactionsWithEntries(clientId, "approved");
+      setApproved(fresh.filter((t) => t.journal_entries.length > 0));
+      setFixing((prev) => { const n = { ...prev }; delete n[err.normalizedName]; return n; });
+    } finally {
+      setFixSaving((prev) => { const n = new Set(prev); n.delete(err.normalizedName); return n; });
+    }
+  }, [approved, clientId, fixing]);
 
   const [qboConnected, setQboConnected] = useState(false);
   const [qboSyncing, setQboSyncing] = useState(false);
@@ -263,30 +298,28 @@ export default function ExportPage() {
   const [qboError, setQboError] = useState<string | null>(null);
   const [qboMarkExported, setQboMarkExported] = useState(true);
   const [qboForce, setQboForce] = useState(false);
+  const [exportedTxs, setExportedTxs] = useState<TransactionWithEntries[]>([]);
+
+  const loadTransactions = useCallback(async () => {
+    const [approvedItems, exportedItems] = await Promise.all([
+      getTransactionsWithEntries(clientId, "approved").catch(() => [] as TransactionWithEntries[]),
+      getTransactionsWithEntries(clientId, "exported").catch(() => [] as TransactionWithEntries[]),
+    ]);
+    setApproved(approvedItems.filter((t) => t.journal_entries.length > 0));
+    setExportedTxs(exportedItems.filter((t) => t.journal_entries.length > 0));
+  }, [clientId]);
 
   useEffect(() => {
     setLoading(true);
 
-    const txPromise = getTransactionsWithEntries(clientId, "approved")
-      .then((items) => setApproved(items.filter((t) => t.journal_entries.length > 0)))
-      .catch(() => {});
-
     // Check QBO connection status (for showing the Sync button)
     getQboStatus(clientId).then((s) => setQboConnected(s.connected)).catch(() => {});
 
-    // Always use the uploaded COA for validation
-    const coaPromise = getChartOfAccounts(clientId)
-      .then((accounts) => {
-        setCoaSet(new Set(accounts));
-        setCoaLoaded(true);
-      })
-      .catch((err) => {
-        setCoaError(err?.message ?? "Failed to load Chart of Accounts");
-        setCoaLoaded(true);
-      });
+    Promise.all([loadTransactions()]).finally(() => setLoading(false));
+  }, [clientId, loadTransactions]);
 
-    Promise.all([txPromise, coaPromise]).finally(() => setLoading(false));
-  }, [clientId]);
+  // When force mode is toggled on, show exported transactions in the list too
+  const displayedTxs = qboForce ? [...approved, ...exportedTxs] : approved;
 
   async function handleQboSync() {
     setQboSyncing(true);
@@ -296,8 +329,7 @@ export default function ExportPage() {
       const result = await syncToQbo(clientId, qboMarkExported, qboForce);
       setQboResult(result);
       if (result.synced > 0) {
-        const fresh = await getTransactionsWithEntries(clientId, "approved");
-        setApproved(fresh.filter((t) => t.journal_entries.length > 0));
+        await loadTransactions();
       }
     } catch (err: unknown) {
       setQboError(err instanceof Error ? err.message : "Sync failed");
@@ -330,8 +362,8 @@ export default function ExportPage() {
     });
   }
 
-  const totalJes = approved.reduce((n, tx) => n + tx.journal_entries.length, 0);
-  const totalAmount = approved.reduce(
+  const totalJes = displayedTxs.reduce((n, tx) => n + tx.journal_entries.length, 0);
+  const totalAmount = displayedTxs.reduce(
     (sum, tx) => sum + tx.journal_entries.reduce((s, je) => s + je.amount, 0),
     0
   );
@@ -362,11 +394,84 @@ export default function ExportPage() {
         <div className="flex justify-center h-40 items-center">
           <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
         </div>
-      ) : approved.length === 0 ? (
-        <div className="text-center py-20 text-gray-500">
-          <p className="text-3xl mb-3">📭</p>
-          <p className="text-gray-400 font-medium">Nothing to export</p>
-          <p className="text-sm mt-1">Approve journal entries in the Review Queue first.</p>
+      ) : displayedTxs.length === 0 ? (
+        <div className="space-y-6">
+          <div className="text-center py-12 text-gray-500">
+            <p className="text-3xl mb-3">📭</p>
+            <p className="text-gray-400 font-medium">Nothing to export</p>
+            <p className="text-sm mt-1">Approve journal entries in the Review Queue first.</p>
+          </div>
+          {qboConnected && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
+                  <h2 className="text-sm font-semibold text-white">Sync to QuickBooks Online</h2>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Use Force re-sync to push previously-exported transactions to QBO again.
+                </p>
+              </div>
+              {qboResult && (
+                <div className={`rounded-lg px-4 py-3 text-xs space-y-1 ${qboResult.errors.length > 0 ? "bg-yellow-950 border border-yellow-700" : "bg-green-950 border border-green-700"}`}>
+                  <p className={qboResult.errors.length > 0 ? "text-yellow-300" : "text-green-300"}>
+                    {qboResult.synced} {qboResult.synced === 1 ? "transaction" : "transactions"} synced to QBO
+                    {qboResult.created_vendors.length > 0 && ` · ${qboResult.created_vendors.length} new vendor${qboResult.created_vendors.length > 1 ? "s" : ""} created`}
+                  </p>
+                  {qboResult.created_vendors.length > 0 && (
+                    <p className="text-gray-400">New vendors: {qboResult.created_vendors.join(", ")}</p>
+                  )}
+                  {qboResult.errors.map((e, i) => (
+                    <p key={i} className="text-yellow-400">{e}</p>
+                  ))}
+                </div>
+              )}
+              {qboError && (
+                <div className="bg-red-950 border border-red-700 rounded-lg px-4 py-3 text-xs text-red-300">
+                  {qboError}
+                </div>
+              )}
+              <div className="flex items-center gap-4 flex-wrap">
+                <button
+                  onClick={handleQboSync}
+                  disabled={qboSyncing}
+                  className="flex items-center gap-2 bg-[#2CA01C] hover:bg-[#248017] text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {qboSyncing ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                      Syncing to QBO…
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Sync to QuickBooks Online
+                    </>
+                  )}
+                </button>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={qboMarkExported}
+                    onChange={(e) => setQboMarkExported(e.target.checked)}
+                    className="w-4 h-4 rounded accent-indigo-500"
+                  />
+                  <span className="text-xs text-gray-400">Mark as exported after sync</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={qboForce}
+                    onChange={(e) => setQboForce(e.target.checked)}
+                    className="w-4 h-4 rounded accent-indigo-500"
+                  />
+                  <span className="text-xs text-gray-400">Force re-sync (includes already-exported transactions; clears existing QBO IDs)</span>
+                </label>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-6">
@@ -390,20 +495,40 @@ export default function ExportPage() {
                 </h2>
               </div>
               <p className="text-xs text-red-400 mb-3">
-                QBO will reject the import if account names don't match exactly. Fix these in the Review Queue before downloading.
+                QBO will reject the import if account names don't match exactly. Type the correct account name below each error to fix it inline.
               </p>
               <div className="space-y-2">
                 {accountErrors.map((err) => (
-                  <div key={err.normalizedName} className="bg-red-900/40 rounded-lg px-3 py-2 flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-xs font-mono text-red-200">&quot;{err.normalizedName}&quot;</p>
-                      {err.rawName !== err.normalizedName && (
-                        <p className="text-xs text-red-500 mt-0.5">stored as: <span className="font-mono">&quot;{err.rawName}&quot;</span></p>
-                      )}
+                  <div key={err.normalizedName} className="bg-red-900/40 rounded-lg px-3 py-2 space-y-2">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="text-xs font-mono text-red-200">&quot;{err.normalizedName}&quot;</p>
+                        {err.rawName !== err.normalizedName && (
+                          <p className="text-xs text-red-500 mt-0.5">stored as: <span className="font-mono">&quot;{err.rawName}&quot;</span></p>
+                        )}
+                      </div>
+                      <p className="text-xs text-red-500 whitespace-nowrap">JE {err.jeNumbers.join(", ")}</p>
                     </div>
-                    <p className="text-xs text-red-500 whitespace-nowrap">
-                      JE {err.jeNumbers.join(", ")}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Replace with correct account name…"
+                        value={fixing[err.normalizedName] ?? ""}
+                        onChange={(e) => setFixing((prev) => ({ ...prev, [err.normalizedName]: e.target.value }))}
+                        list={`coa-${err.normalizedName}`}
+                        className="flex-1 bg-red-950/60 border border-red-700 rounded px-2 py-1 text-xs text-white placeholder-red-700 focus:outline-none focus:border-red-400"
+                      />
+                      <datalist id={`coa-${err.normalizedName}`}>
+                        {Array.from(coaSet).sort().map((a) => <option key={a} value={a} />)}
+                      </datalist>
+                      <button
+                        onClick={() => handleFix(err)}
+                        disabled={!fixing[err.normalizedName]?.trim() || fixSaving.has(err.normalizedName)}
+                        className="px-3 py-1 bg-red-700 hover:bg-red-600 text-white text-xs rounded disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        {fixSaving.has(err.normalizedName) ? "Saving…" : "Fix"}
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -499,7 +624,7 @@ export default function ExportPage() {
                   onChange={(e) => setQboForce(e.target.checked)}
                   className="w-4 h-4 rounded accent-indigo-500"
                 />
-                <span className="text-xs text-gray-400">Force re-sync (clears existing QBO IDs)</span>
+                <span className="text-xs text-gray-400">Force re-sync (includes already-exported transactions; clears existing QBO IDs)</span>
               </label>
               </div>
               {hasErrors && (
@@ -523,7 +648,7 @@ export default function ExportPage() {
             )}
             <div className="flex flex-wrap gap-3">
               <button
-                onClick={() => downloadQboXlsx(approved)}
+                onClick={() => downloadQboXlsx(displayedTxs)}
                 disabled={hasErrors}
                 className="flex items-center gap-2 bg-green-700 hover:bg-green-600 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -531,7 +656,7 @@ export default function ExportPage() {
                 Download Excel (.xlsx)
               </button>
               <button
-                onClick={() => downloadQboCsv(approved)}
+                onClick={() => downloadQboCsv(displayedTxs)}
                 disabled={hasErrors}
                 className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -552,7 +677,7 @@ export default function ExportPage() {
               <p className="text-xs text-gray-500 mt-1">Full detail export for your own records — includes AI confidence, payment method, counterparty.</p>
             </div>
             <button
-              onClick={() => downloadReviewCsv(approved)}
+              onClick={() => downloadReviewCsv(displayedTxs)}
               className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 px-5 py-2.5 rounded-lg text-sm font-medium transition-colors"
             >
               <DownloadIcon />
@@ -565,7 +690,7 @@ export default function ExportPage() {
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-white">After importing</h2>
               <div className="flex gap-3 text-xs text-indigo-400">
-                <button onClick={() => setSelectedTxIds(new Set(approved.map((t) => t.id)))}>
+                <button onClick={() => setSelectedTxIds(new Set(displayedTxs.map((t) => t.id)))}>
                   Select all
                 </button>
                 <button onClick={() => setSelectedTxIds(new Set())}>
@@ -574,7 +699,7 @@ export default function ExportPage() {
               </div>
             </div>
             <div className="space-y-1 max-h-64 overflow-y-auto">
-              {approved.map((tx) => (
+              {displayedTxs.map((tx) => (
                 <label key={tx.id} className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 cursor-pointer">
                   <input
                     type="checkbox"
@@ -621,7 +746,7 @@ export default function ExportPage() {
               </thead>
               <tbody>
                 {(() => {
-                  const qboRows = buildQboRows(approved);
+                  const qboRows = buildQboRows(displayedTxs);
                   return qboRows.map((row, i) => {
                     // Strip parent prefix to check base name against bad set
                     const baseName = row["Account Name"].includes(":")

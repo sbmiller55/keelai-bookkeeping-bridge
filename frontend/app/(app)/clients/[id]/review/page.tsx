@@ -2,10 +2,9 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
+import { useAccounts } from "@/lib/useAccounts";
 import {
   getTransactionsWithEntries,
-  getChartOfAccounts,
-  getQboAccounts,
   updateTransactionStatus,
   updateJournalEntry,
   createJournalEntry,
@@ -826,7 +825,7 @@ export default function ReviewQueuePage() {
   const { setPageContext, setCurrentPage } = useChatContext();
 
   const [items, setItems] = useState<TransactionWithEntries[]>([]);
-  const [accounts, setAccounts] = useState<string[]>([]);
+  const { accounts } = useAccounts(clientId);
   const [loading, setLoading] = useState(true);
   const [coding, setCoding] = useState(false);
   const [codingError, setCodingError] = useState<string | null>(null);
@@ -900,10 +899,6 @@ export default function ReviewQueuePage() {
 
   useEffect(() => {
     reload();
-    Promise.all([
-      getChartOfAccounts(clientId).catch(() => [] as string[]),
-      getQboAccounts(clientId).catch(() => [] as string[]),
-    ]).then(([coa, qbo]) => setAccounts(Array.from(new Set([...coa, ...qbo])).sort()));
   }, [clientId, reload]);
 
   useEffect(() => {
