@@ -514,12 +514,6 @@ def code_as_prepaid(
     ]
 
 
-@router.delete("/", status_code=status.HTTP_204_NO_CONTENT)
-def bulk_delete_transactions(
-    client_id: int = Query(...),
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    _assert_client_owned(client_id, current_user, db)
-    db.query(models.Transaction).filter(models.Transaction.client_id == client_id).delete()
-    db.commit()
+@router.delete("/", status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
+def bulk_delete_transactions():
+    raise HTTPException(status_code=405, detail="Bulk transaction deletion is disabled.")
