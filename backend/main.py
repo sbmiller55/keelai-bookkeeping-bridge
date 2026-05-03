@@ -159,7 +159,7 @@ def _seed_contextbridge_rules():
         ("counterparty_contains", "Attio",                  "Sales Tools & CRM",                 "$source_account",              True,  "expense"),
         ("counterparty_contains", "Google",                 "Software Subscriptions",            "$source_account",              True,  "expense"),
         ("counterparty_contains", "Namecheap",              "Software Subscriptions",            "$source_account",              True,  "expense"),
-        ("counterparty_contains", "Mary Gallagher",         "Accounting , Tax & Finance fees",   "$source_account",              True,  "expense"),
+        ("counterparty_contains", "Mary Gallagher",         "Accounting, Tax & Finance fees",    "$source_account",              True,  "expense"),
         ("counterparty_contains", "Morrison & Foerster",    "Legal Fees",                        "Accrued Expenses",             True,  "expense"),
         ("counterparty_contains", "c2Design",               "Advisory & Consulting",             "Accrued Expenses",             True,  "expense"),
         ("counterparty_contains", "Relentful",              "Accrued Expenses",                  "Mercury Checking (9882) - 1",  True,  "expense"),
@@ -178,7 +178,7 @@ def _seed_contextbridge_rules():
         ("category_equals",       "Team Meals & Team Events",    "Meals & Team Events",          "$source_account",              True,  "expense"),
         ("category_equals",       "Grocery",                "Meals & Team Events",               "$source_account",              True,  "expense"),
         ("category_equals",       "Payroll",                "Payroll Liabilities - Rippling",    "$source_account",              True,  "reject"),
-        ("category_equals",       "Accounting Finance & Tax Services", "Accounting , Tax & Finance fees", "$source_account",     True,  "expense"),
+        ("category_equals",       "Accounting Finance & Tax Services", "Accounting, Tax & Finance fees",  "$source_account",     True,  "expense"),
         ("category_equals",       "Credit Card Rewards",    "Mercury Checking (9882) - 1",       "Other Revenue",                False, "expense"),
         ("has_category",          "*",                      "$category",                         "$source_account",              True,  "expense"),
         ("kind",                  "treasuryTransfer",       "Mercury Checking (9882) - 1",       "Mercury Treasury - 1",         True,  "expense"),
@@ -194,7 +194,10 @@ def _seed_contextbridge_rules():
 
     db = SessionLocal()
     try:
-        client = db.query(Client).filter(Client.name == "ContextBridge").first()
+        client = (
+            db.query(Client).filter(Client.name == "ContextBridge").first()
+            or db.query(Client).filter(Client.id == 2).first()
+        )
         if not client:
             return
         existing = db.query(Rule).filter(Rule.client_id == client.id).count()
