@@ -340,3 +340,86 @@ def sync_to_qbo(
     _persist_token_refresh(client, qbo_c, db)
 
     return SyncResult(synced=synced, created_vendors=created_vendors, errors=errors)
+
+
+# ── Rollback (recovery from a bad force re-sync) ─────────────────────────────
+
+class RollbackResult(BaseModel):
+    dry_run:           bool
+    candidate_count:   int
+    deleted_count:     int
+    errors:            list[str]
+
+
+@router.post("/rollback-all-synced", response_model=RollbackResult)
+def rollback_all_synced(
+    client_id: int,
+    confirm: str = "",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Recovery endpoint. Deletes from QBO every JE for this client that has
+    qbo_je_id set, then clears the cached qbo_je_id / qbo_object_type and
+    reverts the parent transaction's status from 'exported' back to 'approved'.
+
+    Pass confirm="DELETE_ALL_167" to actually run. Otherwise returns a dry-run
+    count and changes nothing.
+    """
+    client = _get_client(client_id, current_user, db)
+
+    candidates = (
+        db.query(JournalEntry)
+        .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+        .filter(
+            Transaction.client_id == client_id,
+            JournalEntry.qbo_je_id.isnot(None),
+        )
+        .all()
+    )
+    candidate_count = len(candidates)
+
+    if confirm != "DELETE_ALL_167":
+        return RollbackResult(
+            dry_run=True,
+            candidate_count=candidate_count,
+            deleted_count=0,
+            errors=[],
+        )
+
+    qbo_c = _get_qbo_client(client)
+    errors: list[str] = []
+    deleted_count = 0
+    affected_tx_ids: set[int] = set()
+
+    for je in candidates:
+        try:
+            qbo_c.delete_object(je.qbo_object_type or "JournalEntry", je.qbo_je_id)
+            je.qbo_je_id = None
+            je.qbo_object_type = None
+            je.qbo_export_error = None
+            je.exported_at = None
+            affected_tx_ids.add(je.transaction_id)
+            deleted_count += 1
+        except Exception as exc:
+            errors.append(f"JE {je.je_number or je.id}: {exc}")
+
+    # Revert affected transactions from 'exported' back to 'approved'
+    if affected_tx_ids:
+        db.query(Transaction).filter(
+            Transaction.id.in_(affected_tx_ids),
+            Transaction.status == TransactionStatus.exported,
+        ).update(
+            {"status": TransactionStatus.approved},
+            synchronize_session=False,
+        )
+
+    db.commit()
+    _persist_token_refresh(client, qbo_c, db)
+
+    return RollbackResult(
+        dry_run=False,
+        candidate_count=candidate_count,
+        deleted_count=deleted_count,
+        errors=errors,
+    )
