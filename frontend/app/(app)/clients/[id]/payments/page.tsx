@@ -613,6 +613,7 @@ function AccrualsTab({ clientId }: { clientId: number }) {
   const [suggestions, setSuggestions] = useState<AccrualSuggestion[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [editing, setEditing] = useState<AccruedExpense | null>(null);
 
   // Add form state
   const [form, setForm] = useState({
@@ -710,8 +711,8 @@ function AccrualsTab({ clientId }: { clientId: number }) {
       {/* Header */}
       <div className="mb-6 flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Accrued Expenses</h1>
-          <p className="text-gray-500 mt-1 text-xs">Track expenses incurred but not yet paid</p>
+          <h1 className="text-2xl font-bold text-white">Accrued &amp; Prepaid Expense</h1>
+          <p className="text-gray-500 mt-1 text-xs">Accrued expenses (incurred but not paid) and prepaid amortizations (paid upfront, recognized monthly)</p>
         </div>
         <div className="flex gap-2">
           <button
@@ -851,6 +852,9 @@ function AccrualsTab({ clientId }: { clientId: number }) {
                       {ae.accrual_je_id && (
                         <span className="text-xs text-green-500">In Queue</span>
                       )}
+                      {ae.status !== "cleared" && (
+                        <button onClick={() => setEditing(ae)} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Edit</button>
+                      )}
                       <button onClick={() => handleDelete(ae.id)} className="text-xs text-gray-500 hover:text-red-400 transition-colors">Delete</button>
                     </div>
                   </td>
@@ -860,7 +864,142 @@ function AccrualsTab({ clientId }: { clientId: number }) {
           </table>
         </div>
       )}
+
+      {/* Edit modal */}
+      {editing && (
+        <EditAccrualModal
+          accrual={editing}
+          onClose={() => setEditing(null)}
+          onSave={async (patch) => {
+            await updateAccrual(clientId, editing.id, patch);
+            setEditing(null);
+            loadAccruals();
+          }}
+        />
+      )}
     </>
+  );
+}
+
+function EditAccrualModal({
+  accrual, onClose, onSave,
+}: {
+  accrual: AccruedExpense;
+  onClose: () => void;
+  onSave: (patch: Partial<AccruedExpense>) => Promise<void>;
+}) {
+  const [vendor_name, setVendorName] = useState(accrual.vendor_name);
+  const [description, setDescription] = useState(accrual.description ?? "");
+  const [service_period, setServicePeriod] = useState(accrual.service_period);
+  const [amount, setAmount] = useState(String(accrual.amount));
+  const [debit_account, setDebitAccount] = useState(accrual.debit_account ?? "");
+  const [credit_account, setCreditAccount] = useState(accrual.credit_account ?? "");
+  const [expected_payment_date, setExpectedPaymentDate] = useState(
+    accrual.expected_payment_date ? accrual.expected_payment_date.slice(0, 10) : ""
+  );
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      await onSave({
+        vendor_name,
+        description: description || undefined,
+        service_period,
+        amount: parseFloat(amount),
+        debit_account: debit_account || undefined,
+        credit_account: credit_account || undefined,
+        expected_payment_date: expected_payment_date || undefined,
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-xl bg-gray-900 border border-gray-700 rounded-xl p-6 space-y-4"
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">Edit Accrual / Prepaid</h2>
+          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-200 text-xl leading-none">&times;</button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block text-xs text-gray-400 col-span-2">
+            Vendor
+            <input
+              type="text" value={vendor_name} onChange={(e) => setVendorName(e.target.value)}
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400 col-span-2">
+            Description
+            <input
+              type="text" value={description} onChange={(e) => setDescription(e.target.value)}
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400">
+            Service Period (YYYY-MM)
+            <input
+              type="text" value={service_period} onChange={(e) => setServicePeriod(e.target.value)}
+              placeholder="2026-04" pattern="\d{4}-\d{2}"
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm font-mono focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400">
+            Amount
+            <input
+              type="number" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)}
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm font-mono focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400">
+            Debit Account (Expense)
+            <input
+              type="text" value={debit_account} onChange={(e) => setDebitAccount(e.target.value)}
+              placeholder="e.g. Business insurance"
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400">
+            Credit Account (Liability or Asset)
+            <input
+              type="text" value={credit_account} onChange={(e) => setCreditAccount(e.target.value)}
+              placeholder="e.g. Accrued Expenses or Prepaid expenses"
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+
+          <label className="block text-xs text-gray-400 col-span-2">
+            Expected Payment Date
+            <input
+              type="date" value={expected_payment_date} onChange={(e) => setExpectedPaymentDate(e.target.value)}
+              className="mt-1 w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white text-sm focus:outline-none focus:border-indigo-500"
+            />
+          </label>
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
+          <button
+            type="submit" disabled={saving}
+            className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded transition-colors"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 

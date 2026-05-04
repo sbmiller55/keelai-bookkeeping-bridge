@@ -243,6 +243,14 @@ def update_accrual(
         ae.description = body.description
     if body.amount is not None:
         ae.amount = body.amount
+    if body.vendor_name is not None:
+        ae.vendor_name = body.vendor_name
+    if body.service_period is not None:
+        ae.service_period = body.service_period
+    if body.debit_account is not None:
+        ae.debit_account = body.debit_account
+    if body.credit_account is not None:
+        ae.credit_account = body.credit_account
 
     db.commit()
     db.refresh(ae)
@@ -639,7 +647,7 @@ def update_standing_rule(
     if not rule:
         raise HTTPException(404, "Standing rule not found")
 
-    for field in ("vendor_name", "description", "expense_account", "accrued_account", "amount", "active"):
+    for field in ("vendor_name", "description", "expense_account", "accrued_account", "amount", "active", "last_generated"):
         val = getattr(body, field, None)
         if val is not None:
             setattr(rule, field, val)

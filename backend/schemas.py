@@ -471,6 +471,10 @@ class AccruedExpenseUpdate(BaseModel):
     expected_payment_date: Optional[datetime] = None
     description: Optional[str] = None
     amount: Optional[float] = None
+    vendor_name: Optional[str] = None
+    service_period: Optional[str] = None
+    debit_account: Optional[str] = None
+    credit_account: Optional[str] = None
 
 
 class AccruedExpenseRead(BaseModel):
@@ -517,6 +521,7 @@ class StandingAccrualRuleUpdate(BaseModel):
     accrued_account: Optional[str] = None
     amount: Optional[float] = None
     active: Optional[bool] = None
+    last_generated: Optional[str] = None  # "YYYY-MM" — set to skip a month from auto-generation
 
 
 class StandingAccrualRuleRead(BaseModel):

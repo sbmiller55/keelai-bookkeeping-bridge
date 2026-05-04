@@ -988,6 +988,10 @@ export function updateAccrual(clientId: number, aeId: number, data: {
   expected_payment_date?: string | null;
   description?: string;
   amount?: number;
+  vendor_name?: string;
+  service_period?: string;
+  debit_account?: string;
+  credit_account?: string;
 }): Promise<AccruedExpense> {
   return apiFetch(`/clients/${clientId}/accruals/${aeId}`, {
     method: "PATCH",
