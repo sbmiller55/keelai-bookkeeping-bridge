@@ -270,15 +270,27 @@ class QBOClient:
 
     def get_coa_names(self) -> list[str]:
         """
-        Return sorted, deduplicated list of account names.
+        Return sorted, deduplicated list of *postable* account names.
         Includes both FullyQualifiedName (e.g. "Expenses:Amortization Expense")
         AND the short Name (e.g. "Amortization Expense") so users can find
         accounts by either form.
+
+        Parent/header accounts are excluded — QBO rejects journal entries
+        posted to a parent, so feeding them to the AI guarantees failures.
+        A parent is any account whose Id appears as another account's
+        ParentRef.value.
         """
         accounts = self.get_active_accounts()
+        parent_ids = {
+            (acc.get("ParentRef") or {}).get("value")
+            for acc in accounts
+            if (acc.get("ParentRef") or {}).get("value")
+        }
         seen: set[str] = set()
         names: list[str] = []
         for acc in accounts:
+            if acc.get("Id") in parent_ids:
+                continue
             fqn  = acc.get("FullyQualifiedName", "").strip()
             name = acc.get("Name", "").strip()
             for n in (fqn, name):

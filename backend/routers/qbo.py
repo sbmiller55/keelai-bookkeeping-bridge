@@ -272,11 +272,14 @@ def sync_to_qbo(
                 qbo_c.delete_object(obj_type, je.qbo_je_id)
                 je.qbo_je_id = None
 
-            # Resolve account names to QBO IDs via FullyQualifiedName
+            # Resolve account names to QBO IDs via FullyQualifiedName.
+            # build_account_map indexes both case-sensitive and lowercased keys,
+            # so fall back to lowercase if the exact-case key misses (e.g. AI
+            # returned "Employee Benefits" but QBO stores "Employee benefits").
             debit_fqn  = qbo.normalize_account_name(je.debit_account)
             credit_fqn = qbo.normalize_account_name(je.credit_account)
-            debit_id   = account_map.get(debit_fqn)
-            credit_id  = account_map.get(credit_fqn)
+            debit_id   = account_map.get(debit_fqn)  or account_map.get(debit_fqn.lower())
+            credit_id  = account_map.get(credit_fqn) or account_map.get(credit_fqn.lower())
 
             if not debit_id or not credit_id:
                 missing = [n for n, i in [(debit_fqn, debit_id), (credit_fqn, credit_id)] if not i]
