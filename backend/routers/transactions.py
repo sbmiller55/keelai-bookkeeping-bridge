@@ -111,6 +111,57 @@ def list_with_entries(
     return result
 
 
+class BulkStatusResult(BaseModel):
+    dry_run:        bool
+    candidate_count: int
+    updated_count:  int
+
+
+@router.post("/bulk-update-status", response_model=BulkStatusResult)
+def bulk_update_status(
+    client_id: int = Query(...),
+    from_status: str = Query(..., description="Current status to match"),
+    to_status: str = Query(..., description="New status to set"),
+    before_date: Optional[str] = Query(None, description="Only affect transactions with date < this YYYY-MM-DD"),
+    confirm: str = Query("", description="Must equal 'YES' to actually run; otherwise dry-run"),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Bulk move transactions between statuses. Used for catching up state when
+    transactions were imported to an external system out-of-band.
+
+    Dry-run unless confirm='YES'.
+    """
+    _assert_client_owned(client_id, current_user, db)
+
+    valid = {s.value for s in models.TransactionStatus}
+    if from_status not in valid or to_status not in valid:
+        raise HTTPException(400, f"Invalid status. Allowed: {sorted(valid)}")
+
+    q = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.Transaction.status == from_status,
+        )
+    )
+    if before_date:
+        try:
+            cutoff = datetime.strptime(before_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "before_date must be YYYY-MM-DD")
+        q = q.filter(models.Transaction.date < cutoff)
+
+    candidate_count = q.count()
+    if confirm != "YES":
+        return BulkStatusResult(dry_run=True, candidate_count=candidate_count, updated_count=0)
+
+    updated = q.update({"status": to_status}, synchronize_session=False)
+    db.commit()
+    return BulkStatusResult(dry_run=False, candidate_count=candidate_count, updated_count=updated)
+
+
 @router.get("/vendors")
 def get_vendors(
     client_id: int = Query(...),
