@@ -925,12 +925,19 @@ export default function ReviewQueuePage() {
   async function handleSync() {
     setSyncing(true);
     setSyncError(null);
+    setCodingError(null);
     try {
       await syncMercury(
         clientId, dateRange,
         dateRange === "custom" ? customStart : undefined,
         dateRange === "custom" ? customEnd : undefined,
       );
+      // Re-code any pending transactions still left with Uncoded JEs.
+      try {
+        await codePending(clientId);
+      } catch (codeErr) {
+        console.error("Post-sync coding failed:", codeErr);
+      }
       reload();
     } catch (err: unknown) {
       setSyncError(err instanceof Error ? err.message : "Sync failed");

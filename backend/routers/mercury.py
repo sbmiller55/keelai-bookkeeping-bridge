@@ -414,7 +414,8 @@ def code_pending(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Run AI coding + rules on all pending transactions that have no journal entries."""
+    """Run AI coding + rules on pending transactions that have no journal entries
+    or whose existing journal entries still have placeholder 'Uncoded' accounts."""
     client = (
         db.query(models.Client)
         .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
@@ -423,12 +424,20 @@ def code_pending(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
 
-    # Find pending transactions without any JEs
-    already_coded_ids = {
+    # A transaction counts as "really coded" only if it has at least one JE whose
+    # debit AND credit are real accounts (neither equals "Uncoded" nor begins with
+    # "Uncoded [", which is the AI's "couldn't validate against COA" marker).
+    really_coded_ids = {
         row[0]
         for row in db.query(models.JournalEntry.transaction_id)
         .join(models.Transaction)
-        .filter(models.Transaction.client_id == client_id)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.JournalEntry.debit_account != "Uncoded",
+            models.JournalEntry.credit_account != "Uncoded",
+            ~models.JournalEntry.debit_account.like("Uncoded [%"),
+            ~models.JournalEntry.credit_account.like("Uncoded [%"),
+        )
         .all()
     }
     pending = (
@@ -436,13 +445,21 @@ def code_pending(
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
-            ~models.Transaction.id.in_(already_coded_ids) if already_coded_ids else True,
+            ~models.Transaction.id.in_(really_coded_ids) if really_coded_ids else True,
         )
         .all()
     )
 
     if not pending:
         return {"je_created": 0, "message": "No uncoded pending transactions found."}
+
+    # Drop any stale placeholder JEs on these transactions so we don't end up
+    # with both the old "Uncoded" rows and the freshly-coded ones.
+    pending_ids = [t.id for t in pending]
+    db.query(models.JournalEntry).filter(
+        models.JournalEntry.transaction_id.in_(pending_ids)
+    ).delete(synchronize_session=False)
+    db.flush()
 
     active_rules = (
         db.query(models.Rule)
