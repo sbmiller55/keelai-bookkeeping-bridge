@@ -253,20 +253,34 @@ class QBOClient:
         and Name (e.g. "Mercury Checking (9882) - 1") so lookups work for both
         top-level and sub-accounts.
         """
+        return self.build_account_lookup()[0]
+
+    def build_account_lookup(self) -> tuple[dict[str, str], dict[str, str]]:
+        """
+        Return ({display_name: id}, {id: AccountType}). The type map is needed
+        when deciding whether an account is valid as a Purchase's payment
+        account (must be Bank or CreditCard) — substring-matching the name is
+        unreliable (e.g. "Credit Card Rewards" is an Income account, not a
+        credit card payment account).
+        """
         accounts = self.get_active_accounts()
-        m: dict[str, str] = {}
+        name_to_id: dict[str, str]   = {}
+        id_to_type: dict[str, str]   = {}
         for acc in accounts:
             acc_id = acc.get("Id", "")
             fqn    = acc.get("FullyQualifiedName", "")
             name   = acc.get("Name", "")
+            acc_type = acc.get("AccountType", "")
+            if acc_id:
+                id_to_type[acc_id] = acc_type
             if fqn:
-                m[fqn] = acc_id
-                m[fqn.lower()] = acc_id          # case-insensitive fallback
-            if name and name not in m:
-                m[name] = acc_id
-                if name.lower() not in m:
-                    m[name.lower()] = acc_id     # case-insensitive fallback
-        return m
+                name_to_id[fqn] = acc_id
+                name_to_id[fqn.lower()] = acc_id
+            if name and name not in name_to_id:
+                name_to_id[name] = acc_id
+                if name.lower() not in name_to_id:
+                    name_to_id[name.lower()] = acc_id
+        return name_to_id, id_to_type
 
     def get_coa_names(self) -> list[str]:
         """

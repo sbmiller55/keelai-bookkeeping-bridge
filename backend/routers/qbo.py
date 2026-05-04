@@ -223,9 +223,10 @@ def sync_to_qbo(
     if not transactions:
         return SyncResult(synced=0, created_vendors=[], errors=[])
 
-    # Build account name → QBO ID map once for the whole sync
+    # Build account name → QBO ID map and id → AccountType map once for the
+    # whole sync. The type map drives the Purchase-vs-JournalEntry choice.
     try:
-        account_map = qbo_c.build_account_map()
+        account_map, account_types = qbo_c.build_account_lookup()
     except Exception as exc:
         raise HTTPException(502, f"Failed to fetch QBO Chart of Accounts: {exc}")
 
@@ -288,15 +289,18 @@ def sync_to_qbo(
             memo     = je.memo or tx.description
 
             try:
-                # Use Purchase for vendor expenses paid from bank/card accounts.
-                # These surface vendor names in QBO reports. Fall back to JE for
-                # everything else (payroll, depreciation, non-vendor entries).
-                credit_name = (je.credit_account or "").lower()
-                is_bank_or_card = any(k in credit_name for k in ("mercury", "checking", "savings", "credit", "cash"))
+                # Use Purchase for vendor expenses paid from a real bank/card
+                # account. These surface vendor names in QBO reports. Fall back
+                # to JournalEntry for everything else (payroll, depreciation,
+                # contra-expense, non-vendor entries). We key off QBO's actual
+                # AccountType — substring matching the name was unreliable
+                # (e.g. "Credit Card Rewards" is Income, not CreditCard).
+                credit_type = account_types.get(credit_id, "")
+                is_bank_or_card = credit_type in ("Bank", "CreditCard")
                 use_purchase = bool(vendor_id and is_bank_or_card)
 
                 if use_purchase:
-                    payment_type = "CreditCard" if "credit" in credit_name else "Cash"
+                    payment_type = "CreditCard" if credit_type == "CreditCard" else "Cash"
                     qbo_id = qbo_c.create_purchase(
                         doc_number=str(je.je_number or je.id),
                         txn_date=txn_date,
