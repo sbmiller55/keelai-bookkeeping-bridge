@@ -319,7 +319,10 @@ export default function ExportPage() {
   }, [clientId, loadTransactions]);
 
   // When force mode is toggled on, show exported transactions in the list too
-  const displayedTxs = qboForce ? [...approved, ...exportedTxs] : approved;
+  // The export page only ever shows approved transactions. qboForce changes how
+  // the backend handles already-synced JEs (delete + recreate vs skip), but it
+  // must NOT pull in transactions whose status is already 'exported'.
+  const displayedTxs = approved;
 
   async function handleQboSync() {
     setQboSyncing(true);
@@ -467,7 +470,7 @@ export default function ExportPage() {
                     onChange={(e) => setQboForce(e.target.checked)}
                     className="w-4 h-4 rounded accent-indigo-500"
                   />
-                  <span className="text-xs text-gray-400">Force re-sync (includes already-exported transactions; clears existing QBO IDs)</span>
+                  <span className="text-xs text-gray-400">Force re-sync (re-pushes JEs that already have a QBO ID; never touches transactions already marked Exported)</span>
                 </label>
               </div>
             </div>
@@ -624,7 +627,7 @@ export default function ExportPage() {
                   onChange={(e) => setQboForce(e.target.checked)}
                   className="w-4 h-4 rounded accent-indigo-500"
                 />
-                <span className="text-xs text-gray-400">Force re-sync (includes already-exported transactions; clears existing QBO IDs)</span>
+                <span className="text-xs text-gray-400">Force re-sync (re-pushes JEs that already have a QBO ID; never touches transactions already marked Exported)</span>
               </label>
               </div>
               {hasErrors && (

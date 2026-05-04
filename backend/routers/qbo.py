@@ -209,17 +209,14 @@ def sync_to_qbo(
     client = _get_client(client_id, current_user, db)
     qbo_c  = _get_qbo_client(client)
 
-    # Load approved transactions (+ exported when force=True) that have journal entries
-    status_filter = (
-        Transaction.status.in_([TransactionStatus.approved, TransactionStatus.exported])
-        if force else
-        Transaction.status == TransactionStatus.approved
-    )
+    # Load approved transactions only. Force re-sync re-pushes the JEs of
+    # already-API-synced approved transactions (delete + recreate); it must
+    # NOT reach into status='exported' transactions — those are locked in.
     transactions = (
         db.query(Transaction)
         .filter(
             Transaction.client_id == client_id,
-            status_filter,
+            Transaction.status == TransactionStatus.approved,
         )
         .all()
     )
