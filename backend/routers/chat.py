@@ -156,22 +156,31 @@ def _build_system_prompt(
     if policy:
         parts.append(f"\n\n## Accounting Policy\n{policy}")
 
-    # All transactions with journal entries
+    # Transactions with journal entries — limit to the recent window to keep
+    # the system prompt under Anthropic's per-minute token rate limit. Older
+    # transactions remain queryable through tools when the user asks about them.
+    from datetime import datetime as _dt, timedelta as _td
+    _cutoff = _dt.utcnow() - _td(days=90)
     txns = (
         db.query(models.Transaction)
-        .filter(models.Transaction.client_id == client.id)
+        .filter(
+            models.Transaction.client_id == client.id,
+            models.Transaction.date >= _cutoff,
+        )
         .order_by(models.Transaction.date.desc())
+        .limit(200)
         .all()
     )
+    txn_ids = [t.id for t in txns]
     jes_by_txn: dict[int, list[models.JournalEntry]] = {}
-    all_jes = (
-        db.query(models.JournalEntry)
-        .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
-        .filter(models.Transaction.client_id == client.id)
-        .all()
-    )
-    for je in all_jes:
-        jes_by_txn.setdefault(je.transaction_id, []).append(je)
+    if txn_ids:
+        all_jes = (
+            db.query(models.JournalEntry)
+            .filter(models.JournalEntry.transaction_id.in_(txn_ids))
+            .all()
+        )
+        for je in all_jes:
+            jes_by_txn.setdefault(je.transaction_id, []).append(je)
 
     if txns:
         rows = []
@@ -669,13 +678,28 @@ def chat(
     # Agentic loop: keep going until Claude stops using tools
     tool_results_summary: list[str] = []
     while True:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=system_prompt,
-            tools=_TOOLS,
-            messages=messages,
-        )
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=system_prompt,
+                tools=_TOOLS,
+                messages=messages,
+            )
+        except anthropic.RateLimitError:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "AI Assistant is rate-limited. Please wait ~30 seconds and try again. "
+                    "If this persists, the chat context is too large — try a fresh conversation, "
+                    "or contact us about increasing the API rate limit."
+                ),
+            )
+        except anthropic.APIStatusError as exc:
+            raise HTTPException(
+                status_code=exc.status_code if hasattr(exc, "status_code") and exc.status_code else 502,
+                detail=f"AI Assistant error: {exc.message if hasattr(exc, 'message') else str(exc)}",
+            )
 
         if response.stop_reason == "tool_use":
             # Serialize content blocks to plain dicts for the next API call
