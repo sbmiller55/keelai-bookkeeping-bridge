@@ -333,7 +333,7 @@ export default function InvoiceUploadPage() {
 
                     <div className="flex items-center gap-3 pt-1">
                       {item.approved ? (
-                        <span className="text-xs text-green-400 font-medium">✓ Approved — ready to export</span>
+                        <span className="text-xs text-green-400 font-medium">✓ Approved — on Export page (and tracked on Payments &rarr; Accruals if the JE credits an accrual account)</span>
                       ) : (
                         <button
                           disabled={item.approving || item.editing}
@@ -353,10 +353,10 @@ export default function InvoiceUploadPage() {
                         </button>
                       )}
                       <button
-                        onClick={() => router.push(`/clients/${id}/review`)}
+                        onClick={() => router.push(item.approved ? `/clients/${id}/export` : `/clients/${id}/review`)}
                         className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                       >
-                        Edit in Review Queue →
+                        {item.approved ? "View on Export page →" : "Edit in Review Queue →"}
                       </button>
                     </div>
                   </div>

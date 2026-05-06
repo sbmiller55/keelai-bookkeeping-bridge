@@ -283,6 +283,32 @@ async def upload_invoice(
             )
             db.add(accrued)
 
+    # For regular expense invoices that credit an accrual liability account,
+    # also create an AccruedExpense row so the user can see and clear it on
+    # the Payments → Accruals tab when the cash payment lands.
+    elif invoice_type == "expense":
+        accrual_je = next(
+            (je for je in created_jes if "accrued" in (je.credit_account or "").lower()),
+            None,
+        )
+        if accrual_je:
+            period_str = (accrual_je.je_date or invoice_date).strftime("%Y-%m")
+            accrued = models.AccruedExpense(
+                client_id=client_id,
+                vendor_name=vendor,
+                description=description[:255],
+                service_period=period_str,
+                amount=abs(float(accrual_je.amount or total_amount)),
+                source_transaction_id=txn.id,
+                accrual_je_id=accrual_je.id,
+                debit_account=accrual_je.debit_account,
+                credit_account=accrual_je.credit_account,
+                status=models.AccruedExpenseStatus.accrued,
+                ai_confidence=conf,
+                ai_reasoning=reasoning_str[:1000],
+            )
+            db.add(accrued)
+
     db.commit()
     db.refresh(txn)
     for je in created_jes:

@@ -279,6 +279,59 @@ def delete_accrual(
 
 # ── Release prepaid accrual to Review Queue ───────────────────────────────────
 
+class RegisterExistingJEBody(BaseModel):
+    je_id:           int
+    service_period:  Optional[str] = None  # "YYYY-MM" — defaults to JE date's month
+
+
+@router.post("/register-existing-je")
+def register_existing_je_as_accrual(
+    client_id: int,
+    body: RegisterExistingJEBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Register an already-existing journal entry (e.g. one created by an invoice
+    upload before the auto-link logic existed) as an AccruedExpense so it shows
+    on the Accruals tab. Does NOT create a new transaction or JE — just inserts
+    the tracking row. Idempotent: skipped if an AccruedExpense already points
+    at this JE.
+    """
+    _get_client(client_id, current_user, db)
+    je = db.query(JournalEntry).filter(JournalEntry.id == body.je_id).first()
+    if not je:
+        raise HTTPException(404, "JE not found")
+
+    tx = db.query(Transaction).filter(Transaction.id == je.transaction_id).first()
+    if not tx or tx.client_id != client_id:
+        raise HTTPException(404, "Transaction for this JE not found in this client")
+
+    existing = db.query(AccruedExpense).filter(AccruedExpense.accrual_je_id == je.id).first()
+    if existing:
+        return AccruedExpenseRead.model_validate(existing)
+
+    period = body.service_period or (je.je_date or tx.date).strftime("%Y-%m")
+    ae = AccruedExpense(
+        client_id=client_id,
+        vendor_name=tx.counterparty_name or tx.description[:80],
+        description=(tx.description or "")[:255],
+        service_period=period,
+        amount=abs(float(je.amount or 0)),
+        source_transaction_id=tx.id,
+        accrual_je_id=je.id,
+        debit_account=je.debit_account,
+        credit_account=je.credit_account,
+        status=AccruedExpenseStatus.accrued,
+        ai_confidence=1.0,
+        ai_reasoning="Linked from existing JE (retroactive registration).",
+    )
+    db.add(ae)
+    db.commit()
+    db.refresh(ae)
+    return AccruedExpenseRead.model_validate(ae)
+
+
 @router.post("/{ae_id}/release")
 def release_accrual(
     client_id: int,
