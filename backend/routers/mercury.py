@@ -1,12 +1,14 @@
 """Mercury sync endpoint."""
 import json as _json
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from auth import get_current_user
 from database import get_db
@@ -14,6 +16,139 @@ import models
 import mercury as mercury_client
 import ai_coder
 import rules_engine
+
+
+_VENDOR_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+_VENDOR_SUFFIX_RE = re.compile(r"\b(llc|inc|incorporated|corp|corporation|co|company|ltd|limited|llp|lp|the)\b")
+
+
+def _norm_vendor(name: str) -> str:
+    """Normalize a vendor name for fuzzy matching: lowercase, strip suffixes, collapse punctuation."""
+    if not name:
+        return ""
+    s = name.lower().strip()
+    s = _VENDOR_SUFFIX_RE.sub(" ", s)
+    s = _VENDOR_TOKEN_RE.sub(" ", s).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _vendor_match(a: str, b: str) -> bool:
+    """True if vendor names match: one is a substring of the other after normalization, with min 3 chars."""
+    na, nb = _norm_vendor(a), _norm_vendor(b)
+    if not na or not nb or len(na) < 3 or len(nb) < 3:
+        return False
+    return na in nb or nb in na
+
+
+def _find_matching_invoice(payment_tx: models.Transaction, db: Session) -> Optional[tuple[models.Transaction, float]]:
+    """
+    Look for an unpaid invoice that matches an incoming Mercury payment.
+
+    Match criteria:
+      - same client
+      - source='invoice' OR mercury_status='invoice'
+      - bill_status is 'unpaid', 'partial', or NULL (treated as unpaid for legacy rows)
+      - vendor fuzzy match (substring after normalization)
+      - amount within ±2%
+      - invoice date <= payment date
+
+    Returns (invoice_tx, confidence 0..1) or None.
+    """
+    if payment_tx.amount >= 0:
+        return None  # only outgoing payments
+    pay_amt = abs(payment_tx.amount)
+    pay_vendor = payment_tx.counterparty_name or payment_tx.description or ""
+    pay_date = payment_tx.date
+
+    candidates = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == payment_tx.client_id,
+            models.Transaction.id != payment_tx.id,
+            or_(
+                models.Transaction.source == "invoice",
+                models.Transaction.mercury_status == "invoice",
+            ),
+            or_(
+                models.Transaction.bill_status == None,
+                models.Transaction.bill_status.in_(["unpaid", "partial"]),
+            ),
+            models.Transaction.matched_payment_id == None,
+        )
+        .all()
+    )
+
+    best: Optional[tuple[models.Transaction, float]] = None
+    for inv in candidates:
+        if pay_date and inv.date and inv.date > pay_date:
+            continue
+        if not _vendor_match(pay_vendor, inv.counterparty_name or inv.description or ""):
+            continue
+        inv_amt = abs(float(inv.amount or 0))
+        if inv_amt == 0:
+            continue
+        diff = abs(inv_amt - pay_amt) / inv_amt
+        if diff > 0.02:
+            continue
+        # Confidence: 1.0 at exact match, scaled down toward 0.7 at the 2% edge
+        conf = 1.0 - (diff / 0.02) * 0.3
+        if best is None or conf > best[1]:
+            best = (inv, conf)
+    return best
+
+
+def _apply_invoice_match(
+    payment_tx: models.Transaction,
+    invoice: models.Transaction,
+    confidence: float,
+    db: Session,
+    je_num: int,
+) -> int:
+    """
+    Pre-code a Mercury payment as clearing a matched invoice (DR accrued liability / CR bank).
+    Updates invoice.bill_status='paid' and links matched_payment_id.
+
+    Returns the next je_number to use after this allocation (caller increments).
+    """
+    inv_je = invoice.journal_entries[0] if invoice.journal_entries else None
+    accrued_account = (inv_je.credit_account if inv_je else None) or "Accrued Expenses"
+    bank_account = payment_tx.mercury_account_name or "Mercury Checking"
+    amount = abs(payment_tx.amount)
+
+    je = models.JournalEntry(
+        je_number=je_num,
+        transaction_id=payment_tx.id,
+        debit_account=accrued_account,
+        credit_account=bank_account,
+        amount=amount,
+        je_date=payment_tx.date,
+        memo=f"Payment for {invoice.counterparty_name or invoice.description}"[:80],
+        ai_confidence=round(confidence, 3),
+        ai_reasoning=(
+            f"AI matched to invoice #{invoice.id} ({invoice.counterparty_name or 'vendor'}, "
+            f"{(invoice.date.date().isoformat() if invoice.date else '?')}, "
+            f"${abs(invoice.amount):.2f}). Coded DR {accrued_account} / CR {bank_account} "
+            f"to avoid double-booking expense."
+        ),
+        matched_invoice_id=invoice.id,
+        is_ai_matched=True,
+        match_confidence=round(confidence, 3),
+    )
+    db.add(je)
+    invoice.bill_status = "paid"
+    invoice.matched_payment_id = payment_tx.id
+
+    # If the invoice has a linked AccruedExpense, mark it cleared too.
+    ae = (
+        db.query(models.AccruedExpense)
+        .filter(models.AccruedExpense.source_transaction_id == invoice.id)
+        .first()
+    )
+    if ae:
+        ae.status = models.AccruedExpenseStatus.cleared
+        ae.payment_je_id = je.id
+    return je_num + 1
 
 router = APIRouter(prefix="/mercury", tags=["mercury"])
 
@@ -246,7 +381,7 @@ def _sync_one_client(
     client.last_sync_at = datetime.utcnow()
     db.flush()
 
-    # ── Coding: apply rules first, then AI for anything unmatched ──
+    # ── Coding: AI invoice match → rules → AI coding ──
     je_created = 0
     if new_txn_objects:
         for t in new_txn_objects:
@@ -260,6 +395,25 @@ def _sync_one_client(
 
         rule_coded_ids: set[int] = set()
         _je_num = models.next_je_number(db)
+
+        # ── Pre-pass: AI payment matching to existing invoices ──
+        # For each new outgoing Mercury payment, look for an unmatched invoice
+        # (same vendor + amount within 2%). If matched, pre-code as
+        # DR accrued / CR bank to prevent double-booking the expense.
+        for txn in new_txn_objects:
+            if (txn.kind or "") != "outgoingPayment":
+                continue
+            if (txn.amount or 0) >= 0:
+                continue
+            match = _find_matching_invoice(txn, db)
+            if match is None:
+                continue
+            invoice, conf = match
+            _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
+            rule_coded_ids.add(txn.id)
+            je_created += 1
+        db.flush()
+
         for txn in new_txn_objects:
             matched_rule = rules_engine.match_rule(txn, active_rules)
             if matched_rule:
@@ -471,7 +625,22 @@ def code_pending(
     rule_coded_ids: set[int] = set()
     _je_num = models.next_je_number(db)
 
+    # ── Pre-pass: AI payment matching to existing invoices (same as live sync) ──
     for txn in pending:
+        if (txn.kind or "") != "outgoingPayment" or (txn.amount or 0) >= 0:
+            continue
+        match = _find_matching_invoice(txn, db)
+        if match is None:
+            continue
+        invoice, conf = match
+        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
+        rule_coded_ids.add(txn.id)
+        je_created += 1
+    db.flush()
+
+    for txn in pending:
+        if txn.id in rule_coded_ids:
+            continue
         matched = rules_engine.match_rule(txn, active_rules)
         if matched:
             if (matched.rule_action or "expense") == "reject":
@@ -625,12 +794,20 @@ def get_payments(
         JournalEntry.debit_account.ilike("Accrued Expenses%"),
     )
 
+    # Exclude credit card transactions — they belong in the Review Queue, not the
+    # Payments tab. CC charges show up with kind='creditCardTransaction' or with
+    # a payment_method like 'Credit Card'.
     payments = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status != models.TransactionStatus.transfer,
             models.Transaction.source == "mercury",
+            models.Transaction.kind != "creditCardTransaction",
+            or_(
+                models.Transaction.payment_method == None,
+                ~models.Transaction.payment_method.ilike("%credit card%"),
+            ),
             or_(
                 models.Transaction.kind == "outgoingPayment",
                 models.Transaction.mercury_status.in_(["pending", "scheduled"]),

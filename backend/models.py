@@ -87,9 +87,12 @@ class Transaction(Base):
     imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     source = Column(String, default="mercury", nullable=True)  # "mercury" | "depreciation" | "invoice"
     fixed_asset_id = Column(Integer, ForeignKey("fixed_assets.id"), nullable=True)
+    # Invoice-only fields: tracks payment lifecycle for source='invoice' rows
+    bill_status = Column(String(20), nullable=True)             # None | "unpaid" | "partial" | "paid"
+    matched_payment_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
 
     client = relationship("Client", back_populates="transactions")
-    journal_entries = relationship("JournalEntry", back_populates="transaction")
+    journal_entries = relationship("JournalEntry", back_populates="transaction", foreign_keys="JournalEntry.transaction_id")
     audit_logs = relationship("AuditLog", back_populates="transaction")
 
 
@@ -121,8 +124,12 @@ class JournalEntry(Base):
     is_recurring = Column(Boolean, default=False, nullable=True)
     recur_frequency = Column(String(20), nullable=True)  # "MONTHLY"
     recur_end_date = Column(DateTime, nullable=True)
+    # AI Matched flags: set when sync auto-codes a payment against an existing invoice
+    matched_invoice_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
+    is_ai_matched = Column(Boolean, default=False, nullable=True)
+    match_confidence = Column(Float, nullable=True)
 
-    transaction = relationship("Transaction", back_populates="journal_entries")
+    transaction = relationship("Transaction", back_populates="journal_entries", foreign_keys=[transaction_id])
     approver = relationship("User", foreign_keys=[approved_by])
     children = relationship(
         "JournalEntry",

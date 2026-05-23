@@ -80,6 +80,12 @@ def _migrate_db():
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
+        # Invoice/payment-matching columns (added 2026-05)
+        ("transactions",          "bill_status",          "TEXT"),
+        ("transactions",          "matched_payment_id",   "INTEGER"),
+        ("journal_entries",       "matched_invoice_id",   "INTEGER"),
+        ("journal_entries",       "is_ai_matched",        "BOOLEAN DEFAULT FALSE"),
+        ("journal_entries",       "match_confidence",     "REAL"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:

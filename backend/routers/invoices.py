@@ -65,15 +65,15 @@ def _extract_invoice(file_bytes: bytes, media_type: str, chart: Optional[str], p
         "IMPORTANT: Evaluate in this order — fixed_asset first, then prepaid, then regular expense.",
         "",
         "For FIXED/INTANGIBLE ASSET purchases (amount > $2,500, long-lived asset with useful life > 1 year), return:",
-        '{"type": "fixed_asset", "vendor": "Vendor Name", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "asset_account": "Computer Equipment", "accumulated_account": "Accumulated Depreciation", "depreciation_account": "Depreciation Expense", "bank_account": "Accrued Expenses", "useful_life_months": 60, "gaap_basis": "5-year straight-line per ASC 360", "confidence": 0.9, "reasoning": "explanation"}',
+        '{"type": "fixed_asset", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "asset_account": "Computer Equipment", "accumulated_account": "Accumulated Depreciation", "depreciation_account": "Depreciation Expense", "bank_account": "Accrued Expenses", "useful_life_months": 60, "gaap_basis": "5-year straight-line per ASC 360", "confidence": 0.9, "reasoning": "explanation"}',
         "  GAAP useful lives: Computer hardware=60mo, Perpetual software=36mo, Furniture=84mo, Equipment=84mo, Vehicles=60mo, Leasehold improvements=120mo, Patents=180mo, Trademarks=120mo",
         "  Tangible assets: 'Depreciation Expense' / 'Accumulated Depreciation'. Intangibles: 'Amortization Expense' / 'Accumulated Amortization'.",
         "",
         "For MULTI-MONTH PREPAID invoices (annual/quarterly/multi-month subscription or service), return:",
-        '{"type": "prepaid", "vendor": "Vendor Name", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "expense_account": "Specific Expense Account", "prepaid_account": "Prepaid Expenses", "service_start": "January 2025", "service_end": "December 2025", "confidence": 0.9, "reasoning": "explanation"}',
+        '{"type": "prepaid", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "expense_account": "Specific Expense Account", "prepaid_account": "Prepaid Expenses", "service_start": "January 2025", "service_end": "December 2025", "confidence": 0.9, "reasoning": "explanation"}',
         "",
         "For regular single-period invoices (one month of service, one-time expense), return:",
-        '{"type": "expense", "vendor": "Vendor Name", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "service_period": "March 2025", "journal_entries": [{"debit_account": "Account", "credit_account": "Account", "amount": 1234.56, "je_date": "YYYY-MM-DD", "memo": "short memo", "confidence": 0.9, "reasoning": "explanation"}]}',
+        '{"type": "expense", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "service_period": "March 2025", "journal_entries": [{"debit_account": "Account", "credit_account": "Account", "amount": 1234.56, "je_date": "YYYY-MM-DD", "memo": "short memo", "confidence": 0.9, "reasoning": "explanation"}]}',
         "",
         "Rules:",
         "- Use type=fixed_asset when the invoice is for a capital asset (computer hardware, equipment, perpetual software license, vehicles, furniture, intangibles) over $2,500",
@@ -161,6 +161,9 @@ async def upload_invoice(
         mercury_status="invoice",
         status="pending",
         imported_at=datetime.utcnow(),
+        source="invoice",
+        bill_status="unpaid",
+        invoice_number=str(data.get("invoice_number") or "")[:64] or None,
     )
     db.add(txn)
     db.flush()
@@ -349,6 +352,142 @@ async def upload_invoice(
         ],
         **extra,
     }
+
+
+class InvoicePatch(BaseModel):
+    vendor: Optional[str] = None
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[str] = None        # "YYYY-MM-DD"
+    bill_status: Optional[str] = None         # "unpaid" | "partial" | "paid"
+    description: Optional[str] = None
+    amount: Optional[float] = None
+
+
+def _derive_invoice_type(jes: list[models.JournalEntry]) -> str:
+    """Derive invoice type from its JEs.
+
+      - 'fixed_asset' if any debit account looks like a long-lived asset
+      - 'prepaid' if any debit account contains 'prepaid'
+      - 'accrual' if any credit account contains 'accrued'
+      - 'one_time' otherwise
+    """
+    debits = [(je.debit_account or "").lower() for je in jes]
+    credits = [(je.credit_account or "").lower() for je in jes]
+    if any("prepaid" in d for d in debits):
+        return "prepaid"
+    if any(any(tok in d for tok in ("equipment", "furniture", "fixed asset", "intangible", "goodwill", "capitalized")) for d in debits):
+        return "fixed_asset"
+    if any("accrued" in c for c in credits):
+        return "accrual"
+    return "one_time"
+
+
+@router.get("/")
+def list_invoices(
+    client_id: int,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List all uploaded invoices for a client (source='invoice' OR mercury_status='invoice')."""
+    client_obj = db.query(models.Client).filter(
+        models.Client.id == client_id,
+        models.Client.user_id == current_user.id,
+    ).first()
+    if not client_obj:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    from sqlalchemy import or_
+    txns = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            or_(
+                models.Transaction.source == "invoice",
+                models.Transaction.mercury_status == "invoice",
+            ),
+        )
+        .order_by(models.Transaction.date.desc())
+        .all()
+    )
+
+    out = []
+    for tx in txns:
+        bs = tx.bill_status or "unpaid"
+        if status and status != bs:
+            continue
+        jes = tx.journal_entries
+        first_je = jes[0] if jes else None
+        # Find associated prepaid amortization schedule (if any) for service period
+        period_start = first_je.service_period_start if first_je else None
+        period_end = first_je.service_period_end if first_je else None
+        # For prepaid uploads we store service period in the AccruedExpense rows
+        if not period_start:
+            ae_rows = (
+                db.query(models.AccruedExpense)
+                .filter(models.AccruedExpense.source_transaction_id == tx.id)
+                .order_by(models.AccruedExpense.service_period.asc())
+                .all()
+            )
+            if ae_rows:
+                period_start = ae_rows[0].service_period
+                period_end = ae_rows[-1].service_period
+        out.append({
+            "id": tx.id,
+            "client_id": tx.client_id,
+            "date": tx.date.isoformat() if tx.date else None,
+            "vendor": tx.counterparty_name or "",
+            "invoice_number": tx.invoice_number,
+            "description": tx.description,
+            "amount": abs(float(tx.amount or 0)),
+            "service_period_start": period_start.isoformat() if hasattr(period_start, "isoformat") else period_start,
+            "service_period_end": period_end.isoformat() if hasattr(period_end, "isoformat") else period_end,
+            "invoice_type": _derive_invoice_type(jes),
+            "bill_status": bs,
+            "source": tx.source or "manual",
+            "transaction_status": tx.status.value if hasattr(tx.status, "value") else str(tx.status),
+            "je_count": len(jes),
+            "matched_payment_id": tx.matched_payment_id,
+        })
+    return out
+
+
+@router.patch("/{tx_id}")
+def update_invoice(
+    tx_id: int,
+    patch: InvoicePatch,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Update editable invoice metadata. Does NOT change the JE lines (use /journal-entries/ for those)."""
+    tx = db.query(models.Transaction).join(models.Client).filter(
+        models.Transaction.id == tx_id,
+        models.Client.user_id == current_user.id,
+    ).first()
+    if not tx:
+        raise HTTPException(404, "Invoice not found")
+
+    if patch.vendor is not None:
+        tx.counterparty_name = patch.vendor[:255]
+    if patch.invoice_number is not None:
+        tx.invoice_number = patch.invoice_number[:64] or None
+    if patch.invoice_date is not None:
+        try:
+            tx.date = datetime.strptime(patch.invoice_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "invoice_date must be YYYY-MM-DD")
+    if patch.bill_status is not None:
+        if patch.bill_status not in ("unpaid", "partial", "paid"):
+            raise HTTPException(400, "bill_status must be unpaid|partial|paid")
+        tx.bill_status = patch.bill_status
+    if patch.description is not None:
+        tx.description = patch.description[:255]
+    if patch.amount is not None:
+        tx.amount = -abs(float(patch.amount))
+
+    db.commit()
+    db.refresh(tx)
+    return {"ok": True, "id": tx.id}
 
 
 class RecalculateRequest(BaseModel):

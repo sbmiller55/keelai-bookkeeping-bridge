@@ -9,6 +9,7 @@ import {
   getStandingRules, createStandingRule, updateStandingRule, deleteStandingRule,
   generateFromStandingRules, getAccrualSetupContext, setupAccrualPayment,
   AccruedExpense, AccrualSummary, AccrualSuggestion, StandingAccrualRule, AccrualSetupContext,
+  getInvoices, updateInvoice, exportPrepaidSchedule, InvoiceListRow,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
@@ -26,6 +27,30 @@ const ACCRUAL_STATUS_BADGE: Record<string, string> = {
   cleared:         "bg-green-900 text-green-300 border border-green-700",
 };
 
+const DERIVED_STATUS_BADGE: Record<string, string> = {
+  recognized: "bg-green-900 text-green-300 border border-green-700",
+  pending:    "bg-yellow-900 text-yellow-300 border border-yellow-700",
+  upcoming:   "bg-indigo-900 text-indigo-300 border border-indigo-700",
+  cleared:    "bg-emerald-900 text-emerald-300 border border-emerald-700",
+  overdue:    "bg-red-900 text-red-300 border border-red-700",
+};
+
+const DERIVED_STATUS_LABEL: Record<string, string> = {
+  recognized: "Recognized",
+  pending:    "Pending",
+  upcoming:   "Upcoming",
+  cleared:    "Cleared",
+  overdue:    "Overdue",
+};
+
+const DERIVED_STATUS_DESC: Record<string, string> = {
+  recognized: "Expense JE approved + sent to QBO",
+  pending:    "JE in Review Queue, not yet approved",
+  upcoming:   "Future month — JE not yet generated",
+  cleared:    "Cash payment matched and posted",
+  overdue:    "Past month — not yet recognized",
+};
+
 function formatAmount(amount: number): string {
   return `$${Math.abs(amount).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
 }
@@ -40,7 +65,27 @@ function currentMonth(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-type Tab = "payments" | "accruals" | "standing-rules";
+// Client-side fallback for derived status when the backend hasn't been deployed
+// with the new logic yet. Uses only the fields that the old API returns.
+function clientDerivedStatus(ae: AccruedExpense, thisMonth: string): "recognized" | "pending" | "upcoming" | "cleared" | "overdue" {
+  if (ae.status === "cleared") return "cleared";
+  if (ae.accrual_je_id) {
+    // Has a JE in the queue. We can't tell from this endpoint whether the JE is
+    // approved/exported, so default to "recognized" for past months (the common
+    // case: monthly standing accruals already pushed through), "pending" otherwise.
+    return ae.service_period <= thisMonth ? "recognized" : "pending";
+  }
+  if (ae.service_period > thisMonth) return "upcoming";
+  if (ae.service_period < thisMonth) return "overdue";
+  return "upcoming";
+}
+
+function clientKind(ae: AccruedExpense): "accrual" | "prepaid" {
+  if (ae.kind) return ae.kind;
+  return (ae.credit_account || "").toLowerCase().includes("prepaid") ? "prepaid" : "accrual";
+}
+
+type Tab = "invoices" | "payments" | "accruals" | "standing-rules";
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
@@ -49,7 +94,7 @@ export default function PaymentsPage() {
   const clientId = Number(id);
   const { setCurrentPage, setPageContext } = useChatContext();
 
-  const [tab, setTab] = useState<Tab>("payments");
+  const [tab, setTab] = useState<Tab>("invoices");
 
   useEffect(() => {
     setCurrentPage("payments");
@@ -61,7 +106,7 @@ export default function PaymentsPage() {
       {/* Tabs */}
       <div className="mb-6 border-b border-gray-800">
         <nav className="flex gap-1">
-          {(["payments", "accruals", "standing-rules"] as Tab[]).map((t) => (
+          {(["invoices", "payments", "accruals", "standing-rules"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -77,10 +122,179 @@ export default function PaymentsPage() {
         </nav>
       </div>
 
+      {tab === "invoices" && <InvoicesTab clientId={clientId} />}
       {tab === "payments" && <PaymentsTab clientId={clientId} setPageContext={setPageContext} />}
       {tab === "accruals" && <AccrualsTab clientId={clientId} />}
       {tab === "standing-rules" && <StandingRulesTab clientId={clientId} />}
     </div>
+  );
+}
+
+// ── Invoices Tab (NEW) ────────────────────────────────────────────────────────
+
+const INVOICE_STATUS_BADGE: Record<string, string> = {
+  unpaid:  "bg-yellow-900 text-yellow-300 border border-yellow-700",
+  partial: "bg-blue-900 text-blue-300 border border-blue-700",
+  paid:    "bg-green-900 text-green-300 border border-green-700",
+};
+
+const INVOICE_TYPE_BADGE: Record<string, string> = {
+  one_time:    "bg-gray-800 text-gray-300 border border-gray-700",
+  accrual:     "bg-amber-900/60 text-amber-300 border border-amber-700",
+  prepaid:     "bg-indigo-900 text-indigo-300 border border-indigo-700",
+  fixed_asset: "bg-purple-900 text-purple-300 border border-purple-700",
+};
+
+const INVOICE_TYPE_LABEL: Record<string, string> = {
+  one_time:    "One-time",
+  accrual:     "Accrual",
+  prepaid:     "Prepaid",
+  fixed_asset: "Fixed Asset",
+};
+
+function InvoicesTab({ clientId }: { clientId: number }) {
+  const [rows, setRows] = useState<InvoiceListRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<"all" | "unpaid" | "partial" | "paid">("all");
+
+  useEffect(() => { load(); }, [clientId]);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getInvoices(clientId);
+      setRows(data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load invoices");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function setStatus(id: number, status: "unpaid" | "partial" | "paid") {
+    await updateInvoice(id, { bill_status: status });
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, bill_status: status } : r)));
+  }
+
+  const filtered = statusFilter === "all" ? rows : rows.filter((r) => r.bill_status === statusFilter);
+  const unpaidTotal = rows.filter((r) => r.bill_status !== "paid").reduce((s, r) => s + r.amount, 0);
+
+  if (loading) return (
+    <div className="flex justify-center h-40 items-center">
+      <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+
+  return (
+    <>
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Invoices</h1>
+          <p className="text-gray-500 mt-1 text-xs">
+            Vendor invoices · {rows.length} total · {formatAmount(unpaidTotal)} outstanding
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
+          >
+            <option value="all">All statuses</option>
+            <option value="unpaid">Unpaid</option>
+            <option value="partial">Partially paid</option>
+            <option value="paid">Paid</option>
+          </select>
+          <Link
+            href={`/clients/${clientId}/invoices`}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M12 12V4m0 8l-3-3m3 3l3-3" />
+            </svg>
+            Invoice Upload
+          </Link>
+        </div>
+      </div>
+
+      {error && <div className="mb-4 bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm">{error}</div>}
+
+      {filtered.length === 0 ? (
+        <div className="text-center py-20 text-gray-500">
+          {rows.length === 0
+            ? "No invoices yet — click Invoice Upload to add one."
+            : "No invoices match this filter."}
+        </div>
+      ) : (
+        <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
+          <table className="w-full text-sm min-w-[1100px]">
+            <thead>
+              <tr className="border-b border-gray-800 text-left text-xs text-gray-400 font-medium">
+                <th className="px-4 py-3">Date</th>
+                <th className="px-4 py-3">Vendor</th>
+                <th className="px-4 py-3">Invoice #</th>
+                <th className="px-4 py-3">Description</th>
+                <th className="px-4 py-3 text-right">Amount</th>
+                <th className="px-4 py-3">Service Period</th>
+                <th className="px-4 py-3">Type</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Source</th>
+                <th className="px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r) => (
+                <tr key={r.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
+                  <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">{formatDate(r.date)}</td>
+                  <td className="px-4 py-3 text-white text-xs font-medium max-w-[180px] truncate">{r.vendor || "—"}</td>
+                  <td className="px-4 py-3 text-gray-300 text-xs font-mono">{r.invoice_number || "—"}</td>
+                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{r.description}</td>
+                  <td className="px-4 py-3 text-right font-mono font-medium text-red-400 text-xs whitespace-nowrap">{formatAmount(r.amount)}</td>
+                  <td className="px-4 py-3 text-gray-400 text-xs font-mono whitespace-nowrap">
+                    {r.service_period_start && r.service_period_end
+                      ? `${r.service_period_start.slice(0, 7)} → ${r.service_period_end.slice(0, 7)}`
+                      : r.service_period_start
+                        ? r.service_period_start.slice(0, 7)
+                        : "—"}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${INVOICE_TYPE_BADGE[r.invoice_type]}`}>
+                      {INVOICE_TYPE_LABEL[r.invoice_type] || r.invoice_type}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <select
+                      value={r.bill_status}
+                      onChange={(e) => setStatus(r.id, e.target.value as "unpaid" | "partial" | "paid")}
+                      className={`text-xs rounded-full px-2 py-0.5 border font-medium bg-transparent cursor-pointer ${INVOICE_STATUS_BADGE[r.bill_status]}`}
+                    >
+                      <option value="unpaid">Unpaid</option>
+                      <option value="partial">Partial</option>
+                      <option value="paid">Paid</option>
+                    </select>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700 capitalize">
+                      {r.source}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <Link
+                      href={`/clients/${clientId}/invoices?tx=${r.id}`}
+                      className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                    >
+                      Edit
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -614,6 +828,8 @@ function AccrualsTab({ clientId }: { clientId: number }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [editing, setEditing] = useState<AccruedExpense | null>(null);
+  const [subTab, setSubTab] = useState<"all" | "prepaid">("all");
+  const [exporting, setExporting] = useState(false);
 
   // Add form state
   const [form, setForm] = useState({
@@ -700,6 +916,25 @@ function AccrualsTab({ clientId }: { clientId: number }) {
     }
   }
 
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const blob = await exportPrepaidSchedule(clientId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `prepaid-schedule-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setAnalyzeMsg(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   if (loading) return (
     <div className="flex justify-center h-40 items-center">
       <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
@@ -715,6 +950,13 @@ function AccrualsTab({ clientId }: { clientId: number }) {
           <p className="text-gray-500 mt-1 text-xs">Accrued expenses (incurred but not paid) and prepaid amortizations (paid upfront, recognized monthly)</p>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="px-3 py-2 text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 rounded-lg transition-colors disabled:opacity-50"
+          >
+            {exporting ? "Exporting…" : "Export Prepaid Schedule"}
+          </button>
           <button
             onClick={handleGenerate}
             disabled={generating}
@@ -743,26 +985,73 @@ function AccrualsTab({ clientId }: { clientId: number }) {
       {error && <div className="mb-4 bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm">{error}</div>}
       {analyzeMsg && <div className="mb-4 bg-indigo-950 border border-indigo-800 text-indigo-300 rounded-lg px-4 py-3 text-sm">{analyzeMsg}</div>}
 
-      {/* Summary Cards */}
-      {summary && (
-        <div className="grid grid-cols-3 gap-4 mb-6">
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-            <p className="text-xs text-gray-500 mb-1">Total Accrued (Outstanding)</p>
-            <p className="text-2xl font-bold text-white">{formatAmount(summary.total_accrued)}</p>
-          </div>
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-            <p className="text-xs text-gray-500 mb-1">Items Pending Payment</p>
-            <p className="text-2xl font-bold text-yellow-400">{summary.pending_payment_count}</p>
-          </div>
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-            <p className="text-xs text-gray-500 mb-1">Cleared This Month</p>
-            <p className="text-2xl font-bold text-green-400">{summary.cleared_this_month}</p>
-            {summary.cleared_this_month > 0 && (
-              <p className="text-xs text-gray-500 mt-0.5">{formatAmount(summary.cleared_this_month_amount)}</p>
-            )}
-          </div>
+      {/* Status legend */}
+      <div className="mb-4 bg-gray-900/60 border border-gray-800 rounded-lg px-4 py-3">
+        <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Status legend</p>
+        <div className="flex flex-wrap gap-3">
+          {(["recognized", "pending", "upcoming", "cleared", "overdue"] as const).map((s) => (
+            <span key={s} className="inline-flex items-center gap-2 text-xs">
+              <span className={`px-2 py-0.5 rounded-full font-medium ${DERIVED_STATUS_BADGE[s]}`}>{DERIVED_STATUS_LABEL[s]}</span>
+              <span className="text-gray-500">{DERIVED_STATUS_DESC[s]}</span>
+            </span>
+          ))}
         </div>
-      )}
+      </div>
+
+      {/* Summary Cards (new) — falls back to client-side totals if backend isn't deployed */}
+      {summary && (() => {
+        const thisMonth = currentMonth();
+        // Compute fallbacks from the accruals list when server doesn't provide them
+        let outstanding = 0, upcomingThis = 0, prepaidBal = 0;
+        for (const a of accruals) {
+          const k = clientKind(a);
+          const d = a.derived_status ?? clientDerivedStatus(a, thisMonth);
+          if (k === "accrual" && (d === "recognized" || d === "overdue")) outstanding += a.amount;
+          if (d === "upcoming" && a.service_period === thisMonth) upcomingThis += a.amount;
+          if (k === "prepaid" && (d === "upcoming" || d === "pending")) prepaidBal += a.amount;
+        }
+        const outstandingShown = summary.outstanding_accruals ?? Math.round(outstanding * 100) / 100;
+        const upcomingShown = summary.upcoming_this_month_amount ?? Math.round(upcomingThis * 100) / 100;
+        const prepaidShown = summary.prepaid_balance ?? Math.round(prepaidBal * 100) / 100;
+        return (
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+              <p className="text-xs text-gray-500 mb-1">Outstanding Accruals</p>
+              <p className="text-2xl font-bold text-white">{formatAmount(outstandingShown)}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Recognized but not yet cash-paid</p>
+            </div>
+            <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+              <p className="text-xs text-gray-500 mb-1">Upcoming This Month</p>
+              <p className="text-2xl font-bold text-yellow-400">{formatAmount(upcomingShown)}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Need to be generated and approved</p>
+            </div>
+            <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+              <p className="text-xs text-gray-500 mb-1">Prepaid Balance</p>
+              <p className="text-2xl font-bold text-indigo-400">{formatAmount(prepaidShown)}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Remaining prepaid not yet amortized</p>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Sub-tabs */}
+      <div className="mb-4 border-b border-gray-800">
+        <nav className="flex gap-1">
+          {(["all", "prepaid"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setSubTab(t)}
+              className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors ${
+                subTab === t
+                  ? "bg-gray-900 border border-b-gray-900 border-gray-700 text-white -mb-px"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {t === "all" ? "All Entries" : "Prepaid Schedule"}
+            </button>
+          ))}
+        </nav>
+      </div>
 
       {/* AI Suggestions */}
       {suggestions.length > 0 && (
@@ -801,69 +1090,82 @@ function AccrualsTab({ clientId }: { clientId: number }) {
         </div>
       )}
 
-      {/* Schedule Table */}
-      {accruals.length === 0 ? (
-        <div className="text-center py-20 text-gray-500">
-          No accrued expenses yet. Use AI Analyze to detect accruals from your payments, or add one manually.
-        </div>
-      ) : (
-        <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
-          <table className="w-full text-sm min-w-[900px]">
-            <thead>
-              <tr className="border-b border-gray-800 text-left text-xs text-gray-400 font-medium">
-                <th className="px-4 py-3">Vendor</th>
-                <th className="px-4 py-3">Description</th>
-                <th className="px-4 py-3">Service Period</th>
-                <th className="px-4 py-3 text-right">Amount</th>
-                <th className="px-4 py-3">Exp. Payment</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accruals.map((ae) => (
-                <tr key={ae.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-3 text-white text-xs font-medium">{ae.vendor_name}</td>
-                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{ae.description || "—"}</td>
-                  <td className="px-4 py-3 text-gray-300 text-xs font-mono">{ae.service_period}</td>
-                  <td className="px-4 py-3 text-right text-xs font-mono font-medium text-red-400">{formatAmount(ae.amount)}</td>
-                  <td className="px-4 py-3 text-xs text-gray-400">{formatDate(ae.expected_payment_date)}</td>
-                  <td className="px-4 py-3">
-                    <select
-                      value={ae.status}
-                      onChange={(e) => handleStatusChange(ae, e.target.value)}
-                      className={`text-xs rounded-full px-2 py-0.5 border font-medium bg-transparent cursor-pointer ${ACCRUAL_STATUS_BADGE[ae.status] ?? "text-gray-400 border-gray-700"}`}
-                    >
-                      <option value="accrued">Accrued</option>
-                      <option value="partially_paid">Partially Paid</option>
-                      <option value="cleared">Cleared</option>
-                    </select>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      {!ae.accrual_je_id && ae.debit_account && (
-                        <button
-                          onClick={() => handleRelease(ae.id)}
-                          className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors whitespace-nowrap"
-                        >
-                          + Review Queue
-                        </button>
-                      )}
-                      {ae.accrual_je_id && (
-                        <span className="text-xs text-green-500">In Queue</span>
-                      )}
-                      {ae.status !== "cleared" && (
-                        <button onClick={() => setEditing(ae)} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Edit</button>
-                      )}
-                      <button onClick={() => handleDelete(ae.id)} className="text-xs text-gray-500 hover:text-red-400 transition-colors">Delete</button>
-                    </div>
-                  </td>
+      {/* All Entries sub-tab */}
+      {subTab === "all" && (
+        accruals.length === 0 ? (
+          <div className="text-center py-20 text-gray-500">
+            No accrued expenses yet. Use AI Analyze to detect accruals from your payments, or add one manually.
+          </div>
+        ) : (
+          <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
+            <table className="w-full text-sm min-w-[1000px]">
+              <thead>
+                <tr className="border-b border-gray-800 text-left text-xs text-gray-400 font-medium">
+                  <th className="px-4 py-3">Vendor</th>
+                  <th className="px-4 py-3">Description</th>
+                  <th className="px-4 py-3">Period</th>
+                  <th className="px-4 py-3 text-right">Amount</th>
+                  <th className="px-4 py-3">Type</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Linked Invoice</th>
+                  <th className="px-4 py-3">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {(() => { const thisMonth = currentMonth(); return accruals.map((ae) => {
+                  const derived = ae.derived_status ?? clientDerivedStatus(ae, thisMonth);
+                  const kind = clientKind(ae);
+                  return (
+                    <tr key={ae.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
+                      <td className="px-4 py-3 text-white text-xs font-medium">{ae.vendor_name}</td>
+                      <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{ae.description || "—"}</td>
+                      <td className="px-4 py-3 text-gray-300 text-xs font-mono">{ae.service_period}</td>
+                      <td className="px-4 py-3 text-right text-xs font-mono font-medium text-red-400">{formatAmount(ae.amount)}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${kind === "prepaid" ? "bg-indigo-900 text-indigo-300 border border-indigo-700" : "bg-amber-900/60 text-amber-300 border border-amber-700"}`}>
+                          {kind === "prepaid" ? "Prepaid" : "Accrual"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${DERIVED_STATUS_BADGE[derived]}`}>
+                          {DERIVED_STATUS_LABEL[derived]}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-400">
+                        {ae.source_transaction_id ? (
+                          <span className="font-mono">#{ae.source_transaction_id}</span>
+                        ) : "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          {!ae.accrual_je_id && ae.debit_account && (
+                            <button
+                              onClick={() => handleRelease(ae.id)}
+                              className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors whitespace-nowrap"
+                            >
+                              + Review Queue
+                            </button>
+                          )}
+                          {ae.accrual_je_id && (
+                            <span className="text-xs text-green-500">In Queue</span>
+                          )}
+                          {ae.status !== "cleared" && (
+                            <button onClick={() => setEditing(ae)} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Edit</button>
+                          )}
+                          <button onClick={() => handleDelete(ae.id)} className="text-xs text-gray-500 hover:text-red-400 transition-colors">Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                }); })()}
+              </tbody>
+            </table>
+          </div>
+        )
       )}
+
+      {/* Prepaid Schedule sub-tab */}
+      {subTab === "prepaid" && <PrepaidScheduleView accruals={accruals} />}
 
       {/* Edit modal */}
       {editing && (
@@ -878,6 +1180,88 @@ function AccrualsTab({ clientId }: { clientId: number }) {
         />
       )}
     </>
+  );
+}
+
+function PrepaidScheduleView({ accruals }: { accruals: AccruedExpense[] }) {
+  const prepaid = accruals.filter((a) => a.kind === "prepaid" || (a.credit_account || "").toLowerCase().includes("prepaid"));
+
+  if (prepaid.length === 0) {
+    return (
+      <div className="text-center py-20 text-gray-500 bg-gray-900 rounded-xl border border-gray-800">
+        No prepaid amortization schedules yet. Upload a multi-month invoice on the Invoices tab to create one.
+      </div>
+    );
+  }
+
+  // Build vendor × month grid
+  const months = Array.from(new Set(prepaid.map((a) => a.service_period))).sort();
+  type Row = { vendor: string; description: string; cells: Record<string, AccruedExpense | undefined> };
+  const rowMap = new Map<string, Row>();
+  for (const a of prepaid) {
+    const key = `${a.vendor_name}::${a.description || ""}`;
+    let r = rowMap.get(key);
+    if (!r) {
+      r = { vendor: a.vendor_name, description: a.description || "", cells: {} };
+      rowMap.set(key, r);
+    }
+    r.cells[a.service_period] = a;
+  }
+  const rows = Array.from(rowMap.values()).sort((a, b) => a.vendor.localeCompare(b.vendor));
+
+  const thisMonth = currentMonth();
+  function statusIcon(ae: AccruedExpense | undefined) {
+    if (!ae) return <span className="text-gray-700">—</span>;
+    const s = ae.derived_status ?? clientDerivedStatus(ae, thisMonth);
+    if (s === "recognized" || s === "cleared") {
+      return <span className="text-green-400" title={DERIVED_STATUS_LABEL[s]}>✓</span>;
+    }
+    if (s === "overdue") {
+      return <span className="text-red-400" title="Overdue">!</span>;
+    }
+    return <span className="text-indigo-400" title="Upcoming/Pending">◷</span>;
+  }
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-gray-800 text-left text-gray-400 font-medium">
+            <th className="px-3 py-2 sticky left-0 bg-gray-900 z-10">Vendor</th>
+            <th className="px-3 py-2 sticky left-[140px] bg-gray-900 z-10">Description</th>
+            {months.map((m) => (
+              <th key={m} className="px-2 py-2 text-center font-mono whitespace-nowrap">{m}</th>
+            ))}
+            <th className="px-3 py-2 text-right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const total = Object.values(r.cells).reduce((s, c) => s + (c ? c.amount : 0), 0);
+            return (
+              <tr key={`${r.vendor}-${r.description}`} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
+                <td className="px-3 py-2 text-white font-medium whitespace-nowrap sticky left-0 bg-gray-900 z-10">{r.vendor}</td>
+                <td className="px-3 py-2 text-gray-400 truncate max-w-[200px] sticky left-[140px] bg-gray-900 z-10">{r.description}</td>
+                {months.map((m) => {
+                  const c = r.cells[m];
+                  return (
+                    <td key={m} className="px-2 py-2 text-center whitespace-nowrap">
+                      {c ? (
+                        <div className="flex flex-col items-center">
+                          {statusIcon(c)}
+                          <span className="text-gray-500 font-mono">{formatAmount(c.amount)}</span>
+                        </div>
+                      ) : <span className="text-gray-700">·</span>}
+                    </td>
+                  );
+                })}
+                <td className="px-3 py-2 text-right font-mono font-medium text-red-400 whitespace-nowrap">{formatAmount(total)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

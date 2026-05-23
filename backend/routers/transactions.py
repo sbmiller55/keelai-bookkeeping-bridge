@@ -100,13 +100,38 @@ def list_with_entries(
     else:
         je_map = {}
 
+    # Build a summary map for any matched invoice transactions referenced by JEs
+    matched_invoice_ids = {
+        je.matched_invoice_id
+        for jes in je_map.values()
+        for je in jes
+        if getattr(je, "matched_invoice_id", None)
+    }
+    matched_invoice_map: dict[int, dict] = {}
+    if matched_invoice_ids:
+        for inv in (
+            db.query(models.Transaction)
+            .filter(models.Transaction.id.in_(matched_invoice_ids))
+            .all()
+        ):
+            matched_invoice_map[inv.id] = {
+                "id": inv.id,
+                "vendor": inv.counterparty_name or "",
+                "invoice_number": inv.invoice_number,
+                "date": inv.date.isoformat() if inv.date else None,
+                "amount": abs(float(inv.amount or 0)),
+            }
+
     result = []
     for t in txns:
         t_data = schemas.TransactionWithEntries.model_validate(t)
-        t_data.journal_entries = [
-            schemas.JournalEntryRead.model_validate(je)
-            for je in je_map.get(t.id, [])
-        ]
+        je_list = []
+        for je in je_map.get(t.id, []):
+            jed = schemas.JournalEntryRead.model_validate(je)
+            if getattr(je, "matched_invoice_id", None) and je.matched_invoice_id in matched_invoice_map:
+                jed.matched_invoice = matched_invoice_map[je.matched_invoice_id]
+            je_list.append(jed)
+        t_data.journal_entries = je_list
         result.append(t_data)
     return result
 

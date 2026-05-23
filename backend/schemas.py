@@ -156,6 +156,11 @@ class JournalEntryRead(BaseModel):
     recur_frequency: Optional[str] = None
     recur_end_date: Optional[datetime] = None
     qbo_object_type: Optional[str] = None
+    # AI Matched fields
+    matched_invoice_id: Optional[int] = None
+    is_ai_matched: Optional[bool] = None
+    match_confidence: Optional[float] = None
+    matched_invoice: Optional[dict] = None   # populated server-side: {vendor, invoice_number, date, amount}
 
     model_config = {"from_attributes": True}
 

@@ -478,6 +478,8 @@ function JeRow({
   const [savingRule, setSavingRule] = useState(false);
   const [ruleSaved, setRuleSaved] = useState(false);
   const [ruleAppliedCount, setRuleAppliedCount] = useState(0);
+  // AI-matched override warning state
+  const [pendingDebitOverride, setPendingDebitOverride] = useState<string | null>(null);
 
   const latestRef = useRef({ debit: je.debit_account, credit: je.credit_account, amount: String(je.amount), memo: je.memo ?? "" });
 
@@ -516,8 +518,30 @@ function JeRow({
 
   function handleDebitChange(v: string) {
     const oldDebit = latestRef.current.debit;
+    // If this JE was AI-matched (DR Accrued / CR Bank) and the user is changing
+    // the debit account AWAY from an accrued account, warn about double-booking.
+    const wasAccrued = oldDebit.toLowerCase().includes("accrued");
+    const isNowAccrued = v.toLowerCase().includes("accrued");
+    if (je.is_ai_matched && wasAccrued && !isNowAccrued && v !== oldDebit) {
+      setPendingDebitOverride(v);
+      // revert visually until user confirms
+      setDebit(oldDebit);
+      return;
+    }
     latestRef.current = { ...latestRef.current, debit: v };
     setDebit(v);
+    saveFields(latestRef.current).then(() => {
+      if (v !== oldDebit) showRulePrompt(v, latestRef.current.credit);
+    });
+  }
+
+  function confirmDebitOverride() {
+    if (!pendingDebitOverride) return;
+    const v = pendingDebitOverride;
+    const oldDebit = latestRef.current.debit;
+    latestRef.current = { ...latestRef.current, debit: v };
+    setDebit(v);
+    setPendingDebitOverride(null);
     saveFields(latestRef.current).then(() => {
       if (v !== oldDebit) showRulePrompt(v, latestRef.current.credit);
     });
@@ -588,9 +612,36 @@ function JeRow({
   const cellBase = "px-3 py-2 text-xs align-middle";
   const inputCls = "w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 font-mono";
 
+  const matchedInv = je.matched_invoice;
+
   return (
     <>
-    <tr className={`border-b border-gray-800 ${isFirst ? "border-t border-t-gray-700" : ""} hover:bg-gray-800/20 transition-colors`}>
+    {je.is_ai_matched && matchedInv && (
+      <tr className="bg-amber-950/30 border-b border-amber-900/30">
+        <td colSpan={11} className="px-4 py-1.5">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-700/40 text-amber-200 border border-amber-700 font-medium">
+              🔗 AI Matched
+              {je.match_confidence != null && (
+                <span className="text-amber-300/80 font-mono">{Math.round((je.match_confidence ?? 0) * 100)}%</span>
+              )}
+            </span>
+            <span className="text-amber-100/90">
+              Matched to:{" "}
+              <span className="text-white font-medium">{matchedInv.vendor || "vendor"}</span>{" "}
+              {matchedInv.invoice_number && (
+                <>invoice <span className="font-mono">#{matchedInv.invoice_number}</span> </>
+              )}
+              for ${matchedInv.amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+              {matchedInv.date && (
+                <> dated <span className="font-mono">{matchedInv.date.slice(0, 10)}</span></>
+              )}
+            </span>
+          </div>
+        </td>
+      </tr>
+    )}
+    <tr className={`border-b border-gray-800 ${isFirst && !je.is_ai_matched ? "border-t border-t-gray-700" : ""} hover:bg-gray-800/20 transition-colors`}>
       {/* Date — per JE row */}
       <td className={`${cellBase} whitespace-nowrap`}>
         <input
@@ -788,7 +839,61 @@ function JeRow({
         </td>
       </tr>
     )}
+
+    {pendingDebitOverride && (
+      <DoubleBookWarning
+        vendor={matchedInv?.vendor || tx.counterparty_name || tx.description}
+        amount={matchedInv?.amount || Math.abs(tx.amount)}
+        newDebit={pendingDebitOverride}
+        onCancel={() => setPendingDebitOverride(null)}
+        onConfirm={confirmDebitOverride}
+      />
+    )}
     </>
+  );
+}
+
+function DoubleBookWarning({
+  vendor, amount, newDebit, onCancel, onConfirm,
+}: {
+  vendor: string;
+  amount: number;
+  newDebit: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <tr>
+      <td colSpan={11} className="p-0">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="bg-gray-900 border border-amber-700 rounded-2xl w-full max-w-lg shadow-2xl">
+            <div className="px-6 py-4 border-b border-amber-800/40">
+              <h2 className="text-base font-semibold text-amber-300">⚠ Double-booking risk</h2>
+            </div>
+            <div className="px-6 py-5 space-y-3 text-sm text-gray-300">
+              <p>
+                This transaction was AI-matched to an existing accrual for{" "}
+                <span className="text-white font-medium">{vendor}</span> (${amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}).
+              </p>
+              <p>
+                Changing the debit account to{" "}
+                <span className="text-white font-medium">&ldquo;{newDebit}&rdquo;</span> (instead of an accrual liability) may result in
+                double-booking the expense in QBO — once at invoice time, again at payment.
+              </p>
+              <p className="text-gray-400 text-xs">Are you sure you want to override the AI match?</p>
+            </div>
+            <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-2">
+              <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200 transition-colors">
+                Keep AI coding
+              </button>
+              <button onClick={onConfirm} className="px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white text-sm font-medium rounded-lg transition-colors">
+                Override anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      </td>
+    </tr>
   );
 }
 

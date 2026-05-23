@@ -96,6 +96,17 @@ export interface JournalEntry {
   recur_frequency: string | null;
   recur_end_date: string | null;
   qbo_object_type: string | null;
+  // AI Matched (set when sync auto-codes a payment against an existing invoice)
+  matched_invoice_id?: number | null;
+  is_ai_matched?: boolean | null;
+  match_confidence?: number | null;
+  matched_invoice?: {
+    id: number;
+    vendor: string;
+    invoice_number: string | null;
+    date: string | null;
+    amount: number;
+  } | null;
 }
 
 export interface JournalEntryCreate {
@@ -562,6 +573,57 @@ export interface InvoiceUploadResult {
   prepaid_account?: string;
 }
 
+// ── Invoice list / patch ──────────────────────────────────────────────────────
+
+export interface InvoiceListRow {
+  id: number;
+  client_id: number;
+  date: string | null;
+  vendor: string;
+  invoice_number: string | null;
+  description: string;
+  amount: number;
+  service_period_start: string | null;
+  service_period_end: string | null;
+  invoice_type: "one_time" | "accrual" | "prepaid" | "fixed_asset";
+  bill_status: "unpaid" | "partial" | "paid";
+  source: string;
+  transaction_status: string;
+  je_count: number;
+  matched_payment_id: number | null;
+}
+
+export function getInvoices(clientId: number): Promise<InvoiceListRow[]> {
+  return apiFetch<InvoiceListRow[]>(`/invoices/?client_id=${clientId}`);
+}
+
+export function updateInvoice(
+  txId: number,
+  patch: Partial<{
+    vendor: string;
+    invoice_number: string | null;
+    invoice_date: string;
+    bill_status: "unpaid" | "partial" | "paid";
+    description: string;
+    amount: number;
+  }>,
+): Promise<{ ok: boolean; id: number }> {
+  return apiFetch(`/invoices/${txId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function exportPrepaidSchedule(clientId: number): Promise<Blob> {
+  const token = getToken();
+  return fetch(`${BASE_URL}/clients/${clientId}/accruals/export-prepaid`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  }).then(async (r) => {
+    if (!r.ok) throw new Error("Export failed");
+    return r.blob();
+  });
+}
+
 export async function uploadInvoice(clientId: number, file: File): Promise<InvoiceUploadResult> {
   const token = getToken();
   const body = new FormData();
@@ -909,6 +971,9 @@ export function generateDepreciationJEs(
 
 // ── Accrued Expenses ──────────────────────────────────────────────────────────
 
+export type AccrualDerivedStatus = "recognized" | "pending" | "upcoming" | "cleared" | "overdue";
+export type AccrualKind = "accrual" | "prepaid";
+
 export interface AccruedExpense {
   id: number;
   client_id: number;
@@ -927,6 +992,9 @@ export interface AccruedExpense {
   debit_account: string | null;
   credit_account: string | null;
   created_at: string;
+  // Derived server-side
+  derived_status?: AccrualDerivedStatus;
+  kind?: AccrualKind;
 }
 
 export interface AccrualSummary {
@@ -934,6 +1002,10 @@ export interface AccrualSummary {
   pending_payment_count: number;
   cleared_this_month: number;
   cleared_this_month_amount: number;
+  // New derived totals
+  outstanding_accruals?: number;
+  upcoming_this_month_amount?: number;
+  prepaid_balance?: number;
 }
 
 export interface AccrualSuggestion {
@@ -986,12 +1058,12 @@ export function createAccrual(clientId: number, data: {
 export function updateAccrual(clientId: number, aeId: number, data: {
   status?: string;
   expected_payment_date?: string | null;
-  description?: string;
+  description?: string | null;
   amount?: number;
   vendor_name?: string;
   service_period?: string;
-  debit_account?: string;
-  credit_account?: string;
+  debit_account?: string | null;
+  credit_account?: string | null;
 }): Promise<AccruedExpense> {
   return apiFetch(`/clients/${clientId}/accruals/${aeId}`, {
     method: "PATCH",

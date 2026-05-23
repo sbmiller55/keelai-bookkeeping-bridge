@@ -15,10 +15,12 @@ Routes:
 """
 
 import calendar
+import io
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -64,6 +66,30 @@ def _get_client(client_id: int, user: User, db: Session) -> Client:
 
 def _current_month() -> str:
     return datetime.utcnow().strftime("%Y-%m")
+
+
+def _derive_status(ae: AccruedExpense, je: Optional[JournalEntry], this_month: str) -> str:
+    """
+    Map an AccruedExpense to a user-facing status label.
+
+      - 'cleared'    — cash payment matched (ae.status == cleared)
+      - 'recognized' — accrual JE approved/exported to QBO
+      - 'pending'    — JE in Review Queue, not yet approved
+      - 'upcoming'   — future-month entry, no JE yet
+      - 'overdue'    — past-month entry, no JE yet
+    """
+    if ae.status == AccruedExpenseStatus.cleared:
+        return "cleared"
+    if ae.accrual_je_id and je is not None:
+        if je.approved_at or je.exported_at:
+            return "recognized"
+        return "pending"
+    # No JE yet — compare period to current month
+    if ae.service_period > this_month:
+        return "upcoming"
+    if ae.service_period < this_month:
+        return "overdue"
+    return "upcoming"  # current month, not yet released → upcoming
 
 
 def _create_synthetic_transaction(client_id: int, vendor: str, amount: float,
@@ -136,27 +162,172 @@ def list_accruals(
         q = q.filter(AccruedExpense.status == status)
     accruals = q.order_by(AccruedExpense.service_period.asc(), AccruedExpense.created_at.asc()).all()
 
+    # Fetch all the linked JEs in one query for derived-status calculation
+    je_ids = [a.accrual_je_id for a in accruals if a.accrual_je_id]
+    je_map: dict[int, JournalEntry] = {}
+    if je_ids:
+        for je in db.query(JournalEntry).filter(JournalEntry.id.in_(je_ids)).all():
+            je_map[je.id] = je
+
     this_month = _current_month()
-    total_accrued = sum(
-        a.amount for a in accruals if a.status != AccruedExpenseStatus.cleared
-    )
+
+    rows = []
+    upcoming_this_month_amount = 0.0
+    outstanding_accrual_amount = 0.0
+    prepaid_balance = 0.0
+    for a in accruals:
+        je = je_map.get(a.accrual_je_id) if a.accrual_je_id else None
+        derived = _derive_status(a, je, this_month)
+        # Determine kind: prepaid if credit account contains 'prepaid', else accrual
+        cred = (a.credit_account or "").lower()
+        kind = "prepaid" if "prepaid" in cred else "accrual"
+
+        if derived == "upcoming" and a.service_period == this_month:
+            upcoming_this_month_amount += a.amount
+        if derived in ("recognized", "overdue") and kind == "accrual":
+            outstanding_accrual_amount += a.amount
+        if derived in ("upcoming", "pending") and kind == "prepaid":
+            prepaid_balance += a.amount
+
+        d = AccruedExpenseRead.model_validate(a).model_dump()
+        d["derived_status"] = derived
+        d["kind"] = kind
+        rows.append(d)
+
+    total_accrued = sum(a.amount for a in accruals if a.status != AccruedExpenseStatus.cleared)
     pending_count = sum(1 for a in accruals if a.status == AccruedExpenseStatus.accrued)
     cleared_this_month = [
         a for a in accruals
         if a.status == AccruedExpenseStatus.cleared and a.service_period == this_month
     ]
 
-    summary = AccrualSummary(
-        total_accrued=round(total_accrued, 2),
-        pending_payment_count=pending_count,
-        cleared_this_month=len(cleared_this_month),
-        cleared_this_month_amount=round(sum(a.amount for a in cleared_this_month), 2),
-    )
+    summary = {
+        "total_accrued": round(total_accrued, 2),
+        "pending_payment_count": pending_count,
+        "cleared_this_month": len(cleared_this_month),
+        "cleared_this_month_amount": round(sum(a.amount for a in cleared_this_month), 2),
+        # New derived totals
+        "outstanding_accruals": round(outstanding_accrual_amount, 2),
+        "upcoming_this_month_amount": round(upcoming_this_month_amount, 2),
+        "prepaid_balance": round(prepaid_balance, 2),
+    }
 
     return {
         "summary": summary,
-        "accruals": [AccruedExpenseRead.model_validate(a) for a in accruals],
+        "accruals": rows,
     }
+
+
+# ── Prepaid Schedule Excel export ─────────────────────────────────────────────
+
+@router.get("/export-prepaid")
+def export_prepaid_schedule(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return an xlsx of the prepaid amortization schedule: vendor rows × month columns."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    _get_client(client_id, current_user, db)
+    rows = (
+        db.query(AccruedExpense)
+        .filter(AccruedExpense.client_id == client_id)
+        .order_by(AccruedExpense.vendor_name, AccruedExpense.service_period)
+        .all()
+    )
+    # Only prepaid items
+    prepaid_rows = [a for a in rows if "prepaid" in (a.credit_account or "").lower()]
+
+    # Build month set
+    months = sorted({a.service_period for a in prepaid_rows})
+    # Group by vendor + description (one row per amortization contract)
+    by_key: dict[tuple[str, str], dict] = {}
+    for a in prepaid_rows:
+        key = (a.vendor_name, (a.description or "")[:80])
+        if key not in by_key:
+            by_key[key] = {
+                "vendor": a.vendor_name,
+                "description": a.description or "",
+                "expense_account": a.debit_account or "",
+                "prepaid_account": a.credit_account or "",
+                "amounts": {},
+                "statuses": {},
+            }
+        by_key[key]["amounts"][a.service_period] = a.amount
+        je = (
+            db.query(JournalEntry).filter(JournalEntry.id == a.accrual_je_id).first()
+            if a.accrual_je_id else None
+        )
+        by_key[key]["statuses"][a.service_period] = _derive_status(a, je, _current_month())
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Prepaid Schedule"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="334155")
+    headers = ["Vendor", "Description", "Expense Account", "Prepaid Account"] + months + ["Total"]
+    for col_idx, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=col_idx, value=h)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = Alignment(horizontal="center")
+
+    STATUS_FILL = {
+        "recognized": PatternFill("solid", fgColor="DCFCE7"),  # green
+        "pending":    PatternFill("solid", fgColor="FEF9C3"),  # yellow
+        "upcoming":   PatternFill("solid", fgColor="E0E7FF"),  # indigo
+        "overdue":    PatternFill("solid", fgColor="FEE2E2"),  # red
+        "cleared":    PatternFill("solid", fgColor="D1FAE5"),  # darker green
+    }
+    for row_idx, key in enumerate(sorted(by_key.keys()), start=2):
+        row = by_key[key]
+        ws.cell(row=row_idx, column=1, value=row["vendor"])
+        ws.cell(row=row_idx, column=2, value=row["description"])
+        ws.cell(row=row_idx, column=3, value=row["expense_account"])
+        ws.cell(row=row_idx, column=4, value=row["prepaid_account"])
+        total = 0.0
+        for m_idx, m in enumerate(months, start=5):
+            amt = row["amounts"].get(m)
+            if amt is None:
+                continue
+            cell = ws.cell(row=row_idx, column=m_idx, value=round(amt, 2))
+            cell.number_format = "$#,##0.00"
+            st = row["statuses"].get(m)
+            if st and st in STATUS_FILL:
+                cell.fill = STATUS_FILL[st]
+            total += amt
+        tcell = ws.cell(row=row_idx, column=len(headers), value=round(total, 2))
+        tcell.number_format = "$#,##0.00"
+        tcell.font = Font(bold=True)
+
+    # Column widths
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 36
+    ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 22
+    for col_idx in range(5, len(headers) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = 12
+
+    # Legend rows under the table
+    legend_row = ws.max_row + 2
+    ws.cell(row=legend_row, column=1, value="Legend:").font = Font(bold=True)
+    for i, (label, fill) in enumerate(STATUS_FILL.items()):
+        c = ws.cell(row=legend_row, column=2 + i, value=label.title())
+        c.fill = fill
+        c.alignment = Alignment(horizontal="center")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"prepaid-schedule-{datetime.utcnow().strftime('%Y-%m-%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Create ────────────────────────────────────────────────────────────────────
