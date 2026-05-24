@@ -484,11 +484,94 @@ def update_transaction(
     db: Session = Depends(get_db),
 ):
     tx = _get_transaction_or_404(transaction_id, current_user, db)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    prev_status = tx.status
+    fields = payload.model_dump(exclude_unset=True)
+    for field, value in fields.items():
         setattr(tx, field, value)
+
+    # Auto-clear linked accruals when a payment transitions to approved.
+    # Catches both AI-matched payments and manually coded DR Accrued / CR Bank entries.
+    new_status_str = str(fields.get("status") or "").lower()
+    prev_status_str = str(prev_status.value if hasattr(prev_status, "value") else prev_status).lower()
+    if new_status_str == "approved" and prev_status_str != "approved":
+        _auto_clear_accruals_for_transaction(tx, db)
+
     db.commit()
     db.refresh(tx)
     return tx
+
+
+def _auto_clear_accruals_for_transaction(tx: models.Transaction, db: Session) -> None:
+    """Mark linked AccruedExpense rows as cleared when a payment is approved.
+
+    Two paths:
+      1. JE has matched_invoice_id → clear the AccruedExpense whose
+         source_transaction_id = matched_invoice_id.
+      2. JE debits an accrual liability ('accrued' in account name) → find an
+         open AccruedExpense for same client + vendor with matching amount.
+    """
+    jes = (
+        db.query(models.JournalEntry)
+        .filter(models.JournalEntry.transaction_id == tx.id)
+        .all()
+    )
+    if not jes:
+        return
+
+    vendor = (tx.counterparty_name or tx.description or "").strip()
+    for je in jes:
+        # Path 1: AI-matched JE references the invoice transaction directly
+        if getattr(je, "matched_invoice_id", None):
+            ae = (
+                db.query(models.AccruedExpense)
+                .filter(
+                    models.AccruedExpense.client_id == tx.client_id,
+                    models.AccruedExpense.source_transaction_id == je.matched_invoice_id,
+                    models.AccruedExpense.status != models.AccruedExpenseStatus.cleared,
+                )
+                .first()
+            )
+            if ae:
+                ae.status = models.AccruedExpenseStatus.cleared
+                ae.payment_je_id = je.id
+                continue
+
+        # Path 2: JE debits an accrual liability — find a matching open accrual
+        # by client + vendor (case-insensitive substring) + amount within 2%
+        debit = (je.debit_account or "").lower()
+        if "accrued" not in debit:
+            continue
+        je_amt = abs(float(je.amount or 0))
+        if je_amt == 0 or not vendor:
+            continue
+        candidates = (
+            db.query(models.AccruedExpense)
+            .filter(
+                models.AccruedExpense.client_id == tx.client_id,
+                models.AccruedExpense.status != models.AccruedExpenseStatus.cleared,
+            )
+            .all()
+        )
+        v_lower = vendor.lower()
+        best = None
+        for ae in candidates:
+            ae_vendor = (ae.vendor_name or "").lower()
+            if not ae_vendor or len(ae_vendor) < 3:
+                continue
+            if ae_vendor not in v_lower and v_lower not in ae_vendor:
+                continue
+            ae_amt = float(ae.amount or 0)
+            if ae_amt == 0:
+                continue
+            diff = abs(ae_amt - je_amt) / ae_amt
+            if diff > 0.02:
+                continue
+            if best is None or diff < best[1]:
+                best = (ae, diff)
+        if best is not None:
+            ae = best[0]
+            ae.status = models.AccruedExpenseStatus.cleared
+            ae.payment_je_id = je.id
 
 
 @router.delete("/{transaction_id}", status_code=status.HTTP_204_NO_CONTENT)
