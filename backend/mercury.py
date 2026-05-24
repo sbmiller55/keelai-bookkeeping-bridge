@@ -95,16 +95,47 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
         return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
-def get_transaction_detail(mercury_txn_id: str, api_key: str) -> Optional[dict]:
-    """Fetch a single transaction by its Mercury ID to get attachments etc."""
-    try:
-        return _request(f"/transaction/{mercury_txn_id}", api_key, "TXN_DETAIL")
-    except MercuryError:
+def get_transaction_detail(
+    mercury_txn_id: str,
+    api_key: str,
+    account_id: Optional[str] = None,
+) -> Optional[dict]:
+    """Fetch a single transaction by its Mercury ID to get attachments etc.
+
+    Mercury's API requires the account ID in the path for transaction detail:
+        GET /account/{accountId}/transaction/{transactionId}
+
+    If we have the account_id, use that endpoint directly. Otherwise fall back
+    to enumerating all accounts and trying each one.
+    """
+    if account_id:
         try:
-            # Some transactions live under /payment/<id>
-            return _request(f"/payment/{mercury_txn_id}", api_key, "PAYMENT_DETAIL")
+            return _request(
+                f"/account/{account_id}/transaction/{mercury_txn_id}",
+                api_key,
+                "TXN_DETAIL",
+            )
         except MercuryError:
-            return None
+            pass
+
+    # Fallback: try every account on this Mercury workspace
+    try:
+        accounts = get_accounts(api_key)
+    except MercuryError:
+        accounts = []
+    for acct in accounts:
+        aid = acct.get("id")
+        if not aid or aid == account_id:
+            continue
+        try:
+            return _request(
+                f"/account/{aid}/transaction/{mercury_txn_id}",
+                api_key,
+                "TXN_DETAIL_FALLBACK",
+            )
+        except MercuryError:
+            continue
+    return None
 
 
 def get_all_pending_payments(api_key: str) -> list[dict]:

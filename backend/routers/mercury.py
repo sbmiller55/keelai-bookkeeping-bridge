@@ -743,7 +743,10 @@ def code_pending(
                     )
                 ):
                     try:
-                        detail = mercury_client.get_transaction_detail(txn.mercury_transaction_id, api_key_val)
+                        detail = mercury_client.get_transaction_detail(
+                            txn.mercury_transaction_id, api_key_val,
+                            account_id=txn.mercury_account_id,
+                        )
                         if detail:
                             for att in (detail.get("attachments") or []):
                                 url = att.get("url", "")
@@ -974,7 +977,10 @@ def refresh_invoices_from_mercury(
     errors: list[str] = []
     for txn in candidates:
         try:
-            detail = mercury_client.get_transaction_detail(txn.mercury_transaction_id, api_key)
+            detail = mercury_client.get_transaction_detail(
+                txn.mercury_transaction_id, api_key,
+                account_id=txn.mercury_account_id,
+            )
             if not detail:
                 continue
             for att in (detail.get("attachments") or []):
