@@ -61,6 +61,13 @@ export interface Transaction {
 
 export interface PaymentTransaction extends Transaction {
   je_count: number;
+  matched_invoice?: {
+    id: number;
+    vendor: string;
+    invoice_number: string | null;
+    date: string | null;
+    amount: number;
+  } | null;
 }
 
 export interface TransactionCreate {

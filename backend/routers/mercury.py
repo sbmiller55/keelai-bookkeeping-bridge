@@ -870,9 +870,42 @@ def get_payments(
         .all()
     )
 
+    # Build a map of matched_invoice_id → summary for any JE on these payments
+    payment_ids = [p.id for p in payments]
+    matched_invoice_ids: set[int] = set()
+    payment_je_match_map: dict[int, int] = {}   # payment_tx_id → matched_invoice_id
+    if payment_ids:
+        for je in (
+            db.query(JournalEntry)
+            .filter(
+                JournalEntry.transaction_id.in_(payment_ids),
+                JournalEntry.matched_invoice_id.isnot(None),
+            )
+            .all()
+        ):
+            payment_je_match_map[je.transaction_id] = je.matched_invoice_id
+            matched_invoice_ids.add(je.matched_invoice_id)
+
+    invoice_summary_map: dict[int, dict] = {}
+    if matched_invoice_ids:
+        for inv in (
+            db.query(models.Transaction)
+            .filter(models.Transaction.id.in_(matched_invoice_ids))
+            .all()
+        ):
+            invoice_summary_map[inv.id] = {
+                "id": inv.id,
+                "vendor": inv.counterparty_name or "",
+                "invoice_number": inv.invoice_number,
+                "date": inv.date.isoformat() if inv.date else None,
+                "amount": abs(float(inv.amount or 0)),
+            }
+
     result = []
     for txn in payments:
         je_count = len(txn.journal_entries)
+        matched_inv_id = payment_je_match_map.get(txn.id)
+        matched_invoice = invoice_summary_map.get(matched_inv_id) if matched_inv_id else None
         result.append({
             "id": txn.id,
             "client_id": txn.client_id,
@@ -892,6 +925,7 @@ def get_payments(
             "status": txn.status.value if txn.status else "pending",
             "imported_at": txn.imported_at.isoformat() if txn.imported_at else None,
             "je_count": je_count,
+            "matched_invoice": matched_invoice,
         })
 
     return result

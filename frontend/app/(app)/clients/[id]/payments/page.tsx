@@ -483,7 +483,15 @@ function PaymentsTable({ payments, expanded, setExpanded, isAccrualVendor, onSet
                 </td>
                 <td className="px-4 py-3 text-right font-mono font-medium text-red-400 whitespace-nowrap text-xs">{formatAmount(p.amount)}</td>
                 <td className="px-4 py-3 max-w-[260px]">
-                  {p.invoice_text ? (
+                  {p.matched_invoice ? (
+                    <div className="text-xs">
+                      <p className="text-amber-300 font-medium">🔗 Matched: {p.matched_invoice.vendor}</p>
+                      <p className="text-gray-500 font-mono">
+                        {p.matched_invoice.invoice_number ? `#${p.matched_invoice.invoice_number} · ` : ""}
+                        ${p.matched_invoice.amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                      </p>
+                    </div>
+                  ) : p.invoice_text ? (
                     <p className="text-gray-400 text-xs truncate italic">{p.invoice_text.slice(0, 100)}</p>
                   ) : (
                     <span className="text-gray-600 text-xs">No invoice attached</span>
