@@ -578,6 +578,49 @@ def code_pending(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
 
+    # ── Rematch pass: re-check ALREADY-CODED pending payments against invoices.
+    # This catches the case where a payment was imported and AI-coded before its
+    # invoice was uploaded — without this, the payment never gets matched. Only
+    # touches outgoing payments that are still pending (not approved/exported)
+    # and not already AI-matched or hand-corrected via a rule.
+    rematched = 0
+    _rematch_je_num = models.next_je_number(db)
+    rematch_candidates = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.Transaction.status == models.TransactionStatus.pending,
+            models.Transaction.kind == "outgoingPayment",
+            models.Transaction.amount < 0,
+        )
+        .all()
+    )
+    for txn in rematch_candidates:
+        existing_jes = (
+            db.query(models.JournalEntry)
+            .filter(models.JournalEntry.transaction_id == txn.id)
+            .all()
+        )
+        if not existing_jes:
+            continue   # uncoded — main loop below will handle
+        # Skip if already matched or hand-corrected via a rule
+        if any(je.matched_invoice_id for je in existing_jes):
+            continue
+        if any(je.rule_applied for je in existing_jes):
+            continue
+        match = _find_matching_invoice(txn, db)
+        if match is None:
+            continue
+        invoice, conf = match
+        # Replace existing JEs with the matched coding
+        for je in existing_jes:
+            db.delete(je)
+        db.flush()
+        _rematch_je_num = _apply_invoice_match(txn, invoice, conf, db, _rematch_je_num)
+        rematched += 1
+    if rematched:
+        db.flush()
+
     # A transaction counts as "really coded" only if it has at least one JE whose
     # debit AND credit are real accounts (neither equals "Uncoded" nor begins with
     # "Uncoded [", which is the AI's "couldn't validate against COA" marker).
@@ -605,6 +648,13 @@ def code_pending(
     )
 
     if not pending:
+        if rematched:
+            db.commit()
+            return {
+                "je_created": 0,
+                "rematched": rematched,
+                "message": f"Rematched {rematched} existing payment{'s' if rematched != 1 else ''} to invoices. No other uncoded transactions.",
+            }
         return {"je_created": 0, "message": "No uncoded pending transactions found."}
 
     # Drop any stale placeholder JEs on these transactions so we don't end up
@@ -761,9 +811,11 @@ def code_pending(
     merged = rules_engine.detect_and_merge_transfers(db, client_id)
 
     msg = f"Created {je_created} journal entries."
+    if rematched:
+        msg += f" Rematched {rematched} existing payment{'s' if rematched != 1 else ''} to invoices."
     if merged:
         msg += f" Merged {merged} internal transfer duplicate(s)."
-    return {"je_created": je_created, "merged_transfers": merged, "message": msg}
+    return {"je_created": je_created, "rematched": rematched, "merged_transfers": merged, "message": msg}
 
 
 @router.get("/payments")
