@@ -934,6 +934,41 @@ def get_payments(
     return result
 
 
+@router.get("/debug-detail")
+def debug_mercury_detail(
+    client_id: int,
+    transaction_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Temporary debug: returns the raw Mercury detail response for one transaction."""
+    client = db.query(models.Client).filter(
+        models.Client.id == client_id,
+        models.Client.user_id == current_user.id,
+    ).first()
+    if not client:
+        raise HTTPException(404, "Client not found.")
+    tx = db.query(models.Transaction).filter(
+        models.Transaction.id == transaction_id,
+        models.Transaction.client_id == client_id,
+    ).first()
+    if not tx or not tx.mercury_transaction_id:
+        raise HTTPException(404, "Transaction not found or has no Mercury ID.")
+    api_key, _ = _resolve_api_key(client)
+    detail = mercury_client.get_transaction_detail(
+        tx.mercury_transaction_id, api_key,
+        account_id=tx.mercury_account_id,
+    )
+    return {
+        "mercury_txn_id": tx.mercury_transaction_id,
+        "mercury_account_id": tx.mercury_account_id,
+        "detail_returned": detail is not None,
+        "attachments_field": list((detail or {}).get("attachments", [])),
+        "all_keys": list((detail or {}).keys()),
+        "raw_sample": {k: v for k, v in (detail or {}).items() if k in ("id","kind","status","amount","attachments","note","details","externalMemo","internalMemo")},
+    }
+
+
 @router.post("/refresh-invoices")
 def refresh_invoices_from_mercury(
     client_id: int,
