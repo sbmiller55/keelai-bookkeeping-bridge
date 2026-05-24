@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
-  getPayments, syncMercury, getInboundEmailAddress, PaymentTransaction,
+  getPayments, syncMercury, refreshMercuryInvoices, getInboundEmailAddress, PaymentTransaction,
   getAccruals, createAccrual, updateAccrual, deleteAccrual, analyzeForAccruals, releaseAccrual,
   getStandingRules, createStandingRule, updateStandingRule, deleteStandingRule,
   generateFromStandingRules, getAccrualSetupContext, setupAccrualPayment,
@@ -349,6 +349,20 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
     }
   }
 
+  async function handleRefreshInvoices() {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const r = await refreshMercuryInvoices(clientId);
+      setSyncMsg(`Mercury invoice refresh: scanned ${r.scanned}, pulled ${r.fetched} invoice${r.fetched === 1 ? "" : "s"}.${r.errors.length ? ` ${r.errors.length} error(s).` : ""}`);
+      loadPayments();
+    } catch (err: unknown) {
+      setSyncMsg(err instanceof Error ? err.message : "Refresh failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   function isAccrualVendor(p: PaymentTransaction): boolean {
     const vendor = (p.counterparty_name || p.description || "").toLowerCase();
     return standingRules.some(
@@ -386,6 +400,14 @@ function PaymentsTab({ clientId, setPageContext }: { clientId: number; setPageCo
             </svg>
             Invoice Upload
           </Link>
+          <button
+            onClick={handleRefreshInvoices}
+            disabled={syncing}
+            className="px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 text-gray-200 text-sm font-medium rounded-lg transition-colors"
+            title="Re-pull invoice attachments from Mercury for any payment missing one"
+          >
+            Refresh Invoices
+          </button>
           <button
             onClick={handleSyncPayments}
             disabled={syncing}

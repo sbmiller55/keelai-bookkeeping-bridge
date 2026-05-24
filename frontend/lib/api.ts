@@ -466,6 +466,10 @@ export function importMercuryRules(clientId: number): Promise<{ imported: number
   return apiFetch(`/mercury/import-rules?client_id=${clientId}`, { method: "POST" });
 }
 
+export function refreshMercuryInvoices(clientId: number): Promise<{ scanned: number; fetched: number; errors: string[] }> {
+  return apiFetch(`/mercury/refresh-invoices?client_id=${clientId}`, { method: "POST" });
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
 export interface ChatMessage {

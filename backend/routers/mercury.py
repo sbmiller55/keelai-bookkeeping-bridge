@@ -931,6 +931,83 @@ def get_payments(
     return result
 
 
+@router.post("/refresh-invoices")
+def refresh_invoices_from_mercury(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Re-fetch invoice attachments from Mercury for every outgoing payment that
+    doesn't have invoice_text yet. Catches the case where the PDF was attached
+    in Mercury after our initial sync ran (or where the initial sync silently
+    failed to download). Stores extracted text in transactions.invoice_text.
+    """
+    client = (
+        db.query(models.Client)
+        .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
+        .first()
+    )
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found.")
+
+    try:
+        api_key, _ = _resolve_api_key(client)
+    except HTTPException:
+        return {"fetched": 0, "scanned": 0, "errors": ["No Mercury API key configured."]}
+
+    candidates = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.Transaction.kind == "outgoingPayment",
+            models.Transaction.mercury_transaction_id.isnot(None),
+            or_(
+                models.Transaction.invoice_text == None,
+                models.Transaction.invoice_text == "",
+            ),
+        )
+        .all()
+    )
+
+    fetched = 0
+    errors: list[str] = []
+    for txn in candidates:
+        try:
+            detail = mercury_client.get_transaction_detail(txn.mercury_transaction_id, api_key)
+            if not detail:
+                continue
+            for att in (detail.get("attachments") or []):
+                url = att.get("url", "")
+                fname = (att.get("fileName") or "").lower()
+                if not url:
+                    continue
+                if fname.endswith(".pdf"):
+                    pdf_bytes = mercury_client.download_attachment_bytes(url)
+                    text = mercury_client.extract_pdf_text(pdf_bytes)
+                    if text.strip():
+                        txn.invoice_text = text[:10000]
+                        fetched += 1
+                        break
+                elif fname.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    # For images, just note that we have an attachment — full OCR
+                    # would require Claude vision. Save a marker so the row no
+                    # longer says "No invoice attached" and the user knows to
+                    # check the Mercury attachment manually.
+                    txn.invoice_text = f"[Image attachment in Mercury: {att.get('fileName') or 'invoice'}]"
+                    fetched += 1
+                    break
+        except Exception as exc:
+            errors.append(f"{txn.mercury_transaction_id}: {exc}")
+            continue
+    db.commit()
+    return {
+        "scanned": len(candidates),
+        "fetched": fetched,
+        "errors": errors[:10],   # cap to avoid huge payloads
+    }
+
+
 @router.post("/import-rules")
 def import_mercury_rules(
     client_id: int,
