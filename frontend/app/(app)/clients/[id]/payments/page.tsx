@@ -85,7 +85,7 @@ function clientKind(ae: AccruedExpense): "accrual" | "prepaid" {
   return (ae.credit_account || "").toLowerCase().includes("prepaid") ? "prepaid" : "accrual";
 }
 
-type Tab = "invoices" | "payments" | "accruals" | "standing-rules";
+type Tab = "invoices" | "payments" | "accruals" | "prepaid-expenses" | "standing-rules";
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
@@ -106,7 +106,7 @@ export default function PaymentsPage() {
       {/* Tabs */}
       <div className="mb-6 border-b border-gray-800">
         <nav className="flex gap-1">
-          {(["invoices", "payments", "accruals", "standing-rules"] as Tab[]).map((t) => (
+          {(["invoices", "payments", "accruals", "prepaid-expenses", "standing-rules"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -116,7 +116,9 @@ export default function PaymentsPage() {
                   : "text-gray-400 hover:text-gray-200"
               }`}
             >
-              {t === "standing-rules" ? "Standing Rules" : t.charAt(0).toUpperCase() + t.slice(1)}
+              {t === "standing-rules" ? "Standing Rules"
+                : t === "prepaid-expenses" ? "Prepaid Expenses"
+                : t.charAt(0).toUpperCase() + t.slice(1)}
             </button>
           ))}
         </nav>
@@ -125,6 +127,7 @@ export default function PaymentsPage() {
       {tab === "invoices" && <InvoicesTab clientId={clientId} />}
       {tab === "payments" && <PaymentsTab clientId={clientId} setPageContext={setPageContext} />}
       {tab === "accruals" && <AccrualsTab clientId={clientId} />}
+      {tab === "prepaid-expenses" && <PrepaidExpensesTab clientId={clientId} />}
       {tab === "standing-rules" && <StandingRulesTab clientId={clientId} />}
     </div>
   );
@@ -858,8 +861,6 @@ function AccrualsTab({ clientId }: { clientId: number }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [editing, setEditing] = useState<AccruedExpense | null>(null);
-  const [subTab, setSubTab] = useState<"all" | "prepaid">("all");
-  const [exporting, setExporting] = useState(false);
 
   // Add form state
   const [form, setForm] = useState({
@@ -946,25 +947,6 @@ function AccrualsTab({ clientId }: { clientId: number }) {
     }
   }
 
-  async function handleExport() {
-    setExporting(true);
-    try {
-      const blob = await exportPrepaidSchedule(clientId);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `prepaid-schedule-${new Date().toISOString().slice(0, 10)}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e: unknown) {
-      setAnalyzeMsg(e instanceof Error ? e.message : "Export failed");
-    } finally {
-      setExporting(false);
-    }
-  }
-
   if (loading) return (
     <div className="flex justify-center h-40 items-center">
       <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
@@ -976,17 +958,10 @@ function AccrualsTab({ clientId }: { clientId: number }) {
       {/* Header */}
       <div className="mb-6 flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Accrued &amp; Prepaid Expense</h1>
-          <p className="text-gray-500 mt-1 text-xs">Accrued expenses (incurred but not paid) and prepaid amortizations (paid upfront, recognized monthly)</p>
+          <h1 className="text-2xl font-bold text-white">Accruals</h1>
+          <p className="text-gray-500 mt-1 text-xs">Expenses incurred but not yet cash-paid</p>
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={handleExport}
-            disabled={exporting}
-            className="px-3 py-2 text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 rounded-lg transition-colors disabled:opacity-50"
-          >
-            {exporting ? "Exporting…" : "Export Prepaid Schedule"}
-          </button>
           <button
             onClick={handleGenerate}
             disabled={generating}
@@ -1028,60 +1003,43 @@ function AccrualsTab({ clientId }: { clientId: number }) {
         </div>
       </div>
 
-      {/* Summary Cards (new) — falls back to client-side totals if backend isn't deployed */}
-      {summary && (() => {
+      {/* Summary Cards — accrual-only totals (client-side) */}
+      {(() => {
         const thisMonth = currentMonth();
-        // Compute fallbacks from the accruals list when server doesn't provide them
-        let outstanding = 0, upcomingThis = 0, prepaidBal = 0;
-        for (const a of accruals) {
-          const k = clientKind(a);
+        // Filter to accrual rows only (this tab is now accruals-only)
+        const accrualRows = accruals.filter((a) => clientKind(a) === "accrual");
+        let outstanding = 0, overdueAmt = 0, clearedThisMonthCount = 0, clearedThisMonthAmt = 0;
+        for (const a of accrualRows) {
           const d = a.derived_status ?? clientDerivedStatus(a, thisMonth);
-          if (k === "accrual" && (d === "recognized" || d === "overdue")) outstanding += a.amount;
-          if (d === "upcoming" && a.service_period === thisMonth) upcomingThis += a.amount;
-          if (k === "prepaid" && (d === "upcoming" || d === "pending")) prepaidBal += a.amount;
+          if (d === "recognized") outstanding += a.amount;
+          if (d === "overdue") overdueAmt += a.amount;
+          if (d === "cleared" && a.service_period === thisMonth) {
+            clearedThisMonthCount += 1;
+            clearedThisMonthAmt += a.amount;
+          }
         }
-        const outstandingShown = summary.outstanding_accruals ?? Math.round(outstanding * 100) / 100;
-        const upcomingShown = summary.upcoming_this_month_amount ?? Math.round(upcomingThis * 100) / 100;
-        const prepaidShown = summary.prepaid_balance ?? Math.round(prepaidBal * 100) / 100;
         return (
           <div className="grid grid-cols-3 gap-4 mb-6">
             <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
               <p className="text-xs text-gray-500 mb-1">Outstanding Accruals</p>
-              <p className="text-2xl font-bold text-white">{formatAmount(outstandingShown)}</p>
-              <p className="text-xs text-gray-500 mt-0.5">Recognized but not yet cash-paid</p>
+              <p className="text-2xl font-bold text-white">{formatAmount(outstanding)}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Recognized but not yet Cleared</p>
             </div>
             <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-              <p className="text-xs text-gray-500 mb-1">Upcoming This Month</p>
-              <p className="text-2xl font-bold text-yellow-400">{formatAmount(upcomingShown)}</p>
-              <p className="text-xs text-gray-500 mt-0.5">Need to be generated and approved</p>
+              <p className="text-xs text-gray-500 mb-1">Overdue</p>
+              <p className="text-2xl font-bold text-red-400">{formatAmount(overdueAmt)}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Past-period entries not yet Recognized</p>
             </div>
             <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-              <p className="text-xs text-gray-500 mb-1">Prepaid Balance</p>
-              <p className="text-2xl font-bold text-indigo-400">{formatAmount(prepaidShown)}</p>
-              <p className="text-xs text-gray-500 mt-0.5">Remaining prepaid not yet amortized</p>
+              <p className="text-xs text-gray-500 mb-1">Cleared This Month</p>
+              <p className="text-2xl font-bold text-green-400">{clearedThisMonthCount}</p>
+              {clearedThisMonthCount > 0 && (
+                <p className="text-xs text-gray-500 mt-0.5">{formatAmount(clearedThisMonthAmt)}</p>
+              )}
             </div>
           </div>
         );
       })()}
-
-      {/* Sub-tabs */}
-      <div className="mb-4 border-b border-gray-800">
-        <nav className="flex gap-1">
-          {(["all", "prepaid"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setSubTab(t)}
-              className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors ${
-                subTab === t
-                  ? "bg-gray-900 border border-b-gray-900 border-gray-700 text-white -mb-px"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {t === "all" ? "All Entries" : "Prepaid Schedule"}
-            </button>
-          ))}
-        </nav>
-      </div>
 
       {/* AI Suggestions */}
       {suggestions.length > 0 && (
@@ -1120,13 +1078,18 @@ function AccrualsTab({ clientId }: { clientId: number }) {
         </div>
       )}
 
-      {/* All Entries sub-tab */}
-      {subTab === "all" && (
-        accruals.length === 0 ? (
-          <div className="text-center py-20 text-gray-500">
-            No accrued expenses yet. Use AI Analyze to detect accruals from your payments, or add one manually.
-          </div>
-        ) : (
+      {/* Accruals table (kind=accrual only — prepaid items live on the Prepaid Expenses tab) */}
+      {(() => {
+        const accrualRows = accruals.filter((a) => clientKind(a) === "accrual");
+        if (accrualRows.length === 0) {
+          return (
+            <div className="text-center py-20 text-gray-500">
+              No accruals yet. Use AI Analyze to detect them from payments, or add one manually.
+            </div>
+          );
+        }
+        const thisMonth = currentMonth();
+        return (
           <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
             <table className="w-full text-sm min-w-[1000px]">
               <thead>
@@ -1135,27 +1098,20 @@ function AccrualsTab({ clientId }: { clientId: number }) {
                   <th className="px-4 py-3">Description</th>
                   <th className="px-4 py-3">Period</th>
                   <th className="px-4 py-3 text-right">Amount</th>
-                  <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">Linked Invoice</th>
                   <th className="px-4 py-3">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {(() => { const thisMonth = currentMonth(); return accruals.map((ae) => {
+                {accrualRows.map((ae) => {
                   const derived = ae.derived_status ?? clientDerivedStatus(ae, thisMonth);
-                  const kind = clientKind(ae);
                   return (
                     <tr key={ae.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
                       <td className="px-4 py-3 text-white text-xs font-medium">{ae.vendor_name}</td>
                       <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{ae.description || "—"}</td>
                       <td className="px-4 py-3 text-gray-300 text-xs font-mono">{ae.service_period}</td>
                       <td className="px-4 py-3 text-right text-xs font-mono font-medium text-red-400">{formatAmount(ae.amount)}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${kind === "prepaid" ? "bg-indigo-900 text-indigo-300 border border-indigo-700" : "bg-amber-900/60 text-amber-300 border border-amber-700"}`}>
-                          {kind === "prepaid" ? "Prepaid" : "Accrual"}
-                        </span>
-                      </td>
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${DERIVED_STATUS_BADGE[derived]}`}>
                           {DERIVED_STATUS_LABEL[derived]}
@@ -1187,15 +1143,12 @@ function AccrualsTab({ clientId }: { clientId: number }) {
                       </td>
                     </tr>
                   );
-                }); })()}
+                })}
               </tbody>
             </table>
           </div>
-        )
-      )}
-
-      {/* Prepaid Schedule sub-tab */}
-      {subTab === "prepaid" && <PrepaidScheduleView accruals={accruals} />}
+        );
+      })()}
 
       {/* Edit modal */}
       {editing && (
@@ -1206,6 +1159,244 @@ function AccrualsTab({ clientId }: { clientId: number }) {
             await updateAccrual(clientId, editing.id, patch);
             setEditing(null);
             loadAccruals();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// ── Prepaid Expenses Tab ──────────────────────────────────────────────────────
+
+function PrepaidExpensesTab({ clientId }: { clientId: number }) {
+  const [accruals, setAccruals] = useState<AccruedExpense[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<AccruedExpense | null>(null);
+  const [subTab, setSubTab] = useState<"all" | "prepaid">("all");
+  const [exporting, setExporting] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => { load(); }, [clientId]);
+
+  function load() {
+    setLoading(true);
+    getAccruals(clientId)
+      .then(({ accruals: a }) => setAccruals(a))
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }
+
+  async function handleDelete(id: number) {
+    if (!confirm("Delete this prepaid entry?")) return;
+    await deleteAccrual(clientId, id);
+    load();
+  }
+
+  async function handleRelease(id: number) {
+    await releaseAccrual(clientId, id);
+    load();
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    setMsg(null);
+    try {
+      const blob = await exportPrepaidSchedule(clientId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `prepaid-schedule-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  if (loading) return (
+    <div className="flex justify-center h-40 items-center">
+      <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+
+  const thisMonth = currentMonth();
+  const prepaidRows = accruals.filter((a) => clientKind(a) === "prepaid");
+
+  // Group by vendor + description so "Fully Amortized" counts complete schedules
+  const schedules = new Map<string, AccruedExpense[]>();
+  for (const a of prepaidRows) {
+    const key = `${a.vendor_name}::${a.description || ""}`;
+    const list = schedules.get(key) || [];
+    list.push(a);
+    schedules.set(key, list);
+  }
+  let prepaidBalance = 0;
+  let upcomingThisMonth = 0;
+  let fullyAmortized = 0;
+  Array.from(schedules.values()).forEach((list: AccruedExpense[]) => {
+    const allCleared = list.every((a) => {
+      const d = a.derived_status ?? clientDerivedStatus(a, thisMonth);
+      return d === "cleared" || d === "recognized";
+    });
+    if (allCleared) fullyAmortized += 1;
+  });
+  for (const a of prepaidRows) {
+    const d = a.derived_status ?? clientDerivedStatus(a, thisMonth);
+    if (d === "upcoming" || d === "pending") prepaidBalance += a.amount;
+    if (d === "upcoming" && a.service_period === thisMonth) upcomingThisMonth += a.amount;
+  }
+
+  return (
+    <>
+      {/* Header */}
+      <div className="mb-6 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Prepaid Expenses</h1>
+          <p className="text-gray-500 mt-1 text-xs">Expenses paid upfront, amortized monthly</p>
+        </div>
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="px-3 py-2 text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 rounded-lg transition-colors disabled:opacity-50"
+        >
+          {exporting ? "Exporting…" : "Export Prepaid Schedule"}
+        </button>
+      </div>
+
+      {error && <div className="mb-4 bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm">{error}</div>}
+      {msg && <div className="mb-4 bg-indigo-950 border border-indigo-800 text-indigo-300 rounded-lg px-4 py-3 text-sm">{msg}</div>}
+
+      {/* Status legend */}
+      <div className="mb-4 bg-gray-900/60 border border-gray-800 rounded-lg px-4 py-3">
+        <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Status legend</p>
+        <div className="flex flex-wrap gap-3">
+          {(["recognized", "pending", "upcoming", "cleared", "overdue"] as const).map((s) => (
+            <span key={s} className="inline-flex items-center gap-2 text-xs">
+              <span className={`px-2 py-0.5 rounded-full font-medium ${DERIVED_STATUS_BADGE[s]}`}>{DERIVED_STATUS_LABEL[s]}</span>
+              <span className="text-gray-500">{DERIVED_STATUS_DESC[s]}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+          <p className="text-xs text-gray-500 mb-1">Prepaid Balance</p>
+          <p className="text-2xl font-bold text-indigo-400">{formatAmount(prepaidBalance)}</p>
+          <p className="text-xs text-gray-500 mt-0.5">Total remaining not yet amortized</p>
+        </div>
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+          <p className="text-xs text-gray-500 mb-1">Upcoming This Month</p>
+          <p className="text-2xl font-bold text-yellow-400">{formatAmount(upcomingThisMonth)}</p>
+          <p className="text-xs text-gray-500 mt-0.5">Need to be generated and approved</p>
+        </div>
+        <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+          <p className="text-xs text-gray-500 mb-1">Fully Amortized</p>
+          <p className="text-2xl font-bold text-green-400">{fullyAmortized}</p>
+          <p className="text-xs text-gray-500 mt-0.5">Completed prepaid items</p>
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div className="mb-4 border-b border-gray-800">
+        <nav className="flex gap-1">
+          {(["all", "prepaid"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setSubTab(t)}
+              className={`px-3 py-2 text-xs font-medium rounded-t-lg transition-colors ${
+                subTab === t
+                  ? "bg-gray-900 border border-b-gray-900 border-gray-700 text-white -mb-px"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {t === "all" ? "All Entries" : "Prepaid Schedule"}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* All Entries */}
+      {subTab === "all" && (
+        prepaidRows.length === 0 ? (
+          <div className="text-center py-20 text-gray-500">
+            No prepaid expenses yet. Upload a multi-month invoice on the Invoices tab to create one.
+          </div>
+        ) : (
+          <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
+            <table className="w-full text-sm min-w-[1000px]">
+              <thead>
+                <tr className="border-b border-gray-800 text-left text-xs text-gray-400 font-medium">
+                  <th className="px-4 py-3">Vendor</th>
+                  <th className="px-4 py-3">Description</th>
+                  <th className="px-4 py-3">Period</th>
+                  <th className="px-4 py-3 text-right">Amount</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Linked Invoice</th>
+                  <th className="px-4 py-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {prepaidRows.map((ae) => {
+                  const derived = ae.derived_status ?? clientDerivedStatus(ae, thisMonth);
+                  return (
+                    <tr key={ae.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
+                      <td className="px-4 py-3 text-white text-xs font-medium">{ae.vendor_name}</td>
+                      <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{ae.description || "—"}</td>
+                      <td className="px-4 py-3 text-gray-300 text-xs font-mono">{ae.service_period}</td>
+                      <td className="px-4 py-3 text-right text-xs font-mono font-medium text-red-400">{formatAmount(ae.amount)}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${DERIVED_STATUS_BADGE[derived]}`}>
+                          {DERIVED_STATUS_LABEL[derived]}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-400">
+                        {ae.source_transaction_id ? <span className="font-mono">#{ae.source_transaction_id}</span> : "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          {!ae.accrual_je_id && ae.debit_account && (
+                            <button
+                              onClick={() => handleRelease(ae.id)}
+                              className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors whitespace-nowrap"
+                            >
+                              + Review Queue
+                            </button>
+                          )}
+                          {ae.accrual_je_id && <span className="text-xs text-green-500">In Queue</span>}
+                          {ae.status !== "cleared" && (
+                            <button onClick={() => setEditing(ae)} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Edit</button>
+                          )}
+                          <button onClick={() => handleDelete(ae.id)} className="text-xs text-gray-500 hover:text-red-400 transition-colors">Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+
+      {/* Prepaid Schedule */}
+      {subTab === "prepaid" && <PrepaidScheduleView accruals={accruals} />}
+
+      {/* Edit modal */}
+      {editing && (
+        <EditAccrualModal
+          accrual={editing}
+          onClose={() => setEditing(null)}
+          onSave={async (patch) => {
+            await updateAccrual(clientId, editing.id, patch);
+            setEditing(null);
+            load();
           }}
         />
       )}
