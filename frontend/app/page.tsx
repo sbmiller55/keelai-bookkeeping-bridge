@@ -8,11 +8,17 @@ export default function RootPage() {
   const router = useRouter();
 
   useEffect(() => {
-    if (isAuthenticated()) {
-      router.replace("/clients");
-    } else {
-      router.replace("/login");
-    }
+    const target = isAuthenticated() ? "/clients" : "/login";
+    router.replace(target);
+    const fallback = setTimeout(() => {
+      if (
+        typeof window !== "undefined" &&
+        window.location.pathname === "/"
+      ) {
+        window.location.replace(target);
+      }
+    }, 1500);
+    return () => clearTimeout(fallback);
   }, [router]);
 
   return (

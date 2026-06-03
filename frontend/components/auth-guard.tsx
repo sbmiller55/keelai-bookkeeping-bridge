@@ -11,6 +11,15 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isAuthenticated()) {
       router.replace("/login");
+      const fallback = setTimeout(() => {
+        if (
+          typeof window !== "undefined" &&
+          !window.location.pathname.startsWith("/login")
+        ) {
+          window.location.replace("/login");
+        }
+      }, 1500);
+      return () => clearTimeout(fallback);
     } else {
       setChecked(true);
     }

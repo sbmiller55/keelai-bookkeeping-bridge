@@ -165,6 +165,29 @@ export interface AuditLog {
 
 // ── Core fetch helper ─────────────────────────────────────────────────────────
 
+const DEFAULT_TIMEOUT_MS = 30000;
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e: unknown) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(
+        "Network request timed out. Check your connection, VPN, or browser extensions blocking the backend.",
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 let _refreshing: Promise<string | null> | null = null;
 
 async function _tryRefreshToken(): Promise<string | null> {
@@ -173,7 +196,7 @@ async function _tryRefreshToken(): Promise<string | null> {
     try {
       const token = getToken();
       if (!token) return null;
-      const res = await fetch(`${BASE_URL}/auth/refresh`, {
+      const res = await fetchWithTimeout(`${BASE_URL}/auth/refresh`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
       });
@@ -203,7 +226,7 @@ export async function apiFetch<T = unknown>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await fetchWithTimeout(`${BASE_URL}${path}`, {
     ...options,
     headers,
   });
@@ -213,7 +236,7 @@ export async function apiFetch<T = unknown>(
       const newToken = await _tryRefreshToken();
       if (newToken) {
         // Retry the original request with the new token
-        const retryRes = await fetch(`${BASE_URL}${path}`, {
+        const retryRes = await fetchWithTimeout(`${BASE_URL}${path}`, {
           ...options,
           headers: { ...headers, "Authorization": `Bearer ${newToken}` },
         });
