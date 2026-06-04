@@ -589,17 +589,27 @@ def code_pending(
     # invoice was uploaded — without this, the payment never gets matched. Only
     # touches outgoing payments that are still pending (not approved/exported)
     # and not already AI-matched or hand-corrected via a rule.
+    #
+    # When `limit` is set, the frontend is chunking through a backlog — the
+    # rematch is a global pass over every pending outgoing payment, so running
+    # it on every chunk wastes a lot of work. Skip it entirely in chunked mode;
+    # callers can run an unlimited call (or a separate /rematch endpoint) when
+    # they want it.
     rematched = 0
     _rematch_je_num = models.next_je_number(db)
     rematch_candidates = (
-        db.query(models.Transaction)
-        .filter(
-            models.Transaction.client_id == client_id,
-            models.Transaction.status == models.TransactionStatus.pending,
-            models.Transaction.kind == "outgoingPayment",
-            models.Transaction.amount < 0,
+        []
+        if (limit is not None and limit > 0)
+        else (
+            db.query(models.Transaction)
+            .filter(
+                models.Transaction.client_id == client_id,
+                models.Transaction.status == models.TransactionStatus.pending,
+                models.Transaction.kind == "outgoingPayment",
+                models.Transaction.amount < 0,
+            )
+            .all()
         )
-        .all()
     )
     for txn in rematch_candidates:
         existing_jes = (
@@ -735,14 +745,18 @@ def code_pending(
 
     ai_candidates = [t for t in pending if t.id not in rule_coded_ids]
     if ai_candidates:
-        # Auto-fetch Mercury invoices for software/AI/dev payments > $1k without invoice_text
+        # Auto-fetch Mercury invoices for software/AI/dev payments > $1k without invoice_text.
+        # Skipped in chunked mode (limit set) because per-tx Mercury API + PDF
+        # download + text extraction can take several seconds each, and we'd
+        # exceed Railway's per-request timeout. Without this step the AI coder
+        # still runs — it just codes from the transaction description alone.
         _PREPAID_CATEGORIES = {"software", "ai and data tools", "developer tools", "saas", "subscriptions"}
         try:
             api_key_val, _ = _resolve_api_key(client)
         except Exception:
             api_key_val = None
 
-        if api_key_val:
+        if api_key_val and not (limit is not None and limit > 0):
             for txn in ai_candidates:
                 if (
                     txn.invoice_text is None
