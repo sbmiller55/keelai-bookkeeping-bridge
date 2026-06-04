@@ -261,6 +261,7 @@ export default function ExportPage() {
   const coaLoaded = !coaLoading;
   const [loading, setLoading] = useState(true);
   const [markingExported, setMarkingExported] = useState(false);
+  const [unapproving, setUnapproving] = useState(false);
   const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
 
   // inline account-name fix: maps normalizedName → draft replacement value
@@ -354,6 +355,22 @@ export default function ExportPage() {
       setSelectedTxIds(new Set());
     } finally {
       setMarkingExported(false);
+    }
+  }
+
+  async function moveSelectedToReview() {
+    if (selectedTxIds.size === 0) return;
+    setUnapproving(true);
+    try {
+      await Promise.all(
+        approved
+          .filter((tx) => selectedTxIds.has(tx.id))
+          .map((tx) => updateTransactionStatus(tx.id, "pending"))
+      );
+      setApproved((prev) => prev.filter((tx) => !selectedTxIds.has(tx.id)));
+      setSelectedTxIds(new Set());
+    } finally {
+      setUnapproving(false);
     }
   }
 
@@ -718,15 +735,22 @@ export default function ExportPage() {
                 </label>
               ))}
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={markSelectedExported}
-                disabled={markingExported || selectedTxIds.size === 0}
+                disabled={markingExported || unapproving || selectedTxIds.size === 0}
                 className="bg-purple-700 hover:bg-purple-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {markingExported ? "Marking…" : `Mark Selected as Imported (${selectedTxIds.size})`}
               </button>
-              <p className="text-xs text-gray-600">This cannot be undone.</p>
+              <button
+                onClick={moveSelectedToReview}
+                disabled={markingExported || unapproving || selectedTxIds.size === 0}
+                className="bg-gray-800 border border-gray-700 hover:border-indigo-500 hover:text-indigo-300 text-gray-200 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {unapproving ? "Moving…" : `Move Back to Review Queue (${selectedTxIds.size})`}
+              </button>
+              <p className="text-xs text-gray-600">Mark Imported cannot be undone. Move Back to Review can.</p>
             </div>
           </div>
 
