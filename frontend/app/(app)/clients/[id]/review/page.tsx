@@ -1015,8 +1015,8 @@ export default function ReviewQueuePage() {
   // Chunk through all pending transactions so a large backlog (e.g. 100+)
   // never hits Railway's per-request HTTP timeout. Returns total JEs created.
   async function runCodingLoop(opts?: { onProgress?: (done: number, total: number) => void }): Promise<number> {
-    const CHUNK = 20;
-    const MAX_ROUNDS = 50; // safety stop (~1000 transactions)
+    const CHUNK = 10;
+    const MAX_ROUNDS = 100; // safety stop (~1000 transactions)
     let totalCreated = 0;
     let initialRemaining: number | null = null;
     for (let round = 0; round < MAX_ROUNDS; round++) {
