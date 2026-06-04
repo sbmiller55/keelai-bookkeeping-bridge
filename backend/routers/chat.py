@@ -434,7 +434,7 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             je_id = tool_input["je_id"]
             je = (
                 db.query(models.JournalEntry)
-                .join(models.Transaction)
+                .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
                 .filter(models.JournalEntry.id == je_id, models.Transaction.client_id == client_id)
                 .first()
             )
@@ -458,7 +458,7 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             je_id = tool_input["je_id"]
             je = (
                 db.query(models.JournalEntry)
-                .join(models.Transaction)
+                .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
                 .filter(models.JournalEntry.id == je_id, models.Transaction.client_id == client_id)
                 .first()
             )

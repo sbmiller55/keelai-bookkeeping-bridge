@@ -662,10 +662,14 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
     # A transaction counts as "really coded" only if it has at least one JE whose
     # debit AND credit are real accounts (neither equals "Uncoded" nor begins with
     # "Uncoded [", which is the AI's "couldn't validate against COA" marker).
+    #
+    # NOTE: journal_entries now has TWO foreign keys to transactions
+    # (transaction_id and matched_invoice_id), so SQLAlchemy can't pick the
+    # join automatically. We always want transaction_id here.
     really_coded_ids = {
         row[0]
         for row in db.query(models.JournalEntry.transaction_id)
-        .join(models.Transaction)
+        .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
         .filter(
             models.Transaction.client_id == client_id,
             models.JournalEntry.debit_account != "Uncoded",
@@ -864,7 +868,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
     really_coded_after = {
         row[0]
         for row in db.query(models.JournalEntry.transaction_id)
-        .join(models.Transaction)
+        .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
         .filter(
             models.Transaction.client_id == client_id,
             models.JournalEntry.debit_account != "Uncoded",

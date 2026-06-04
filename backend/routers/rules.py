@@ -168,7 +168,7 @@ def apply_rule(
     already_coded_ids = {
         row[0]
         for row in db.query(models.JournalEntry.transaction_id)
-        .join(models.Transaction)
+        .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
         .filter(models.Transaction.client_id == rule.client_id)
         .all()
     }
