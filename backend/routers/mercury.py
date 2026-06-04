@@ -565,11 +565,17 @@ def sync_mercury(
 @router.post("/code", response_model=dict)
 def code_pending(
     client_id: int,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     """Run AI coding + rules on pending transactions that have no journal entries
-    or whose existing journal entries still have placeholder 'Uncoded' accounts."""
+    or whose existing journal entries still have placeholder 'Uncoded' accounts.
+
+    When `limit` is provided, only that many transactions are coded in this call.
+    The response includes `remaining_uncoded`, so the frontend can chunk a large
+    backlog into multiple calls without hitting Railway's per-request HTTP timeout.
+    """
     client = (
         db.query(models.Client)
         .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
@@ -637,15 +643,19 @@ def code_pending(
         )
         .all()
     }
-    pending = (
+    pending_q = (
         db.query(models.Transaction)
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
             ~models.Transaction.id.in_(really_coded_ids) if really_coded_ids else True,
         )
-        .all()
+        .order_by(models.Transaction.date.asc(), models.Transaction.id.asc())
     )
+    if limit is not None and limit > 0:
+        pending = pending_q.limit(limit).all()
+    else:
+        pending = pending_q.all()
 
     if not pending:
         if rematched:
@@ -653,9 +663,10 @@ def code_pending(
             return {
                 "je_created": 0,
                 "rematched": rematched,
+                "remaining_uncoded": 0,
                 "message": f"Rematched {rematched} existing payment{'s' if rematched != 1 else ''} to invoices. No other uncoded transactions.",
             }
-        return {"je_created": 0, "message": "No uncoded pending transactions found."}
+        return {"je_created": 0, "remaining_uncoded": 0, "message": "No uncoded pending transactions found."}
 
     # Drop any stale placeholder JEs on these transactions so we don't end up
     # with both the old "Uncoded" rows and the freshly-coded ones.
@@ -813,12 +824,44 @@ def code_pending(
     # Merge internal transfer duplicates (CC payments, treasury sweeps, etc.)
     merged = rules_engine.detect_and_merge_transfers(db, client_id)
 
+    # Count any still-uncoded pending transactions for the frontend to chunk on.
+    really_coded_after = {
+        row[0]
+        for row in db.query(models.JournalEntry.transaction_id)
+        .join(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.JournalEntry.debit_account != "Uncoded",
+            models.JournalEntry.credit_account != "Uncoded",
+            ~models.JournalEntry.debit_account.like("Uncoded [%"),
+            ~models.JournalEntry.credit_account.like("Uncoded [%"),
+        )
+        .all()
+    }
+    remaining_uncoded = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.Transaction.status == models.TransactionStatus.pending,
+            ~models.Transaction.id.in_(really_coded_after) if really_coded_after else True,
+        )
+        .count()
+    )
+
     msg = f"Created {je_created} journal entries."
     if rematched:
         msg += f" Rematched {rematched} existing payment{'s' if rematched != 1 else ''} to invoices."
     if merged:
         msg += f" Merged {merged} internal transfer duplicate(s)."
-    return {"je_created": je_created, "rematched": rematched, "merged_transfers": merged, "message": msg}
+    if remaining_uncoded:
+        msg += f" {remaining_uncoded} uncoded transaction{'s' if remaining_uncoded != 1 else ''} remaining."
+    return {
+        "je_created": je_created,
+        "rematched": rematched,
+        "merged_transfers": merged,
+        "remaining_uncoded": remaining_uncoded,
+        "message": msg,
+    }
 
 
 @router.get("/payments")

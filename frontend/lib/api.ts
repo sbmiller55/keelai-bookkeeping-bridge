@@ -572,8 +572,12 @@ export interface MercurySyncResponse {
 
 export type DateRangeOption = "since_last_sync" | "last_30" | "last_90" | "last_180" | "last_365" | "custom";
 
-export function codePending(clientId: number): Promise<{ je_created: number; message: string }> {
-  return apiFetch(`/mercury/code?client_id=${clientId}`, { method: "POST" });
+export function codePending(
+  clientId: number,
+  limit?: number,
+): Promise<{ je_created: number; message: string; remaining_uncoded?: number }> {
+  const qs = limit ? `&limit=${limit}` : "";
+  return apiFetch(`/mercury/code?client_id=${clientId}${qs}`, { method: "POST" });
 }
 
 // ── Invoice Upload ────────────────────────────────────────────────────────────

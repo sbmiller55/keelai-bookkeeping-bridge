@@ -933,6 +933,7 @@ export default function ReviewQueuePage() {
   const { accounts } = useAccounts(clientId);
   const [loading, setLoading] = useState(true);
   const [coding, setCoding] = useState(false);
+  const [codingProgress, setCodingProgress] = useState<{ done: number; total: number } | null>(null);
   const [codingError, setCodingError] = useState<string | null>(null);
   const [approvingAll, setApprovingAll] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -1011,19 +1012,45 @@ export default function ReviewQueuePage() {
     return () => window.removeEventListener("bb-data-changed", reload);
   }, [reload]);
 
+  // Chunk through all pending transactions so a large backlog (e.g. 100+)
+  // never hits Railway's per-request HTTP timeout. Returns total JEs created.
+  async function runCodingLoop(opts?: { onProgress?: (done: number, total: number) => void }): Promise<number> {
+    const CHUNK = 20;
+    const MAX_ROUNDS = 50; // safety stop (~1000 transactions)
+    let totalCreated = 0;
+    let initialRemaining: number | null = null;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const result = await codePending(clientId, CHUNK);
+      totalCreated += result.je_created;
+      const remaining = result.remaining_uncoded ?? 0;
+      if (initialRemaining === null) initialRemaining = remaining + (result.je_created > 0 ? CHUNK : 0);
+      const done = Math.max(0, (initialRemaining ?? 0) - remaining);
+      opts?.onProgress?.(done, initialRemaining ?? done);
+      if (remaining === 0) break;
+      // If a round made no DB-level progress and there are still uncoded
+      // transactions left, bail out to avoid spinning forever.
+      if (result.je_created === 0) break;
+    }
+    return totalCreated;
+  }
+
   async function handleRunCoding() {
     setCoding(true);
     setCodingError(null);
+    setCodingProgress(null);
     try {
-      const result = await codePending(clientId);
-      if (result.je_created === 0) {
-        setCodingError(result.message || "AI coding ran but created 0 journal entries.");
+      const totalCreated = await runCodingLoop({
+        onProgress: (done, total) => setCodingProgress({ done, total }),
+      });
+      if (totalCreated === 0) {
+        setCodingError("AI coding ran but created 0 journal entries.");
       }
       reload();
     } catch (err: unknown) {
       setCodingError(err instanceof Error ? err.message : "Coding failed");
     } finally {
       setCoding(false);
+      setCodingProgress(null);
     }
   }
 
@@ -1039,7 +1066,7 @@ export default function ReviewQueuePage() {
       );
       // Re-code any pending transactions still left with Uncoded JEs.
       try {
-        await codePending(clientId);
+        await runCodingLoop();
       } catch (codeErr) {
         console.error("Post-sync coding failed:", codeErr);
       }
@@ -1213,7 +1240,12 @@ export default function ReviewQueuePage() {
             className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
           >
             {coding ? (
-              <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />Coding…</>
+              <>
+                <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                {codingProgress && codingProgress.total > 0
+                  ? `Coding ${codingProgress.done}/${codingProgress.total}…`
+                  : "Coding…"}
+              </>
             ) : "✦ AI Code"}
           </button>
           {coded.length > 0 && (
