@@ -54,6 +54,8 @@ class Client(Base):
     policy_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_sync_at = Column(DateTime, nullable=True)
+    qbo_coa_cache = Column(Text, nullable=True)               # JSON array of account names
+    qbo_coa_cached_at = Column(DateTime, nullable=True)       # when the cache was last refreshed from QBO
 
     owner = relationship("User", back_populates="clients")
     transactions = relationship("Transaction", back_populates="client")

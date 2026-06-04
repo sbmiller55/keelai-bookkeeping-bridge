@@ -10,6 +10,7 @@ Routes:
   POST /clients/{id}/qbo/sync            — push approved JEs to QBO
 """
 
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -175,21 +176,55 @@ def ensure_standard_accounts(
     return {"created": created, "already_existed": already_existed, "errors": errors}
 
 
+def _cache_is_current(client: Client) -> bool:
+    """Cache is current if it was refreshed in the same calendar month as today (UTC)."""
+    if not client.qbo_coa_cache or not client.qbo_coa_cached_at:
+        return False
+    now = datetime.utcnow()
+    cached = client.qbo_coa_cached_at
+    return cached.year == now.year and cached.month == now.month
+
+
+def _refresh_qbo_coa_cache(client: Client, db: Session) -> list[str]:
+    """Pull live COA from QBO, persist to the client row, and return it."""
+    qbo_c = _get_qbo_client(client)
+    names = qbo_c.get_coa_names()
+    client.qbo_coa_cache = json.dumps(names)
+    client.qbo_coa_cached_at = datetime.utcnow()
+    _persist_token_refresh(client, qbo_c, db)
+    db.commit()
+    return names
+
+
 @router.get("/accounts")
 def get_accounts(
     client_id: int,
+    refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch the live Chart of Accounts from QBO (active accounts only)."""
+    """
+    Return the Chart of Accounts pulled from QBO.
+
+    Cached on the Client row and refreshed on the 1st of each month by a
+    scheduled job; falls back to refreshing on first request of a new month
+    or if the cache is empty. Pass `refresh=true` to force-refresh.
+    """
     client = _get_client(client_id, current_user, db)
-    qbo_c  = _get_qbo_client(client)
+
+    if not refresh and _cache_is_current(client):
+        try:
+            return {"accounts": json.loads(client.qbo_coa_cache or "[]"), "cached_at": client.qbo_coa_cached_at}
+        except Exception:
+            pass  # fall through and refresh
+
     try:
-        names = qbo_c.get_coa_names()
+        names = _refresh_qbo_coa_cache(client, db)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(502, f"QBO error fetching accounts: {exc}")
-    _persist_token_refresh(client, qbo_c, db)
-    return {"accounts": names}
+    return {"accounts": names, "cached_at": client.qbo_coa_cached_at}
 
 
 @router.post("/sync", response_model=SyncResult)

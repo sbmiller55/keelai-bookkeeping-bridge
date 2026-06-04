@@ -86,6 +86,9 @@ def _migrate_db():
         ("journal_entries",       "matched_invoice_id",   "INTEGER"),
         ("journal_entries",       "is_ai_matched",        "BOOLEAN DEFAULT FALSE"),
         ("journal_entries",       "match_confidence",     "REAL"),
+        # QBO chart-of-accounts cache (refreshed monthly on the 1st)
+        ("clients",               "qbo_coa_cache",        "TEXT"),
+        ("clients",               "qbo_coa_cached_at",    "TIMESTAMP"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:
@@ -120,6 +123,29 @@ def _run_monthly_auto_release():
                 print(f"[auto-release] client={client.id} month={target_month} result={result}")
             except Exception as exc:
                 print(f"[auto-release] client={client.id} error: {exc}")
+    finally:
+        db.close()
+
+
+def _run_monthly_qbo_coa_refresh():
+    """Scheduler job: on the 1st of each month, refresh the cached QBO chart of accounts for every connected client."""
+    from database import SessionLocal
+    from models import Client
+    from routers.qbo import _refresh_qbo_coa_cache
+
+    db = SessionLocal()
+    try:
+        clients = (
+            db.query(Client)
+            .filter(Client.qbo_access_token.isnot(None), Client.qbo_realm_id.isnot(None))
+            .all()
+        )
+        for client in clients:
+            try:
+                names = _refresh_qbo_coa_cache(client, db)
+                print(f"[qbo-coa-refresh] client={client.id} pulled {len(names)} accounts")
+            except Exception as exc:
+                print(f"[qbo-coa-refresh] client={client.id} error: {exc}")
     finally:
         db.close()
 
@@ -355,6 +381,12 @@ def on_startup():
                 _run_daily_backup,
                 CronTrigger(hour=2, minute=0),
                 id="daily_backup",
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_monthly_qbo_coa_refresh,
+                CronTrigger(day=1, hour=5, minute=0),
+                id="monthly_qbo_coa_refresh",
                 replace_existing=True,
             )
             scheduler.start()
