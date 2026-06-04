@@ -576,13 +576,35 @@ def code_pending(
     The response includes `remaining_uncoded`, so the frontend can chunk a large
     backlog into multiple calls without hitting Railway's per-request HTTP timeout.
     """
-    client = (
-        db.query(models.Client)
-        .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
-        .first()
-    )
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found.")
+    import sys, time, traceback
+    _t0 = time.time()
+    def _log(msg):
+        sys.stderr.write(f"[mercury/code client={client_id} limit={limit} t={time.time()-_t0:.2f}s] {msg}\n")
+        sys.stderr.flush()
+    _log("start")
+
+    try:
+        client = (
+            db.query(models.Client)
+            .filter(models.Client.id == client_id, models.Client.user_id == current_user.id)
+            .first()
+        )
+        if not client:
+            raise HTTPException(status_code=404, detail="Client not found.")
+        return _code_pending_inner(client_id, client, limit, db, _log)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log(f"EXCEPTION: {exc}")
+        traceback.print_exc()
+        # Return a real error body so the frontend / network tab can see what
+        # blew up instead of a CORS-blocked 500.
+        raise HTTPException(status_code=500, detail=f"AI coding failed: {type(exc).__name__}: {exc}")
+
+
+def _code_pending_inner(client_id: int, client, limit, db, _log):
+    """Original code_pending body, instrumented and wrapped so unhandled
+    exceptions surface as JSON instead of a bodyless 500."""
 
     # ── Rematch pass: re-check ALREADY-CODED pending payments against invoices.
     # This catches the case where a payment was imported and AI-coded before its
