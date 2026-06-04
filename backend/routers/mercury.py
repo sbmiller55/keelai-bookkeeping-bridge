@@ -679,6 +679,39 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         )
         .all()
     }
+
+    # Also exclude transactions whose JEs reference accounts that don't exist
+    # in the live QBO chart of accounts. Without this, transactions coded
+    # against a stale/wrong COA (e.g. "Travel", "Employee Benefits",
+    # "Accumulated Amortization" — parent or removed accounts) are treated
+    # as already-coded and skipped, even though they need fixing.
+    try:
+        import ai_coder as _ai
+        coa = _ai._resolve_chart(client)
+        coa_set = _ai._parse_coa_set(coa)
+    except Exception:
+        coa_set = None
+    if coa_set and really_coded_ids:
+        always_valid = {a.lower() for a in _ai._ALWAYS_VALID_ACCOUNTS}
+        valid_or_always = coa_set | always_valid
+        stale_coa_ids = set()
+        for je in (
+            db.query(
+                models.JournalEntry.transaction_id,
+                models.JournalEntry.debit_account,
+                models.JournalEntry.credit_account,
+            )
+            .filter(models.JournalEntry.transaction_id.in_(list(really_coded_ids)))
+            .all()
+        ):
+            tx_id, dr, cr = je
+            for name in (dr, cr):
+                if name and name.lower() not in valid_or_always:
+                    stale_coa_ids.add(tx_id)
+                    break
+        really_coded_ids -= stale_coa_ids
+        _log(f"stale-COA recode candidates: {len(stale_coa_ids)}")
+
     pending_q = (
         db.query(models.Transaction)
         .filter(
@@ -878,6 +911,28 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         )
         .all()
     }
+    # Same stale-COA exclusion as above, so remaining_uncoded is the true
+    # number of pending transactions that still need recoding (including
+    # ones with valid-looking JEs that reference accounts not in QBO).
+    if coa_set and really_coded_after:
+        always_valid = {a.lower() for a in _ai._ALWAYS_VALID_ACCOUNTS}
+        valid_or_always = coa_set | always_valid
+        still_stale = set()
+        for je in (
+            db.query(
+                models.JournalEntry.transaction_id,
+                models.JournalEntry.debit_account,
+                models.JournalEntry.credit_account,
+            )
+            .filter(models.JournalEntry.transaction_id.in_(list(really_coded_after)))
+            .all()
+        ):
+            tx_id, dr, cr = je
+            for name in (dr, cr):
+                if name and name.lower() not in valid_or_always:
+                    still_stale.add(tx_id)
+                    break
+        really_coded_after -= still_stale
     remaining_uncoded = (
         db.query(models.Transaction)
         .filter(
