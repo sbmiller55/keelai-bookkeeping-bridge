@@ -181,6 +181,7 @@ class SyncResult(BaseModel):
     imported: int
     skipped: int
     je_created: int
+    phantoms_removed: int = 0
     errors: list[str]
     accounts: list[AccountSummary]
     date_earliest: Optional[str]
@@ -377,6 +378,50 @@ def _sync_one_client(
         imported_dates.append(txn["date"])
         new_txn_objects.append(new_txn)
 
+    # ── Reconcile phantom transactions ────────────────────────────────────
+    # Mercury removes stale pending authorizations from its API after the
+    # merchant fails to capture (e.g. Toast pre-auths, declined holds). If
+    # we imported one while it was pending, our DB row outlives Mercury's,
+    # turning into a phantom transaction the user can't reconcile.
+    #
+    # Strict safety rules:
+    #   - DB status must still be "pending" (don't touch approved/exported)
+    #   - Original mercury_status must be "pending" (settled txns never vanish)
+    #   - date must fall within the sync range we just queried
+    #   - imported_at > 24h ago (grace for transient Mercury API issues)
+    #   - mercury_transaction_id is NOT in the set Mercury returned this sync
+    phantoms_removed = 0
+    if range_start and range_end:
+        try:
+            range_start_dt = datetime.strptime(range_start, "%Y-%m-%d")
+            range_end_dt   = datetime.strptime(range_end, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            range_start_dt = range_end_dt = None
+        if range_start_dt and range_end_dt:
+            grace_cutoff = datetime.utcnow() - timedelta(hours=24)
+            phantom_candidates = (
+                db.query(models.Transaction)
+                .filter(
+                    models.Transaction.client_id == client.id,
+                    models.Transaction.status == models.TransactionStatus.pending,
+                    models.Transaction.mercury_status == "pending",
+                    models.Transaction.mercury_transaction_id.isnot(None),
+                    models.Transaction.date >= range_start_dt,
+                    models.Transaction.date <  range_end_dt,
+                    models.Transaction.imported_at < grace_cutoff,
+                )
+                .all()
+            )
+            for t in phantom_candidates:
+                if t.mercury_transaction_id in seen_ids:
+                    continue
+                # Cascade: delete any auto-coded JEs pointing at the phantom
+                db.query(models.JournalEntry).filter(
+                    models.JournalEntry.transaction_id == t.id
+                ).delete(synchronize_session=False)
+                db.delete(t)
+                phantoms_removed += 1
+
     # Flush to get IDs assigned (needed for FK in JournalEntry)
     client.last_sync_at = datetime.utcnow()
     db.flush()
@@ -507,6 +552,7 @@ def _sync_one_client(
         imported=imported,
         skipped=skipped,
         je_created=je_created,
+        phantoms_removed=phantoms_removed,
         errors=errors,
         accounts=account_summaries,
         date_earliest=date_earliest,
