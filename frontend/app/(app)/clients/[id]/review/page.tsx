@@ -68,22 +68,42 @@ function AccountSelect({
   const ref = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Case-insensitive lookup so we can resolve a typed string to the canonical
+  // QBO account name (with original casing) and reject anything that isn't in
+  // the live QBO chart of accounts.
+  const lookup = new Map(accounts.map((a) => [a.toLowerCase(), a]));
+  const resolveToCanonical = (raw: string): string | null => {
+    return lookup.get(raw.trim().toLowerCase()) ?? null;
+  };
+
   // Keep input in sync when value changes externally
   useEffect(() => { setInputValue(value); }, [value]);
+
+  // Commit a typed value: only allowed if it matches a real QBO account name
+  // (case-insensitive). Otherwise revert the input to the previous value —
+  // free-typed strings can no longer leak into JEs.
+  const tryCommitTyped = () => {
+    if (inputValue === value) return;
+    const canonical = resolveToCanonical(inputValue);
+    if (canonical) {
+      setInputValue(canonical);
+      onChange(canonical);
+    } else {
+      setInputValue(value);
+    }
+  };
 
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
-        // Commit whatever is typed if it's a valid account or non-empty
-        if (inputValue !== value) {
-          onChange(inputValue);
-        }
+        tryCommitTyped();
         setOpen(false);
         setIsTyping(false);
       }
     }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputValue, value, onChange]);
 
   // Show all accounts when just opened; filter only once user starts typing
@@ -102,8 +122,16 @@ function AccountSelect({
   }
 
   function commit(val: string) {
-    setInputValue(val);
-    onChange(val);
+    // Defensive: only ever commit a value that exists in the live QBO list.
+    const canonical = resolveToCanonical(val);
+    if (!canonical) {
+      setInputValue(value);
+      setOpen(false);
+      setIsTyping(false);
+      return;
+    }
+    setInputValue(canonical);
+    onChange(canonical);
     setOpen(false);
     setIsTyping(false);
   }
@@ -118,8 +146,14 @@ function AccountSelect({
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (filtered[activeIdx]) commit(filtered[activeIdx]);
-      else if (inputValue) commit(inputValue);
+      if (filtered[activeIdx]) {
+        commit(filtered[activeIdx]);
+      } else {
+        // No dropdown match and no exact list match → reject the typed value
+        const canonical = resolveToCanonical(inputValue);
+        if (canonical) commit(canonical);
+        else setInputValue(value);
+      }
     } else if (e.key === "Escape") {
       setInputValue(value);
       setOpen(false);
@@ -147,7 +181,7 @@ function AccountSelect({
           // Small delay so click on dropdown item fires first
           setTimeout(() => {
             if (ref.current && !ref.current.contains(document.activeElement)) {
-              if (inputValue !== value) onChange(inputValue);
+              tryCommitTyped();
               setOpen(false);
               setIsTyping(false);
             }

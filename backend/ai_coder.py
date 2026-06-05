@@ -94,11 +94,12 @@ def _get_qbo_coa(client_obj) -> Optional[str]:
 
 
 def _resolve_chart(client_obj) -> Optional[str]:
-    """Return COA text: live QBO accounts first (authoritative), fall back to uploaded file."""
-    chart = _get_qbo_coa(client_obj)
-    if not chart:
-        chart = _read_file_safe(client_obj.chart_of_accounts_path)
-    return chart
+    """Return COA text from live QBO. The uploaded-file fallback was removed:
+    QBO is the only authoritative source for accounts. Returns None only
+    when QBO is unreachable or the connection isn't configured; the AI
+    coder turns that into a clear error rather than silently coding
+    against a stale chart."""
+    return _get_qbo_coa(client_obj)
 
 
 # Accounts that are always valid regardless of COA (canonical fallbacks / GAAP standards)
@@ -663,6 +664,12 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
         return []
 
     chart = _resolve_chart(client_obj)
+    if not chart:
+        raise RuntimeError(
+            "Live QBO chart of accounts is unavailable. Connect or reconnect "
+            "QuickBooks Online for this client before running AI coding — the "
+            "uploaded-file fallback was removed."
+        )
     policy = _read_file_safe(client_obj.policy_path)
     system = _build_system(chart, policy)
     coa_set = _parse_coa_set(chart)

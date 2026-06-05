@@ -8,7 +8,6 @@ const EMPTY_FORM = {
   name: "",
   mercury_api_key_encrypted: "",
   qbo_oauth_token: "",
-  chart_of_accounts_path: "",
   policy_path: "",
 };
 
@@ -21,11 +20,8 @@ export default function ClientsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const chartRef = useRef<HTMLInputElement>(null);
   const policyRef = useRef<HTMLInputElement>(null);
-  const [chartFileName, setChartFileName] = useState<string | null>(null);
   const [policyFileName, setPolicyFileName] = useState<string | null>(null);
-  const [chartUploading, setChartUploading] = useState(false);
   const [policyUploading, setPolicyUploading] = useState(false);
 
   useEffect(() => {
@@ -35,19 +31,17 @@ export default function ClientsPage() {
       .finally(() => setLoading(false));
   }, [router]);
 
-  async function handleFileUpload(file: File, field: "chart_of_accounts_path" | "policy_path") {
-    const setUploading = field === "chart_of_accounts_path" ? setChartUploading : setPolicyUploading;
-    const setName = field === "chart_of_accounts_path" ? setChartFileName : setPolicyFileName;
-    setUploading(true);
+  async function handleFileUpload(file: File, field: "policy_path") {
+    setPolicyUploading(true);
     setFormError(null);
     try {
       const result = await uploadFile(file);
       setForm((prev) => ({ ...prev, [field]: result.path }));
-      setName(result.filename);
+      setPolicyFileName(result.filename);
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : "Upload failed");
     } finally {
-      setUploading(false);
+      setPolicyUploading(false);
     }
   }
 
@@ -60,13 +54,11 @@ export default function ClientsPage() {
         name: form.name,
         ...(form.mercury_api_key_encrypted && { mercury_api_key_encrypted: form.mercury_api_key_encrypted }),
         ...(form.qbo_oauth_token && { qbo_oauth_token: form.qbo_oauth_token }),
-        ...(form.chart_of_accounts_path && { chart_of_accounts_path: form.chart_of_accounts_path }),
         ...(form.policy_path && { policy_path: form.policy_path }),
       };
       const newClient = await createClient(payload);
       setShowForm(false);
       setForm(EMPTY_FORM);
-      setChartFileName(null);
       setPolicyFileName(null);
       router.push(`/clients/${newClient.id}`);
     } catch (err: unknown) {
@@ -91,7 +83,6 @@ export default function ClientsPage() {
     setShowForm(false);
     setForm(EMPTY_FORM);
     setFormError(null);
-    setChartFileName(null);
     setPolicyFileName(null);
   }
 
@@ -151,29 +142,6 @@ export default function ClientsPage() {
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 placeholder="Optional"
               />
-            </div>
-
-            {/* Chart of Accounts */}
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Chart of Accounts</label>
-              <input ref={chartRef} type="file" accept=".csv,.xlsx,.xls,.pdf,.txt" className="hidden"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileUpload(f, "chart_of_accounts_path"); e.target.value = ""; }} />
-              {chartFileName ? (
-                <div className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <svg className="w-4 h-4 text-green-400 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                    <span className="text-sm text-white truncate">{chartFileName}</span>
-                  </div>
-                  <button type="button" onClick={() => chartRef.current?.click()} className="text-xs text-indigo-400 hover:text-indigo-300 shrink-0 ml-2">Replace</button>
-                </div>
-              ) : (
-                <button type="button" onClick={() => chartRef.current?.click()} disabled={chartUploading}
-                  className="w-full flex items-center gap-3 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-left hover:border-gray-500 transition-colors disabled:opacity-60">
-                  {chartUploading ? <span className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin shrink-0" /> :
-                    <svg className="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>}
-                  <span className="text-sm text-gray-500">{chartUploading ? "Uploading…" : "Choose file…"}</span>
-                </button>
-              )}
             </div>
 
             {/* Policy */}
@@ -239,7 +207,6 @@ export default function ClientsPage() {
                     <p className="text-xs text-gray-500 mt-1">
                       Added {new Date(client.created_at).toLocaleDateString()}
                       {client.mercury_api_key_encrypted && " · Mercury connected"}
-                      {client.chart_of_accounts_path && " · Chart uploaded"}
                       {client.policy_path && " · Policy uploaded"}
                     </p>
                   </div>

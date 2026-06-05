@@ -45,7 +45,6 @@ class ClientCreate(BaseModel):
     name: str
     mercury_api_key_encrypted: Optional[str] = None
     qbo_oauth_token: Optional[str] = None
-    chart_of_accounts_path: Optional[str] = None
     policy_path: Optional[str] = None
 
 
@@ -55,7 +54,6 @@ class ClientRead(BaseModel):
     name: str
     mercury_api_key_encrypted: Optional[str] = None
     qbo_oauth_token: Optional[str] = None
-    chart_of_accounts_path: Optional[str] = None
     policy_path: Optional[str] = None
     created_at: datetime
     last_sync_at: Optional[datetime] = None
@@ -67,7 +65,6 @@ class ClientUpdate(BaseModel):
     name: Optional[str] = None
     mercury_api_key_encrypted: Optional[str] = None
     qbo_oauth_token: Optional[str] = None
-    chart_of_accounts_path: Optional[str] = None
     policy_path: Optional[str] = None
     last_sync_at: Optional[datetime] = None
 

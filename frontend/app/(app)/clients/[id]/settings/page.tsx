@@ -72,9 +72,7 @@ export default function ClientSettingsPage() {
   const [savingKey, setSavingKey] = useState(false);
   const [keySaved, setKeySaved] = useState(false);
 
-  const [chartUploading, setChartUploading] = useState(false);
   const [policyUploading, setPolicyUploading] = useState(false);
-  const [chartName, setChartName] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [qboSyncing, setQboSyncing] = useState(false);
@@ -99,7 +97,6 @@ export default function ClientSettingsPage() {
     getClient(clientId).then((c) => {
       setClient(c);
       setMercuryKey(c.mercury_api_key_encrypted ?? "");
-      setChartName(c.chart_of_accounts_path ? c.chart_of_accounts_path.split("/").pop() ?? null : null);
       setPolicyName(c.policy_path ? c.policy_path.split("/").pop() ?? null : null);
     }).finally(() => setLoading(false));
     getQboStatus(clientId).then(setQboStatus).catch(() => {});
@@ -155,37 +152,29 @@ export default function ClientSettingsPage() {
     }
   }
 
-  async function handleUpload(file: File, field: "chart_of_accounts_path" | "policy_path") {
-    const setUploading = field === "chart_of_accounts_path" ? setChartUploading : setPolicyUploading;
-    const setName = field === "chart_of_accounts_path" ? setChartName : setPolicyName;
-    setUploading(true);
+  async function handleUpload(file: File, field: "policy_path") {
+    setPolicyUploading(true);
     setUploadError(null);
     try {
       const { path, filename } = await uploadFile(file);
       const updated = await updateClient(clientId, { [field]: path });
       setClient(updated);
-      setName(filename);
+      setPolicyName(filename);
     } catch (err: unknown) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
-      setUploading(false);
+      setPolicyUploading(false);
     }
-  }
-
-  async function handleRemoveChart() {
-    await updateClient(clientId, { chart_of_accounts_path: null });
-    setChartName(null);
-    setQboSyncResult(null);
   }
 
   async function handleQboSync() {
     setQboSyncing(true);
     setQboSyncResult(null);
     try {
-      const accounts = await getQboAccounts(clientId);
-      setQboSyncResult(`${accounts.length} accounts synced from QBO`);
+      const accounts = await getQboAccounts(clientId, /* refresh */ true);
+      setQboSyncResult(`${accounts.length} accounts refreshed from QBO`);
     } catch (err: unknown) {
-      setQboSyncResult(err instanceof Error ? err.message : "Sync failed");
+      setQboSyncResult(err instanceof Error ? err.message : "Refresh failed");
     } finally {
       setQboSyncing(false);
     }
@@ -404,37 +393,33 @@ export default function ClientSettingsPage() {
         {uploadError && <p className="text-red-400 text-xs mb-3">{uploadError}</p>}
 
         <div className="space-y-4">
-          <div>
-            <UploadField
-              label="Chart of Accounts"
-              accept=".csv,.xlsx,.xls,.pdf,.txt"
-              fileName={chartName}
-              uploading={chartUploading}
-              onSelect={(f) => handleUpload(f, "chart_of_accounts_path")}
-              onRemove={chartName ? handleRemoveChart : undefined}
-            />
-            {qboStatus?.connected && (
-              <div className="flex items-center gap-3 mt-2">
+          {qboStatus?.connected && (
+            <div>
+              <label className="block text-sm font-medium text-gray-300 mb-1.5">Chart of Accounts</label>
+              <p className="text-xs text-gray-500 mb-2">
+                Pulled live from QuickBooks Online. The cache refreshes automatically on the 1st of each month — use this button to refresh sooner.
+              </p>
+              <div className="flex items-center gap-3">
                 <button
                   onClick={handleQboSync}
                   disabled={qboSyncing}
                   className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                 >
                   {qboSyncing
-                    ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Syncing…</>
+                    ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Refreshing…</>
                     : <>
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        Sync accounts from QBO
+                        Refresh accounts from QBO
                       </>}
                 </button>
                 {qboSyncResult && (
                   <span className="text-xs text-green-400">{qboSyncResult}</span>
                 )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
           <UploadField
             label="Policy Document"
             accept=".pdf,.docx,.doc,.txt,.md"

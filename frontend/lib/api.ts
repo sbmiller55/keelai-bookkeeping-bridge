@@ -25,7 +25,6 @@ export interface Client {
   mercury_api_key_encrypted: string | null;
   qbo_oauth_token: string | null;
   qbo_realm_id: string | null;
-  chart_of_accounts_path: string | null;
   policy_path: string | null;
   created_at: string;
   last_sync_at: string | null;
@@ -35,7 +34,6 @@ export interface ClientCreate {
   name: string;
   mercury_api_key_encrypted?: string;
   qbo_oauth_token?: string;
-  chart_of_accounts_path?: string | null;
   policy_path?: string | null;
 }
 
@@ -309,10 +307,6 @@ export function createClient(data: ClientCreate): Promise<Client> {
     method: "POST",
     body: JSON.stringify(data),
   });
-}
-
-export function getChartOfAccounts(clientId: number): Promise<string[]> {
-  return apiFetch<string[]>(`/clients/${clientId}/accounts`);
 }
 
 export function updateClient(id: number, data: Partial<ClientCreate>): Promise<Client> {
@@ -881,8 +875,9 @@ export function disconnectQbo(clientId: number): Promise<{ ok: boolean }> {
   });
 }
 
-export function getQboAccounts(clientId: number): Promise<string[]> {
-  return apiFetch<{ accounts: string[] }>(`/clients/${clientId}/qbo/accounts`)
+export function getQboAccounts(clientId: number, refresh = false): Promise<string[]> {
+  const qs = refresh ? "?refresh=true" : "";
+  return apiFetch<{ accounts: string[] }>(`/clients/${clientId}/qbo/accounts${qs}`)
     .then((r) => r.accounts);
 }
 

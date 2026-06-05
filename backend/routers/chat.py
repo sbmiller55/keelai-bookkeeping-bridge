@@ -141,13 +141,18 @@ def _build_system_prompt(
         "Placeholders: $source_account (the Mercury account the txn came from), $category (Mercury category).\n\n"
         "After creating each rule, call apply_rule to apply it immediately to matching pending transactions.\n\n"
         "## Chart of Accounts\n"
-        "You can add accounts to the Chart of Accounts using the update_chart_of_accounts tool. "
-        "Use this when the user asks you to add accounts, or when a transaction needs an account that doesn't exist yet. "
-        "Never tell the user to manually update the COA — do it yourself with the tool.",
+        "The Chart of Accounts comes from QuickBooks Online. If the user wants to add an account, tell them to "
+        "create it directly in QBO; once it's added there, it shows up here automatically on the next refresh.",
     ]
 
-    # Chart of accounts
-    coa = _read_file(client.chart_of_accounts_path)
+    # Chart of accounts — live from QBO (cached monthly). Falls back to nothing
+    # if QBO is not connected; the model is told to instruct the user to add
+    # accounts in QBO itself.
+    try:
+        import ai_coder as _ai
+        coa = _ai._get_qbo_coa(client)
+    except Exception:
+        coa = None
     if coa:
         parts.append(f"\n\n## Chart of Accounts\n{coa}")
 
@@ -377,26 +382,6 @@ _TOOLS = [
             "required": ["rule_id"],
         },
     },
-    {
-        "name": "update_chart_of_accounts",
-        "description": (
-            "Add one or more account names to the client's Chart of Accounts file. "
-            "Use this when the user asks you to add accounts to the COA, or when a transaction "
-            "requires an account that doesn't exist yet. The accounts will be merged with any "
-            "existing ones and saved sorted alphabetically."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "accounts": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of account names to add to the Chart of Accounts.",
-                },
-            },
-            "required": ["accounts"],
-        },
-    },
 ]
 
 
@@ -586,36 +571,6 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             db.commit()
             verb = "rejected" if rule.rule_action == "reject" else "coded"
             return f"Rule {rule_id} applied: {verb} {applied} pending transaction(s)."
-
-        elif tool_name == "update_chart_of_accounts":
-            new_accounts = [a.strip() for a in tool_input.get("accounts", []) if a.strip()]
-            if not new_accounts:
-                return "No account names provided."
-
-            client = db.query(models.Client).filter(models.Client.id == client_id).first()
-            if not client:
-                return "Client not found."
-
-            existing: list[str] = []
-            ref = client.chart_of_accounts_path
-            if ref:
-                existing_text = storage.read_text(ref)
-                if existing_text is not None:
-                    if not ref.endswith(".txt") and not ref.split("?")[0].endswith(".txt"):
-                        return "COA file is not .txt format — can only append to .txt files. Ask the user to re-upload as a .txt file first."
-                    existing = [l.strip() for l in existing_text.splitlines() if l.strip()]
-
-            merged = sorted(set(existing) | set(new_accounts), key=str.casefold)
-            contents = ("\n".join(merged) + "\n").encode()
-            filename = f"coa_client_{client_id}.txt"
-            new_ref = storage.upload(filename, contents)
-
-            if not ref:
-                client.chart_of_accounts_path = new_ref
-                db.commit()
-
-            added = set(new_accounts) - set(existing)
-            return f"Chart of Accounts updated. Added {len(added)} account(s): {', '.join(sorted(added))}. Total accounts: {len(merged)}."
 
         return f"Unknown tool: {tool_name}"
     except Exception as e:
