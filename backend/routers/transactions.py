@@ -530,6 +530,24 @@ def update_transaction(
     return tx
 
 
+# Mercury sometimes returns the bank-account display name with bullet
+# characters (e.g. "Mercury Checking ••9882"). The canonical
+# QBO names use parentheses ("Mercury Checking (9882) - 1"). The Export
+# page normalizes on the way out; we mirror it here so the approval
+# validator doesn't false-positive on CC/checking JEs.
+_MERCURY_NAME_MAP = {
+    "Mercury Checking ••9882": "Mercury Checking (9882) - 1",
+    "Mercury Checking":                   "Mercury Checking (9882) - 1",
+    "Mercury Savings ••3117":   "Mercury Savings (3117) - 1",
+    "Mercury Savings":                    "Mercury Savings (3117) - 1",
+    "Mercury Treasury":                   "Mercury Treasury - 1",
+}
+
+
+def _normalize_account_name(name: str) -> str:
+    return _MERCURY_NAME_MAP.get(name, name)
+
+
 def _coa_violations_for_transaction(
     tx: models.Transaction,
     client: Optional[models.Client],
@@ -564,7 +582,8 @@ def _coa_violations_for_transaction(
         for name in (je.debit_account, je.credit_account):
             if not name:
                 continue
-            if name.lower() not in valid and name not in seen:
+            canonical = _normalize_account_name(name)
+            if canonical.lower() not in valid and name not in seen:
                 bad.append(name)
                 seen.add(name)
     return bad
