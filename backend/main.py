@@ -228,6 +228,12 @@ def _run_monthly_standing_accrual_generation():
                         ai_confidence=1.0,
                         ai_reasoning=f"Generated from standing rule #{rule.id}.",
                         standing_rule_id=rule.id,
+                        # Set debit/credit so the kind derivation (which checks
+                        # credit_account for "prepaid") routes prepaid-amortization
+                        # rules to the Prepaid Expenses tab instead of the
+                        # Accruals tab.
+                        debit_account=rule.expense_account,
+                        credit_account=rule.accrued_account,
                     ))
                     rule.last_generated = target_month
                     rule.attention_needed = False

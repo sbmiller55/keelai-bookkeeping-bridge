@@ -1233,6 +1233,11 @@ def generate_from_standing_rules(
             ai_confidence=1.0,
             ai_reasoning=f"Generated from standing rule #{rule.id}.",
             standing_rule_id=rule.id,
+            # Set debit/credit so kind derivation routes prepaid-amortization
+            # rules (accrued_account contains 'prepaid') to the Prepaid
+            # Expenses tab rather than the Accruals tab.
+            debit_account=rule.expense_account,
+            credit_account=rule.accrued_account,
         )
         db.add(ae)
         rule.last_generated = target_month
