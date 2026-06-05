@@ -159,6 +159,33 @@ def _run_monthly_qbo_coa_refresh():
         db.close()
 
 
+def _run_daily_scheduled_to_pending():
+    """Promote any synthetic 'scheduled' transactions whose date has now
+    arrived to 'pending' so they show up in the Review Queue.
+
+    Used for prepaid-amortization rows that were pre-created with future
+    month-end dates by the standing-rule generator."""
+    from datetime import datetime
+    from database import SessionLocal
+    from models import Transaction, TransactionStatus
+
+    db = SessionLocal()
+    try:
+        promoted = (
+            db.query(Transaction)
+            .filter(
+                Transaction.status == TransactionStatus.scheduled,
+                Transaction.date <= datetime.utcnow(),
+            )
+            .update({"status": TransactionStatus.pending}, synchronize_session=False)
+        )
+        db.commit()
+        if promoted:
+            print(f"[scheduled->pending] promoted {promoted} transactions")
+    finally:
+        db.close()
+
+
 def _run_monthly_standing_accrual_generation():
     """Scheduler job: on the 1st of each month, advance every active
     standing rule. Open-ended rules generate the current month;
@@ -481,6 +508,12 @@ def on_startup():
                 _run_monthly_standing_accrual_generation,
                 CronTrigger(day=1, hour=6, minute=0),
                 id="monthly_standing_accrual_generation",
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_daily_scheduled_to_pending,
+                CronTrigger(hour=3, minute=0),
+                id="daily_scheduled_to_pending",
                 replace_existing=True,
             )
             scheduler.start()

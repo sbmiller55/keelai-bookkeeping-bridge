@@ -23,6 +23,11 @@ class TransactionStatus(str, enum.Enum):
     exported = "exported"
     rejected = "rejected"
     transfer = "transfer"  # internal Mercury transfer duplicate — no JE needed
+    # Synthetic accrual/amortization for a month-end that hasn't arrived yet.
+    # Excluded from Review Queue and Export; surfaces only in the prepaid
+    # schedule. A daily job auto-promotes scheduled→pending once the date
+    # is on/before today.
+    scheduled = "scheduled"
 
 
 class User(Base):

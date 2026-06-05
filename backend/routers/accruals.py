@@ -1206,7 +1206,7 @@ def _generate_one_month(client_id: int, rule: StandingAccrualRule, target_month:
     tx_status = (
         TransactionStatus.pending
         if accrual_date <= datetime.utcnow()
-        else TransactionStatus.approved
+        else TransactionStatus.scheduled
     )
     tx = _create_synthetic_transaction(
         client_id, rule.vendor_name, rule.amount, accrual_date, db, status=tx_status,
