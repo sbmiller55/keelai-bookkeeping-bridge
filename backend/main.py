@@ -150,6 +150,91 @@ def _run_monthly_qbo_coa_refresh():
         db.close()
 
 
+def _run_monthly_standing_accrual_generation():
+    """Scheduler job: on the 1st of each month, generate accrual JEs for every
+    active standing rule whose last_generated isn't already the current month.
+
+    Mirrors the logic of POST /clients/{id}/accruals/standing-rules/generate
+    so the monthly Buckner-style accruals show up automatically instead of
+    waiting on a manual click."""
+    from datetime import datetime
+    import calendar
+    from database import SessionLocal
+    from models import Client, StandingAccrualRule, AccruedExpense, AccruedExpenseStatus
+    from routers.accruals import _create_synthetic_transaction, _create_accrual_je
+
+    target_month = datetime.utcnow().strftime("%Y-%m")
+    sp_dt = datetime.strptime(target_month, "%Y-%m")
+    last_day = calendar.monthrange(sp_dt.year, sp_dt.month)[1]
+    accrual_date = datetime(sp_dt.year, sp_dt.month, last_day)
+
+    db = SessionLocal()
+    try:
+        clients = db.query(Client).all()
+        for client in clients:
+            generated = []
+            skipped = []
+            rules = (
+                db.query(StandingAccrualRule)
+                .filter(
+                    StandingAccrualRule.client_id == client.id,
+                    StandingAccrualRule.active == True,
+                )
+                .all()
+            )
+            for rule in rules:
+                if rule.last_generated == target_month:
+                    skipped.append(f"{rule.vendor_name} (already generated)")
+                    continue
+                if rule.amount is None:
+                    skipped.append(f"{rule.vendor_name} (no fixed amount)")
+                    continue
+                try:
+                    tx = _create_synthetic_transaction(
+                        client.id, rule.vendor_name, rule.amount, accrual_date, db,
+                    )
+                    accrual_je = _create_accrual_je(
+                        tx_id=tx.id,
+                        expense_account=rule.expense_account,
+                        accrued_account=rule.accrued_account,
+                        amount=rule.amount,
+                        je_date=accrual_date,
+                        vendor=rule.vendor_name,
+                        service_period=target_month,
+                        confidence=1.0,
+                        reasoning=f"Standing accrual rule: {rule.description or rule.vendor_name}",
+                        db=db,
+                    )
+                    db.add(AccruedExpense(
+                        client_id=client.id,
+                        vendor_name=rule.vendor_name,
+                        description=rule.description,
+                        service_period=target_month,
+                        amount=rule.amount,
+                        accrual_je_id=accrual_je.id,
+                        status=AccruedExpenseStatus.accrued,
+                        ai_confidence=1.0,
+                        ai_reasoning=f"Generated from standing rule #{rule.id}.",
+                        standing_rule_id=rule.id,
+                    ))
+                    rule.last_generated = target_month
+                    generated.append(rule.vendor_name)
+                except Exception as exc:
+                    skipped.append(f"{rule.vendor_name} (error: {exc})")
+            try:
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(f"[standing-accrual-gen] client={client.id} commit failed: {exc}")
+                continue
+            print(
+                f"[standing-accrual-gen] client={client.id} month={target_month} "
+                f"generated={generated} skipped={skipped}"
+            )
+    finally:
+        db.close()
+
+
 def _seed_admin():
     """Create the admin user from env vars if they don't exist yet."""
     import os
@@ -387,6 +472,12 @@ def on_startup():
                 _run_monthly_qbo_coa_refresh,
                 CronTrigger(day=1, hour=5, minute=0),
                 id="monthly_qbo_coa_refresh",
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_monthly_standing_accrual_generation,
+                CronTrigger(day=1, hour=6, minute=0),
+                id="monthly_standing_accrual_generation",
                 replace_existing=True,
             )
             scheduler.start()
