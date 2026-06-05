@@ -282,10 +282,18 @@ export default function ClientSettingsPage() {
         {qboStatus?.connected ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
-              <span className="text-sm text-green-400 font-medium">Connected</span>
+              <span className={`w-2 h-2 rounded-full shrink-0 ${qboStatus.needs_reconnect ? "bg-amber-400" : "bg-green-400"}`} />
+              <span className={`text-sm font-medium ${qboStatus.needs_reconnect ? "text-amber-300" : "text-green-400"}`}>
+                {qboStatus.needs_reconnect ? "Connected, but reconnect required" : "Connected"}
+              </span>
               <span className="text-xs text-gray-500 ml-1">Realm: {qboStatus.realm_id}</span>
             </div>
+            {qboStatus.needs_reconnect && (
+              <div className="bg-amber-950/40 border border-amber-900 rounded-lg p-3 text-xs text-amber-200">
+                <p>{qboStatus.reconnect_reason ?? "QuickBooks credentials are stale. Disconnect and reconnect to restore the connection."}</p>
+                <p className="text-amber-300/70 mt-1">Live QBO calls (account refresh, journal entry sync) will fail until you reconnect. The cached chart of accounts continues to work in the meantime.</p>
+              </div>
+            )}
             <div>
               <button
                 onClick={handleEnsureAccounts}

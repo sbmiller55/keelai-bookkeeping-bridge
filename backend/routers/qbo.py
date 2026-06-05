@@ -67,6 +67,8 @@ class QboStatus(BaseModel):
     connected:        bool
     realm_id:         Optional[str]   = None
     token_expires_at: Optional[datetime] = None
+    needs_reconnect:  bool = False
+    reconnect_reason: Optional[str] = None
 
 
 class SyncResult(BaseModel):
@@ -118,12 +120,41 @@ def get_status(
     current_user: User = Depends(get_current_user),
 ):
     client    = _get_client(client_id, current_user, db)
-    connected = bool(client.qbo_access_token and client.qbo_realm_id)
-    return QboStatus(
-        connected=connected,
-        realm_id=client.qbo_realm_id if connected else None,
-        token_expires_at=client.qbo_token_expires_at if connected else None,
-    )
+    has_tokens = bool(client.qbo_access_token and client.qbo_realm_id)
+    if not has_tokens:
+        return QboStatus(connected=False)
+
+    # We have stored tokens, but the OAuth refresh token may have expired
+    # (Intuit invalidates them after 100 days of inactivity, and they're
+    # single-use — a failed refresh leaves the row "connected" in name
+    # only). Probe the live API cheaply; if it fails with an auth error,
+    # flag needs_reconnect so the UI can prompt the user.
+    try:
+        qbo_c = _get_qbo_client(client)
+        qbo_c.get_coa_names()  # cheap, paginated query
+        _persist_token_refresh(client, qbo_c, db)
+        return QboStatus(
+            connected=True,
+            realm_id=client.qbo_realm_id,
+            token_expires_at=client.qbo_token_expires_at,
+        )
+    except Exception as exc:
+        msg = str(exc)
+        # Surface a friendly reconnect prompt for known auth-failure shapes.
+        looks_like_auth = any(
+            s in msg
+            for s in ("400 Bad Request", "401", "invalid_grant", "Token", "oauth", "OAuth")
+        )
+        return QboStatus(
+            connected=True,                # tokens exist
+            realm_id=client.qbo_realm_id,
+            token_expires_at=client.qbo_token_expires_at,
+            needs_reconnect=True,
+            reconnect_reason=(
+                "QuickBooks token refresh failed — please disconnect and "
+                "reconnect QBO." if looks_like_auth else f"QBO check failed: {msg[:200]}"
+            ),
+        )
 
 
 @router.delete("/disconnect")

@@ -846,6 +846,8 @@ export interface QboStatus {
   connected: boolean;
   realm_id: string | null;
   token_expires_at: string | null;
+  needs_reconnect?: boolean;
+  reconnect_reason?: string | null;
 }
 
 export interface QboSyncResult {
