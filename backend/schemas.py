@@ -514,6 +514,7 @@ class StandingAccrualRuleCreate(BaseModel):
     expense_account: str
     accrued_account: str = "Accrued Expenses"
     amount: Optional[float] = None
+    schedule_end_month: Optional[str] = None  # "YYYY-MM" — fixed-window prepaid amortization
 
 
 class StandingAccrualRuleUpdate(BaseModel):
@@ -524,6 +525,7 @@ class StandingAccrualRuleUpdate(BaseModel):
     amount: Optional[float] = None
     active: Optional[bool] = None
     last_generated: Optional[str] = None  # "YYYY-MM" — set to skip a month from auto-generation
+    schedule_end_month: Optional[str] = None
 
 
 class StandingAccrualRuleRead(BaseModel):
@@ -540,6 +542,7 @@ class StandingAccrualRuleRead(BaseModel):
     attention_needed: bool = False
     attention_month:  Optional[str] = None
     attention_reason: Optional[str] = None
+    schedule_end_month: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

@@ -1083,6 +1083,7 @@ export interface StandingAccrualRule {
   attention_needed?: boolean;
   attention_month?: string | null;
   attention_reason?: string | null;
+  schedule_end_month?: string | null;
 }
 
 export function getAccruals(clientId: number, status?: string): Promise<{ summary: AccrualSummary; accruals: AccruedExpense[] }> {

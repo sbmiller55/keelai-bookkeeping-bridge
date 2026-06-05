@@ -392,6 +392,12 @@ class StandingAccrualRule(Base):
     attention_needed = Column(Boolean, default=False, nullable=False)
     attention_month  = Column(String(7), nullable=True)   # "YYYY-MM"
     attention_reason = Column(String, nullable=True)
+    # When set, this rule represents a prepaid amortization with a fixed
+    # end date. Generation creates every month from last_generated+1
+    # through schedule_end_month at once (each month's JE dated to its own
+    # month-end). When unset, the rule is open-ended and generation only
+    # advances one month at a time.
+    schedule_end_month = Column(String(7), nullable=True)  # "YYYY-MM"
 
 
 class FixedAsset(Base):

@@ -95,6 +95,9 @@ def _migrate_db():
         ("standing_accrual_rules", "attention_needed",     "BOOLEAN DEFAULT FALSE"),
         ("standing_accrual_rules", "attention_month",      "TEXT"),
         ("standing_accrual_rules", "attention_reason",     "TEXT"),
+        # When set, the rule is a fixed-window prepaid amortization that
+        # generates ALL months at once up to schedule_end_month.
+        ("standing_accrual_rules", "schedule_end_month",   "TEXT"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:
@@ -157,23 +160,16 @@ def _run_monthly_qbo_coa_refresh():
 
 
 def _run_monthly_standing_accrual_generation():
-    """Scheduler job: on the 1st of each month, generate accrual JEs for every
-    active standing rule whose last_generated isn't already the current month.
-
-    Mirrors the logic of POST /clients/{id}/accruals/standing-rules/generate
-    so the monthly Buckner-style accruals show up automatically instead of
-    waiting on a manual click."""
+    """Scheduler job: on the 1st of each month, advance every active
+    standing rule. Open-ended rules generate the current month;
+    fixed-window prepaid amortizations generate every missing month
+    through schedule_end_month at once."""
     from datetime import datetime
-    import calendar
     from database import SessionLocal
-    from models import Client, StandingAccrualRule, AccruedExpense, AccruedExpenseStatus
-    from routers.accruals import _create_synthetic_transaction, _create_accrual_je
+    from models import Client, StandingAccrualRule
+    from routers.accruals import _generate_one_month, _months_in_range, _next_month_str
 
     target_month = datetime.utcnow().strftime("%Y-%m")
-    sp_dt = datetime.strptime(target_month, "%Y-%m")
-    last_day = calendar.monthrange(sp_dt.year, sp_dt.month)[1]
-    accrual_date = datetime(sp_dt.year, sp_dt.month, last_day)
-
     db = SessionLocal()
     try:
         clients = db.query(Client).all()
@@ -189,9 +185,6 @@ def _run_monthly_standing_accrual_generation():
                 .all()
             )
             for rule in rules:
-                if rule.last_generated == target_month:
-                    skipped.append(f"{rule.vendor_name} (already generated)")
-                    continue
                 if rule.amount is None:
                     rule.attention_needed = True
                     rule.attention_month  = target_month
@@ -199,47 +192,33 @@ def _run_monthly_standing_accrual_generation():
                         "Variable-amount vendor: create the accrual for this "
                         "month manually with the actual invoice/estimate amount."
                     )
-                    skipped.append(f"{rule.vendor_name} (no fixed amount — flagged for review)")
+                    skipped.append(f"{rule.vendor_name} (no fixed amount — flagged)")
                     continue
+
+                if rule.schedule_end_month:
+                    window_start = (
+                        _next_month_str(rule.last_generated)
+                        if rule.last_generated
+                        else target_month
+                    )
+                    months_to_generate = _months_in_range(window_start, rule.schedule_end_month)
+                else:
+                    months_to_generate = (
+                        [] if rule.last_generated == target_month else [target_month]
+                    )
+
+                if not months_to_generate:
+                    skipped.append(f"{rule.vendor_name} (already complete)")
+                    continue
+
                 try:
-                    tx = _create_synthetic_transaction(
-                        client.id, rule.vendor_name, rule.amount, accrual_date, db,
-                    )
-                    accrual_je = _create_accrual_je(
-                        tx_id=tx.id,
-                        expense_account=rule.expense_account,
-                        accrued_account=rule.accrued_account,
-                        amount=rule.amount,
-                        je_date=accrual_date,
-                        vendor=rule.vendor_name,
-                        service_period=target_month,
-                        confidence=1.0,
-                        reasoning=f"Standing accrual rule: {rule.description or rule.vendor_name}",
-                        db=db,
-                    )
-                    db.add(AccruedExpense(
-                        client_id=client.id,
-                        vendor_name=rule.vendor_name,
-                        description=rule.description,
-                        service_period=target_month,
-                        amount=rule.amount,
-                        accrual_je_id=accrual_je.id,
-                        status=AccruedExpenseStatus.accrued,
-                        ai_confidence=1.0,
-                        ai_reasoning=f"Generated from standing rule #{rule.id}.",
-                        standing_rule_id=rule.id,
-                        # Set debit/credit so the kind derivation (which checks
-                        # credit_account for "prepaid") routes prepaid-amortization
-                        # rules to the Prepaid Expenses tab instead of the
-                        # Accruals tab.
-                        debit_account=rule.expense_account,
-                        credit_account=rule.accrued_account,
-                    ))
-                    rule.last_generated = target_month
+                    for m in months_to_generate:
+                        _generate_one_month(client.id, rule, m, db)
+                        rule.last_generated = m
                     rule.attention_needed = False
                     rule.attention_month  = None
                     rule.attention_reason = None
-                    generated.append(rule.vendor_name)
+                    generated.append(f"{rule.vendor_name}({len(months_to_generate)}mo)")
                 except Exception as exc:
                     rule.attention_needed = True
                     rule.attention_month  = target_month

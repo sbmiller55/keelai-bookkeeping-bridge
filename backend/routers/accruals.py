@@ -92,20 +92,53 @@ def _derive_status(ae: AccruedExpense, je: Optional[JournalEntry], this_month: s
     return "upcoming"  # current month, not yet released → upcoming
 
 
-def _create_synthetic_transaction(client_id: int, vendor: str, amount: float,
-                                   tx_date: datetime, db: Session) -> Transaction:
-    """Create a synthetic transaction to anchor an accrual JE."""
+def _create_synthetic_transaction(
+    client_id: int,
+    vendor: str,
+    amount: float,
+    tx_date: datetime,
+    db: Session,
+    status: TransactionStatus = TransactionStatus.approved,
+) -> Transaction:
+    """Create a synthetic transaction to anchor an accrual JE. Callers can
+    override status — standing-rule generation uses `pending` for any month
+    whose end date has already arrived so the user can review the JE."""
     tx = Transaction(
         client_id=client_id,
         date=tx_date,
         description=f"Accrual: {vendor}",
         amount=-abs(amount),
-        status=TransactionStatus.approved,
+        status=status,
         source="accrual",
     )
     db.add(tx)
     db.flush()
     return tx
+
+
+def _months_in_range(start_ym: str, end_ym: str) -> list[str]:
+    """Inclusive list of YYYY-MM strings from start to end (or empty if out of order)."""
+    try:
+        s = datetime.strptime(start_ym, "%Y-%m")
+        e = datetime.strptime(end_ym, "%Y-%m")
+    except ValueError:
+        return []
+    out: list[str] = []
+    cur = s
+    while cur <= e:
+        out.append(cur.strftime("%Y-%m"))
+        if cur.month == 12:
+            cur = datetime(cur.year + 1, 1, 1)
+        else:
+            cur = datetime(cur.year, cur.month + 1, 1)
+    return out
+
+
+def _next_month_str(ym: str) -> str:
+    dt = datetime.strptime(ym, "%Y-%m")
+    if dt.month == 12:
+        return f"{dt.year + 1}-01"
+    return f"{dt.year}-{dt.month + 1:02d}"
 
 
 def _create_accrual_je(tx_id: int, expense_account: str, accrued_account: str,
@@ -1159,6 +1192,54 @@ def delete_standing_rule(
     return {"ok": True}
 
 
+def _generate_one_month(client_id: int, rule: StandingAccrualRule, target_month: str, db: Session) -> AccruedExpense:
+    """Create the synthetic tx + accrual JE + AccruedExpense row for a single
+    month of a standing rule. Transaction status is `pending` when the
+    accrual_date is on/before today (user should review) and `approved` for
+    future months (so they show up in the prepaid schedule but don't clutter
+    the Review Queue)."""
+    import calendar
+    sp_dt = datetime.strptime(target_month, "%Y-%m")
+    last_day = calendar.monthrange(sp_dt.year, sp_dt.month)[1]
+    accrual_date = datetime(sp_dt.year, sp_dt.month, last_day)
+    tx_status = (
+        TransactionStatus.pending
+        if accrual_date <= datetime.utcnow()
+        else TransactionStatus.approved
+    )
+    tx = _create_synthetic_transaction(
+        client_id, rule.vendor_name, rule.amount, accrual_date, db, status=tx_status,
+    )
+    accrual_je = _create_accrual_je(
+        tx_id=tx.id,
+        expense_account=rule.expense_account,
+        accrued_account=rule.accrued_account,
+        amount=rule.amount,
+        je_date=accrual_date,
+        vendor=rule.vendor_name,
+        service_period=target_month,
+        confidence=1.0,
+        reasoning=f"Standing accrual rule: {rule.description or rule.vendor_name}",
+        db=db,
+    )
+    ae = AccruedExpense(
+        client_id=client_id,
+        vendor_name=rule.vendor_name,
+        description=rule.description,
+        service_period=target_month,
+        amount=rule.amount,
+        accrual_je_id=accrual_je.id,
+        status=AccruedExpenseStatus.accrued,
+        ai_confidence=1.0,
+        ai_reasoning=f"Generated from standing rule #{rule.id}.",
+        standing_rule_id=rule.id,
+        debit_account=rule.expense_account,
+        credit_account=rule.accrued_account,
+    )
+    db.add(ae)
+    return ae
+
+
 @router.post("/standing-rules/generate")
 def generate_from_standing_rules(
     client_id: int,
@@ -1167,20 +1248,21 @@ def generate_from_standing_rules(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Generate accrual JEs for all active standing rules that haven't been generated
-    for the given month yet.
+    Generate accrual JEs for all active standing rules.
+
+    For an open-ended rule, generates just the target month.
+    For a rule with schedule_end_month set (fixed-window prepaid amortization),
+    generates every month from last_generated+1 (or the target month, whichever
+    is earlier) through schedule_end_month — so the full amortization schedule
+    becomes visible immediately.
     """
     _get_client(client_id, current_user, db)
     target_month = month or _current_month()
 
     try:
-        sp_dt = datetime.strptime(target_month, "%Y-%m")
+        datetime.strptime(target_month, "%Y-%m")
     except ValueError:
         raise HTTPException(400, "month must be YYYY-MM")
-
-    import calendar
-    last_day = calendar.monthrange(sp_dt.year, sp_dt.month)[1]
-    accrual_date = datetime(sp_dt.year, sp_dt.month, last_day)
 
     rules = (
         db.query(StandingAccrualRule)
@@ -1195,9 +1277,6 @@ def generate_from_standing_rules(
     skipped = []
 
     for rule in rules:
-        if rule.last_generated == target_month:
-            skipped.append(rule.vendor_name)
-            continue
         if rule.amount is None:
             rule.attention_needed = True
             rule.attention_month  = target_month
@@ -1208,43 +1287,39 @@ def generate_from_standing_rules(
             skipped.append(f"{rule.vendor_name} (no fixed amount — flagged for review)")
             continue
 
-        tx = _create_synthetic_transaction(client_id, rule.vendor_name, rule.amount, accrual_date, db)
-        accrual_je = _create_accrual_je(
-            tx_id=tx.id,
-            expense_account=rule.expense_account,
-            accrued_account=rule.accrued_account,
-            amount=rule.amount,
-            je_date=accrual_date,
-            vendor=rule.vendor_name,
-            service_period=target_month,
-            confidence=1.0,
-            reasoning=f"Standing accrual rule: {rule.description or rule.vendor_name}",
-            db=db,
-        )
+        # Determine which months to generate. For a fixed-window prepaid
+        # amortization, generate everything from (last_generated+1 or target,
+        # whichever comes first) through schedule_end_month.
+        if rule.schedule_end_month:
+            window_start = (
+                _next_month_str(rule.last_generated)
+                if rule.last_generated
+                else target_month
+            )
+            months_to_generate = _months_in_range(window_start, rule.schedule_end_month)
+        else:
+            months_to_generate = (
+                [] if rule.last_generated == target_month else [target_month]
+            )
 
-        ae = AccruedExpense(
-            client_id=client_id,
-            vendor_name=rule.vendor_name,
-            description=rule.description,
-            service_period=target_month,
-            amount=rule.amount,
-            accrual_je_id=accrual_je.id,
-            status=AccruedExpenseStatus.accrued,
-            ai_confidence=1.0,
-            ai_reasoning=f"Generated from standing rule #{rule.id}.",
-            standing_rule_id=rule.id,
-            # Set debit/credit so kind derivation routes prepaid-amortization
-            # rules (accrued_account contains 'prepaid') to the Prepaid
-            # Expenses tab rather than the Accruals tab.
-            debit_account=rule.expense_account,
-            credit_account=rule.accrued_account,
-        )
-        db.add(ae)
-        rule.last_generated = target_month
+        if not months_to_generate:
+            skipped.append(f"{rule.vendor_name} (already complete)")
+            continue
+
+        generated_for_rule: list[str] = []
+        for m in months_to_generate:
+            _generate_one_month(client_id, rule, m, db)
+            generated_for_rule.append(m)
+            rule.last_generated = m
+
         rule.attention_needed = False
         rule.attention_month  = None
         rule.attention_reason = None
-        generated.append(rule.vendor_name)
+        generated.append(
+            f"{rule.vendor_name} ({', '.join(generated_for_rule)})"
+            if len(generated_for_rule) > 1
+            else rule.vendor_name
+        )
 
     db.commit()
     return {"generated": generated, "skipped": skipped, "month": target_month}
