@@ -213,21 +213,22 @@ async function _tryRefreshToken(): Promise<string | null> {
 
 export async function apiFetch<T = unknown>(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit & { timeoutMs?: number } = {},
 ): Promise<T> {
   const token = getToken();
+  const { timeoutMs, ...fetchOptions } = options;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(options.headers as Record<string, string>),
+    ...(fetchOptions.headers as Record<string, string>),
   };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
   const res = await fetchWithTimeout(`${BASE_URL}${path}`, {
-    ...options,
+    ...fetchOptions,
     headers,
-  });
+  }, timeoutMs);
 
   if (!res.ok) {
     if (res.status === 401) {
@@ -235,9 +236,9 @@ export async function apiFetch<T = unknown>(
       if (newToken) {
         // Retry the original request with the new token
         const retryRes = await fetchWithTimeout(`${BASE_URL}${path}`, {
-          ...options,
+          ...fetchOptions,
           headers: { ...headers, "Authorization": `Bearer ${newToken}` },
-        });
+        }, timeoutMs);
         if (retryRes.ok) {
           if (retryRes.status === 204) return undefined as unknown as T;
           return retryRes.json() as Promise<T>;
@@ -708,8 +709,11 @@ export function syncMercury(
   customStart?: string,
   customEnd?: string,
 ): Promise<MercurySyncResponse> {
+  // Mercury sync pulls a date range from Mercury + downloads PDF
+  // attachments + applies coding. Large ranges can take minutes.
   return apiFetch<MercurySyncResponse>("/mercury/sync", {
     method: "POST",
+    timeoutMs: 5 * 60 * 1000,
     body: JSON.stringify({
       client_id: clientId ?? null,
       date_range: dateRange,
@@ -894,9 +898,12 @@ export function getQboAccounts(clientId: number, refresh = false): Promise<strin
 }
 
 export function syncToQbo(clientId: number, markExported = true, force = false): Promise<QboSyncResult> {
+  // QBO sync pushes JEs to Intuit's API one at a time and legitimately runs
+  // for minutes on large batches. Override the default 30s fetch timeout —
+  // Railway's edge timeout (~5 minutes) is the real upper bound.
   return apiFetch<QboSyncResult>(
     `/clients/${clientId}/qbo/sync?mark_exported=${markExported}&force=${force}`,
-    { method: "POST" }
+    { method: "POST", timeoutMs: 5 * 60 * 1000 },
   );
 }
 
