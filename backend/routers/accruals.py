@@ -72,24 +72,28 @@ def _derive_status(ae: AccruedExpense, je: Optional[JournalEntry], this_month: s
     """
     Map an AccruedExpense to a user-facing status label.
 
-      - 'cleared'    — cash payment matched (ae.status == cleared)
-      - 'recognized' — accrual JE approved/exported to QBO
+      - 'cleared'    — accrual paid (status==cleared) OR prepaid recognized
+      - 'recognized' — accrual JE approved/exported to QBO (cash still pending)
       - 'pending'    — JE in Review Queue, not yet approved
-      - 'upcoming'   — future-month entry, no JE yet
-      - 'overdue'    — past-month entry, no JE yet
+      - 'upcoming'   — service period hasn't arrived yet (with or without a JE)
+      - 'overdue'    — past-month entry, no JE
     """
     if ae.status == AccruedExpenseStatus.cleared:
         return "cleared"
-    if ae.accrual_je_id and je is not None:
-        if je.approved_at or je.exported_at:
-            return "recognized"
-        return "pending"
-    # No JE yet — compare period to current month
+    # Future-period rows: even if a JE was pre-created (prepaid amortization
+    # schedule), the period hasn't arrived so the row isn't actionable.
     if ae.service_period > this_month:
         return "upcoming"
+    if ae.accrual_je_id and je is not None:
+        if je.approved_at or je.exported_at:
+            # Prepaid amortization: cash was paid upfront, no later payment
+            # to match — recognition IS the end state, so show as cleared.
+            is_prepaid = "prepaid" in (ae.credit_account or "").lower()
+            return "cleared" if is_prepaid else "recognized"
+        return "pending"
     if ae.service_period < this_month:
         return "overdue"
-    return "upcoming"  # current month, not yet released → upcoming
+    return "upcoming"
 
 
 def _create_synthetic_transaction(
