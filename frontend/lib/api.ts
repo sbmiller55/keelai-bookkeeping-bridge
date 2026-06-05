@@ -249,7 +249,17 @@ export async function apiFetch<T = unknown>(
     }
     const errorBody = await res.json().catch(() => ({ detail: res.statusText }));
     const detail = errorBody.detail;
-    const message = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join(", ") : "Request failed";
+    let message: string;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (Array.isArray(detail)) {
+      message = detail.map((e: { msg?: string }) => e.msg ?? JSON.stringify(e)).join(", ");
+    } else if (detail && typeof detail === "object" && typeof (detail as { message?: unknown }).message === "string") {
+      // Structured error (e.g. coa_validation_failed)
+      message = (detail as { message: string }).message;
+    } else {
+      message = "Request failed";
+    }
     throw new Error(message);
   }
 

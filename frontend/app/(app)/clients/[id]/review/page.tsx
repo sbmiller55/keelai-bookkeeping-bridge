@@ -1113,8 +1113,14 @@ export default function ReviewQueuePage() {
   }
 
   async function handleApprove(txId: number) {
-    await updateTransactionStatus(txId, "approved");
-    setItems((prev) => prev.filter((t) => t.id !== txId));
+    try {
+      await updateTransactionStatus(txId, "approved");
+      setItems((prev) => prev.filter((t) => t.id !== txId));
+    } catch (err: unknown) {
+      // Backend rejects (422) when a JE references a non-QBO account.
+      // Surface the message so the user knows what to fix.
+      alert(err instanceof Error ? err.message : "Approve failed");
+    }
   }
 
   async function handleReject(txId: number) {
@@ -1164,9 +1170,27 @@ export default function ReviewQueuePage() {
     const approvable = items.filter((t) => t.journal_entries.length > 0);
     setApprovingAll(true);
     try {
-      await Promise.all(approvable.map((tx) => updateTransactionStatus(tx.id, "approved")));
-      const ids = new Set(approvable.map((t) => t.id));
+      // Run sequentially so we can collect per-tx COA-validation failures.
+      const succeeded: number[] = [];
+      const failures: string[] = [];
+      for (const tx of approvable) {
+        try {
+          await updateTransactionStatus(tx.id, "approved");
+          succeeded.push(tx.id);
+        } catch (err: unknown) {
+          const label = tx.counterparty_name || tx.description || `txn ${tx.id}`;
+          failures.push(`${label}: ${err instanceof Error ? err.message : "approve failed"}`);
+        }
+      }
+      const ids = new Set(succeeded);
       setItems((prev) => prev.filter((t) => !ids.has(t.id)));
+      if (failures.length > 0) {
+        alert(
+          `${succeeded.length} approved, ${failures.length} failed.\n\n` +
+          failures.slice(0, 10).join("\n\n") +
+          (failures.length > 10 ? `\n\n…and ${failures.length - 10} more` : ""),
+        );
+      }
     } finally {
       setApprovingAll(false);
     }

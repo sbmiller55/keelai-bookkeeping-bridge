@@ -486,19 +486,88 @@ def update_transaction(
     tx = _get_transaction_or_404(transaction_id, current_user, db)
     prev_status = tx.status
     fields = payload.model_dump(exclude_unset=True)
+
+    new_status_str  = str(fields.get("status") or "").lower()
+    prev_status_str = str(prev_status.value if hasattr(prev_status, "value") else prev_status).lower()
+
+    # Hard COA validation at approval time. The dropdown lock prevents bad
+    # account names from being typed in the Review Queue, but rules and AI
+    # coding can still produce JEs with names that don't exist in the live
+    # QBO chart of accounts (or that point at a parent/header account QBO
+    # rejects on JE import). Block the approval here so the user finds out
+    # NOW, not when the export downloads / sync fails.
+    if new_status_str == "approved" and prev_status_str != "approved":
+        client = (
+            db.query(models.Client)
+            .filter(models.Client.id == tx.client_id, models.Client.user_id == current_user.id)
+            .first()
+        )
+        bad_names = _coa_violations_for_transaction(tx, client, db)
+        if bad_names:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "coa_validation_failed",
+                    "message": (
+                        "Cannot approve: journal entry references account name(s) not in your "
+                        "live QBO chart of accounts: " + ", ".join(f'"{n}"' for n in bad_names) +
+                        ". Fix the account name in the Review Queue (use the dropdown) before approving."
+                    ),
+                    "bad_account_names": bad_names,
+                },
+            )
+
     for field, value in fields.items():
         setattr(tx, field, value)
 
     # Auto-clear linked accruals when a payment transitions to approved.
     # Catches both AI-matched payments and manually coded DR Accrued / CR Bank entries.
-    new_status_str = str(fields.get("status") or "").lower()
-    prev_status_str = str(prev_status.value if hasattr(prev_status, "value") else prev_status).lower()
     if new_status_str == "approved" and prev_status_str != "approved":
         _auto_clear_accruals_for_transaction(tx, db)
 
     db.commit()
     db.refresh(tx)
     return tx
+
+
+def _coa_violations_for_transaction(
+    tx: models.Transaction,
+    client: Optional[models.Client],
+    db: Session,
+) -> list[str]:
+    """Return the distinct list of JE account names referenced by this
+    transaction that don't exist in the client's live QBO postable COA.
+    Empty list = OK to approve."""
+    if not client:
+        return []
+    try:
+        import ai_coder as _ai
+        chart = _ai._resolve_chart(client)
+        coa_set = _ai._parse_coa_set(chart)
+    except Exception:
+        coa_set = None
+    if not coa_set:
+        # If we can't reach QBO we don't want to lock the user out of
+        # approvals — log the gap and pass through.
+        return []
+    always_valid = {a.lower() for a in _ai._ALWAYS_VALID_ACCOUNTS}
+    valid = coa_set | always_valid
+
+    jes = (
+        db.query(models.JournalEntry)
+        .filter(models.JournalEntry.transaction_id == tx.id)
+        .all()
+    )
+    bad: list[str] = []
+    seen: set[str] = set()
+    for je in jes:
+        for name in (je.debit_account, je.credit_account):
+            if not name:
+                continue
+            if name.lower() not in valid and name not in seen:
+                bad.append(name)
+                seen.add(name)
+    return bad
 
 
 def _auto_clear_accruals_for_transaction(tx: models.Transaction, db: Session) -> None:
