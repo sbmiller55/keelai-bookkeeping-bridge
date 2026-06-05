@@ -89,6 +89,12 @@ def _migrate_db():
         # QBO chart-of-accounts cache (refreshed monthly on the 1st)
         ("clients",               "qbo_coa_cache",        "TEXT"),
         ("clients",               "qbo_coa_cached_at",    "TIMESTAMP"),
+        # Standing-rule attention flags (set when monthly auto-generation
+        # can't proceed because the rule has no fixed amount; cleared when
+        # the user creates an accrual for that rule's vendor+month)
+        ("standing_accrual_rules", "attention_needed",     "BOOLEAN DEFAULT FALSE"),
+        ("standing_accrual_rules", "attention_month",      "TEXT"),
+        ("standing_accrual_rules", "attention_reason",     "TEXT"),
     ]
     is_sqlite = os.getenv("DATABASE_URL", "sqlite").startswith("sqlite")
     with engine.connect() as conn:
@@ -187,7 +193,13 @@ def _run_monthly_standing_accrual_generation():
                     skipped.append(f"{rule.vendor_name} (already generated)")
                     continue
                 if rule.amount is None:
-                    skipped.append(f"{rule.vendor_name} (no fixed amount)")
+                    rule.attention_needed = True
+                    rule.attention_month  = target_month
+                    rule.attention_reason = (
+                        "Variable-amount vendor: create the accrual for this "
+                        "month manually with the actual invoice/estimate amount."
+                    )
+                    skipped.append(f"{rule.vendor_name} (no fixed amount — flagged for review)")
                     continue
                 try:
                     tx = _create_synthetic_transaction(
@@ -218,8 +230,14 @@ def _run_monthly_standing_accrual_generation():
                         standing_rule_id=rule.id,
                     ))
                     rule.last_generated = target_month
+                    rule.attention_needed = False
+                    rule.attention_month  = None
+                    rule.attention_reason = None
                     generated.append(rule.vendor_name)
                 except Exception as exc:
+                    rule.attention_needed = True
+                    rule.attention_month  = target_month
+                    rule.attention_reason = f"Generation failed: {exc}"
                     skipped.append(f"{rule.vendor_name} (error: {exc})")
             try:
                 db.commit()

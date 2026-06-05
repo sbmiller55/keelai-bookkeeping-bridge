@@ -384,6 +384,14 @@ class StandingAccrualRule(Base):
     active = Column(Boolean, default=True, nullable=False)
     last_generated = Column(String(7), nullable=True)  # "YYYY-MM"
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # When the monthly scheduler can't auto-generate this rule (typically
+    # because amount is None — a variable-amount vendor), we flag the rule
+    # so the UI can surface it to the user. The flag clears when the user
+    # creates an accrual for that vendor+month or when the next month's
+    # auto-generation succeeds.
+    attention_needed = Column(Boolean, default=False, nullable=False)
+    attention_month  = Column(String(7), nullable=True)   # "YYYY-MM"
+    attention_reason = Column(String, nullable=True)
 
 
 class FixedAsset(Base):

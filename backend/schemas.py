@@ -537,6 +537,9 @@ class StandingAccrualRuleRead(BaseModel):
     active: bool
     last_generated: Optional[str] = None
     created_at: datetime
+    attention_needed: bool = False
+    attention_month:  Optional[str] = None
+    attention_reason: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

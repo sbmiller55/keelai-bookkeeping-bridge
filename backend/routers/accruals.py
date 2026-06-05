@@ -382,6 +382,26 @@ def create_accrual(
         ai_reasoning="Manually created.",
     )
     db.add(ae)
+
+    # If a standing rule was waiting on the user to create this accrual
+    # (vendor + service period match, attention flag set), clear the flag
+    # — the user just resolved it.
+    flagged_rule = (
+        db.query(StandingAccrualRule)
+        .filter(
+            StandingAccrualRule.client_id == client_id,
+            StandingAccrualRule.vendor_name == body.vendor_name,
+            StandingAccrualRule.attention_needed == True,
+            StandingAccrualRule.attention_month == body.service_period,
+        )
+        .first()
+    )
+    if flagged_rule:
+        flagged_rule.attention_needed = False
+        flagged_rule.attention_month  = None
+        flagged_rule.attention_reason = None
+        flagged_rule.last_generated   = body.service_period
+
     db.commit()
     db.refresh(ae)
     return AccruedExpenseRead.model_validate(ae)
@@ -1179,7 +1199,13 @@ def generate_from_standing_rules(
             skipped.append(rule.vendor_name)
             continue
         if rule.amount is None:
-            skipped.append(f"{rule.vendor_name} (no fixed amount)")
+            rule.attention_needed = True
+            rule.attention_month  = target_month
+            rule.attention_reason = (
+                "Variable-amount vendor: create the accrual for this "
+                "month manually with the actual invoice/estimate amount."
+            )
+            skipped.append(f"{rule.vendor_name} (no fixed amount — flagged for review)")
             continue
 
         tx = _create_synthetic_transaction(client_id, rule.vendor_name, rule.amount, accrual_date, db)
@@ -1210,6 +1236,9 @@ def generate_from_standing_rules(
         )
         db.add(ae)
         rule.last_generated = target_month
+        rule.attention_needed = False
+        rule.attention_month  = None
+        rule.attention_reason = None
         generated.append(rule.vendor_name)
 
     db.commit()

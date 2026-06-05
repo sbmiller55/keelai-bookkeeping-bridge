@@ -95,14 +95,56 @@ export default function PaymentsPage() {
   const { setCurrentPage, setPageContext } = useChatContext();
 
   const [tab, setTab] = useState<Tab>("invoices");
+  const [attentionRules, setAttentionRules] = useState<StandingAccrualRule[]>([]);
 
   useEffect(() => {
     setCurrentPage("payments");
     return () => setPageContext(null);
   }, [setCurrentPage, setPageContext]);
 
+  // Re-poll standing rules whenever the active tab changes (a manual generate
+  // or a new manual accrual on another tab can clear the flag).
+  useEffect(() => {
+    if (!clientId) return;
+    getStandingRules(clientId)
+      .then((rules) => setAttentionRules(rules.filter((r) => r.attention_needed)))
+      .catch(() => {});
+  }, [clientId, tab]);
+
   return (
     <div className="max-w-6xl">
+      {attentionRules.length > 0 && (
+        <div className="mb-4 border border-amber-700 bg-amber-950/40 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-amber-200">
+                {attentionRules.length} standing accrual rule{attentionRules.length > 1 ? "s need" : " needs"} your attention
+              </p>
+              <p className="text-xs text-amber-300/80 mt-1">
+                These rules couldn&apos;t be auto-generated this month. Click the Standing Rules tab and create the accrual manually with the correct amount — the flag clears once you do.
+              </p>
+              <ul className="mt-3 space-y-1.5">
+                {attentionRules.map((r) => (
+                  <li key={r.id} className="text-xs text-amber-100">
+                    <button
+                      onClick={() => setTab("standing-rules")}
+                      className="text-left hover:underline"
+                    >
+                      <span className="font-semibold">{r.vendor_name}</span>
+                      {r.attention_month && <span className="text-amber-300/70 ml-1.5">({r.attention_month})</span>}
+                      {r.attention_reason && <span className="text-amber-200/80 block ml-0 mt-0.5">{r.attention_reason}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="mb-6 border-b border-gray-800">
         <nav className="flex gap-1">
@@ -110,7 +152,7 @@ export default function PaymentsPage() {
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors capitalize ${
+              className={`px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors capitalize relative ${
                 tab === t
                   ? "bg-gray-900 border border-b-gray-900 border-gray-700 text-white -mb-px"
                   : "text-gray-400 hover:text-gray-200"
@@ -119,6 +161,11 @@ export default function PaymentsPage() {
               {t === "standing-rules" ? "Standing Rules"
                 : t === "prepaid-expenses" ? "Prepaid Expenses"
                 : t.charAt(0).toUpperCase() + t.slice(1)}
+              {t === "standing-rules" && attentionRules.length > 0 && (
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-amber-600 text-amber-50 text-[10px] font-semibold">
+                  {attentionRules.length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -1756,8 +1803,20 @@ function StandingRulesTab({ clientId }: { clientId: number }) {
             </thead>
             <tbody>
               {rules.map((rule) => (
-                <tr key={rule.id} className={`border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors ${!rule.active ? "opacity-50" : ""}`}>
-                  <td className="px-4 py-3 text-white text-xs font-medium">{rule.vendor_name}</td>
+                <tr key={rule.id} className={`border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors ${!rule.active ? "opacity-50" : ""} ${rule.attention_needed ? "bg-amber-950/20" : ""}`}>
+                  <td className="px-4 py-3 text-white text-xs font-medium">
+                    <div className="flex items-center gap-2">
+                      {rule.attention_needed && (
+                        <span title={rule.attention_reason || "Needs attention"} className="inline-block w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                      )}
+                      <span>{rule.vendor_name}</span>
+                    </div>
+                    {rule.attention_needed && rule.attention_month && (
+                      <p className="text-[10px] text-amber-300/80 mt-1 font-normal">
+                        Needs accrual for {rule.attention_month}
+                      </p>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{rule.description || "—"}</td>
                   <td className="px-4 py-3 text-gray-300 text-xs">{rule.expense_account}</td>
                   <td className="px-4 py-3 text-gray-300 text-xs">{rule.accrued_account}</td>

@@ -1080,6 +1080,9 @@ export interface StandingAccrualRule {
   active: boolean;
   last_generated: string | null;
   created_at: string;
+  attention_needed?: boolean;
+  attention_month?: string | null;
+  attention_reason?: string | null;
 }
 
 export function getAccruals(clientId: number, status?: string): Promise<{ summary: AccrualSummary; accruals: AccruedExpense[] }> {
