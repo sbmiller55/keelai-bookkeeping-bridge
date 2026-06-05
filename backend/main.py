@@ -114,6 +114,25 @@ def _migrate_db():
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"))
         conn.commit()
 
+    # Postgres enums need explicit ALTER TYPE to accept new values added on
+    # the Python side. SQLite stores enums as plain text, so it's a no-op
+    # there. Each ALTER TYPE ... ADD VALUE is idempotent via IF NOT EXISTS
+    # (PG 9.6+).
+    enum_additions = [
+        ("transactionstatus", "scheduled"),
+    ]
+    if not is_sqlite:
+        # ALTER TYPE can't run inside an explicit transaction; use AUTOCOMMIT.
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for type_name, new_value in enum_additions:
+                try:
+                    conn.execute(text(
+                        f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{new_value}'"
+                    ))
+                except Exception as exc:
+                    sys_stderr_write = __import__("sys").stderr.write
+                    sys_stderr_write(f"[migrate] enum add failed for {type_name}={new_value!r}: {exc}\n")
+
 
 def _run_monthly_auto_release():
     """Scheduler job: release all accruals / depreciation / revenue for the current month."""
