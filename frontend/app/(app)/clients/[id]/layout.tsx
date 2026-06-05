@@ -24,12 +24,44 @@ const NAV_MORE = [
   { label: "Classes", suffix: "/classes" },
 ];
 
+const SIDEBAR_COLLAPSED_KEY = "bb_sidebar_collapsed";
+
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const { id } = useParams<{ id: string }>();
   const pathname = usePathname();
   const [client, setClient] = useState<Client | null>(null);
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // Restore persisted sidebar state on mount
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined") return;
+      const v = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+      if (v === "1") setSidebarCollapsed(true);
+    } catch { /* localStorage may be blocked */ }
+  }, []);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0"); } catch { /* ignore */ }
+      return next;
+    });
+  };
+
+  // Cmd+\ (or Ctrl+\) to toggle the sidebar — same shortcut as VS Code etc.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+        e.preventDefault();
+        toggleSidebar();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -70,10 +102,15 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
   return (
     <ChatContextProvider>
-    <div className="flex min-h-[calc(100vh-49px)]">
+    <div className="flex min-h-[calc(100vh-49px)] relative">
       {/* Sidebar */}
-      <aside className="w-52 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col">
-        <div className="px-4 py-4 border-b border-gray-800">
+      <aside
+        className={`shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${
+          sidebarCollapsed ? "w-0 border-r-0" : "w-52"
+        }`}
+        aria-hidden={sidebarCollapsed}
+      >
+        <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between gap-2">
           <Link
             href="/clients"
             className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
@@ -83,6 +120,16 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             </svg>
             All Clients
           </Link>
+          <button
+            onClick={toggleSidebar}
+            title="Collapse sidebar (⌘\\)"
+            aria-label="Collapse sidebar"
+            className="p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors shrink-0"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
+            </svg>
+          </button>
         </div>
 
         <div className="px-4 py-4 border-b border-gray-800">
@@ -125,6 +172,20 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           )}
         </nav>
       </aside>
+
+      {/* Floating expand button, visible only when the sidebar is collapsed */}
+      {sidebarCollapsed && (
+        <button
+          onClick={toggleSidebar}
+          title="Expand sidebar (⌘\\)"
+          aria-label="Expand sidebar"
+          className="fixed left-0 top-20 z-30 bg-gray-900 border border-l-0 border-gray-700 hover:bg-gray-800 hover:border-indigo-600 text-gray-400 hover:text-white rounded-r-md p-1.5 shadow-lg transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+          </svg>
+        </button>
+      )}
 
       {/* Page content */}
       <main className="flex-1 p-8 overflow-auto min-w-0">
