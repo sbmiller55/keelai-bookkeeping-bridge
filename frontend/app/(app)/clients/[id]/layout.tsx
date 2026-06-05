@@ -110,7 +110,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         }`}
         aria-hidden={sidebarCollapsed}
       >
-        <div className="px-4 py-4 border-b border-gray-800 flex items-center justify-between gap-2">
+        <div className="px-4 py-4 border-b border-gray-800">
           <Link
             href="/clients"
             className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
@@ -120,16 +120,6 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             </svg>
             All Clients
           </Link>
-          <button
-            onClick={toggleSidebar}
-            title="Collapse sidebar (⌘\\)"
-            aria-label="Collapse sidebar"
-            className="p-1 rounded text-gray-500 hover:text-white hover:bg-gray-800 transition-colors shrink-0"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
-            </svg>
-          </button>
         </div>
 
         <div className="px-4 py-4 border-b border-gray-800">
@@ -173,19 +163,25 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         </nav>
       </aside>
 
-      {/* Floating expand button, visible only when the sidebar is collapsed */}
-      {sidebarCollapsed && (
-        <button
-          onClick={toggleSidebar}
-          title="Expand sidebar (⌘\\)"
-          aria-label="Expand sidebar"
-          className="fixed left-0 top-20 z-30 bg-gray-900 border border-l-0 border-gray-700 hover:bg-gray-800 hover:border-indigo-600 text-gray-400 hover:text-white rounded-r-md p-1.5 shadow-lg transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+      {/* Floating toggle, always visible at the top-left of the viewport so
+          it stays reachable even when the main content is scrolled. Slides
+          horizontally to the edge of the (collapsed/expanded) sidebar. */}
+      <button
+        onClick={toggleSidebar}
+        title={sidebarCollapsed ? "Expand sidebar (⌘\\)" : "Collapse sidebar (⌘\\)"}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        className={`fixed top-20 z-30 bg-gray-900 border border-l-0 border-gray-700 hover:bg-gray-800 hover:border-indigo-600 text-gray-400 hover:text-white rounded-r-md p-1.5 shadow-lg transition-all duration-200 ease-out ${
+          sidebarCollapsed ? "left-0" : "left-52"
+        }`}
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          {sidebarCollapsed ? (
             <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-          </svg>
-        </button>
-      )}
+          ) : (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
+          )}
+        </svg>
+      </button>
 
       {/* Page content */}
       <main className="flex-1 p-8 overflow-auto min-w-0">
