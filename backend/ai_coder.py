@@ -132,20 +132,11 @@ def _validate_account(name: str, coa_set: Optional[set]) -> str:
     return f"Uncoded [{name}]"
 
 
-# Parent/header accounts that must never appear in journal entries
-_PARENT_ACCOUNTS = {
-    "Cash",
-    "Accumulated amortization",
-    "Fixed Assets",
-    "Intangible Asset",
-    "Payroll wages and tax to pay",
-    "Short-term business loans",
-    "Preferred stock",
-    "Insurance",
-    "Legal, Finance & Accounting services",
-    "Meals",
-    "Travel",
-}
+# (Parent-account blocklist removed — QBO permits journal entries posted to
+# parent accounts, so we let the live COA decide what's valid. Kept empty so
+# downstream callers that still reference _PARENT_ACCOUNTS continue to work
+# without changes.)
+_PARENT_ACCOUNTS: set[str] = set()
 
 # ── Prepaid / amortization helpers ────────────────────────────────────────────
 
@@ -364,12 +355,10 @@ def _build_system(chart_of_accounts: Optional[str], policy: Optional[str]) -> st
         "- CRITICAL: Every account name you return MUST appear verbatim in the Chart of Accounts provided.",
         "  Never invent account names. If you are unsure, pick the closest match from the COA list.",
         "- Exception: 'Interest Expense' for loan interest and 'Interest Earned' for bank interest are always valid.",
-        "- NEVER use parent/header accounts. Use the most specific child account.",
-        "- Use the specific bank account name (e.g. 'Mercury Checking (9882) - 1'), never a parent like 'Cash'.",
+        "- Use the specific bank account name (e.g. 'Mercury Checking (9882) - 1') when there is a specific match.",
     ]
     if chart_of_accounts:
-        parent_note = "\n\n## Parent Accounts — DO NOT USE\n" + "\n".join(f"- {a}" for a in sorted(_PARENT_ACCOUNTS))
-        parts.append(f"\n## Chart of Accounts (use EXACT names)\n{chart_of_accounts}{parent_note}")
+        parts.append(f"\n## Chart of Accounts (use EXACT names)\n{chart_of_accounts}")
     if policy:
         parts.append(f"\n## Accounting Policy\n{policy}")
     return "\n".join(parts)
@@ -534,8 +523,7 @@ def code_outgoing_payment_with_invoice(transaction, invoice_text: str, client_ob
     ]
 
     if chart:
-        parent_note = "\n\n## Parent Accounts — DO NOT USE\n" + "\n".join(f"- {a}" for a in sorted(_PARENT_ACCOUNTS))
-        system_parts.append(f"\n## Chart of Accounts\n{chart[:4000]}{parent_note}")
+        system_parts.append(f"\n## Chart of Accounts\n{chart[:4000]}")
     if policy:
         system_parts.append(f"\n## Accounting Policy\n{policy[:2000]}")
 
