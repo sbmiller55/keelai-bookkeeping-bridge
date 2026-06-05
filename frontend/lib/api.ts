@@ -883,10 +883,6 @@ export function getQboAccounts(clientId: number, refresh = false): Promise<strin
     .then((r) => r.accounts);
 }
 
-export function ensureQboAccounts(clientId: number): Promise<{ created: string[]; already_existed: string[]; errors: string[] }> {
-  return apiFetch(`/clients/${clientId}/qbo/ensure-accounts`, { method: "POST" });
-}
-
 export function syncToQbo(clientId: number, markExported = true, force = false): Promise<QboSyncResult> {
   return apiFetch<QboSyncResult>(
     `/clients/${clientId}/qbo/sync?mark_exported=${markExported}&force=${force}`,

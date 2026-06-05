@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, ensureQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings } from "@/lib/api";
+import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings } from "@/lib/api";
 
 function UploadField({
   label,
@@ -77,8 +77,6 @@ export default function ClientSettingsPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [qboSyncing, setQboSyncing] = useState(false);
   const [qboSyncResult, setQboSyncResult] = useState<string | null>(null);
-  const [qboEnsuring, setQboEnsuring] = useState(false);
-  const [qboEnsureResult, setQboEnsureResult] = useState<string | null>(null);
 
   const [qboStatus, setQboStatus] = useState<QboStatus | null>(null);
   const [qboConnecting, setQboConnecting] = useState(false);
@@ -180,23 +178,6 @@ export default function ClientSettingsPage() {
     }
   }
 
-  async function handleEnsureAccounts() {
-    setQboEnsuring(true);
-    setQboEnsureResult(null);
-    try {
-      const result = await ensureQboAccounts(clientId);
-      const msgs = [];
-      if (result.created.length > 0) msgs.push(`Created: ${result.created.join(", ")}`);
-      if (result.already_existed.length > 0) msgs.push(`Already existed: ${result.already_existed.length}`);
-      if (result.errors.length > 0) msgs.push(`Errors: ${result.errors.join("; ")}`);
-      setQboEnsureResult(msgs.join(" · ") || "Done");
-    } catch (err: unknown) {
-      setQboEnsureResult(err instanceof Error ? err.message : "Failed");
-    } finally {
-      setQboEnsuring(false);
-    }
-  }
-
   async function handleSaveBillcom() {
     setBillcomSaving(true);
     setBillcomError(null);
@@ -294,20 +275,6 @@ export default function ClientSettingsPage() {
                 <p className="text-amber-300/70 mt-1">Live QBO calls (account refresh, journal entry sync) will fail until you reconnect. The cached chart of accounts continues to work in the meantime.</p>
               </div>
             )}
-            <div>
-              <button
-                onClick={handleEnsureAccounts}
-                disabled={qboEnsuring}
-                className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
-              >
-                {qboEnsuring
-                  ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Setting up…</>
-                  : "Set up depreciation & amortization accounts in QBO"}
-              </button>
-              {qboEnsureResult && (
-                <p className="text-xs text-gray-400 mt-1.5">{qboEnsureResult}</p>
-              )}
-            </div>
             <button
               onClick={handleQboDisconnect}
               disabled={qboDisconnecting}
