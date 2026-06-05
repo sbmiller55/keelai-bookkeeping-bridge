@@ -903,6 +903,7 @@ def create_standing_rule(
         accrued_account=body.accrued_account,
         amount=body.amount,
         active=True,
+        schedule_end_month=body.schedule_end_month,
     )
     db.add(rule)
     db.commit()
@@ -925,7 +926,7 @@ def update_standing_rule(
     if not rule:
         raise HTTPException(404, "Standing rule not found")
 
-    for field in ("vendor_name", "description", "expense_account", "accrued_account", "amount", "active", "last_generated"):
+    for field in ("vendor_name", "description", "expense_account", "accrued_account", "amount", "active", "last_generated", "schedule_end_month"):
         val = getattr(body, field, None)
         if val is not None:
             setattr(rule, field, val)
