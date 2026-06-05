@@ -172,6 +172,34 @@ def disconnect(
     return {"ok": True}
 
 
+@router.get("/_debug_raw_accounts")
+def _debug_raw_accounts(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Temporary diagnostic: return every Account row Intuit gives us
+    (active and inactive), so we can see what the API actually exposes
+    for parent/header accounts. REMOVE after debugging."""
+    client = _get_client(client_id, current_user, db)
+    qbo_c  = _get_qbo_client(client)
+    rows = qbo_c._query("SELECT * FROM Account STARTPOSITION 1 MAXRESULTS 1000")
+    out = [
+        {
+            "Name": r.get("Name"),
+            "FullyQualifiedName": r.get("FullyQualifiedName"),
+            "Active": r.get("Active"),
+            "AccountType": r.get("AccountType"),
+            "SubAccount": r.get("SubAccount"),
+            "ParentRefValue": (r.get("ParentRef") or {}).get("value"),
+            "Id": r.get("Id"),
+        }
+        for r in rows
+    ]
+    _persist_token_refresh(client, qbo_c, db)
+    return {"count": len(out), "accounts": out}
+
+
 def _cache_is_current(client: Client) -> bool:
     """Cache is current if it was refreshed in the same calendar month as today (UTC)."""
     if not client.qbo_coa_cache or not client.qbo_coa_cached_at:
