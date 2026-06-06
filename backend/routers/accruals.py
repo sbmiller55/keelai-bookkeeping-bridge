@@ -74,17 +74,24 @@ def _derive_status(ae: AccruedExpense, je: Optional[JournalEntry], this_month: s
 
       - 'cleared'    — accrual paid (status==cleared) OR prepaid recognized
       - 'recognized' — accrual JE approved/exported to QBO (cash still pending)
-      - 'pending'    — JE in Review Queue, not yet approved
-      - 'upcoming'   — service period hasn't arrived yet (with or without a JE)
+      - 'pending'    — JE exists, date has arrived, not yet approved
+      - 'upcoming'   — service period or JE date is still in the future
       - 'overdue'    — past-month entry, no JE
     """
     if ae.status == AccruedExpenseStatus.cleared:
         return "cleared"
+    now = datetime.utcnow()
     # Future-period rows: even if a JE was pre-created (prepaid amortization
     # schedule), the period hasn't arrived so the row isn't actionable.
     if ae.service_period > this_month:
         return "upcoming"
     if ae.accrual_je_id and je is not None:
+        # The JE is dated to end-of-period. For the current month, the JE
+        # date is still in the future until month-end — show as upcoming
+        # rather than pending so the user isn't asked to approve a JE for
+        # a period that hasn't closed yet.
+        if je.je_date and je.je_date > now:
+            return "upcoming"
         if je.approved_at or je.exported_at:
             # Prepaid amortization: cash was paid upfront, no later payment
             # to match — recognition IS the end state, so show as cleared.

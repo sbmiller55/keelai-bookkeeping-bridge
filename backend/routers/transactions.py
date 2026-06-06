@@ -525,6 +525,20 @@ def update_transaction(
     if new_status_str == "approved" and prev_status_str != "approved":
         _auto_clear_accruals_for_transaction(tx, db)
 
+    # Keep JE.exported_at in sync when the user marks a transaction as
+    # exported (e.g. via "Mark Selected as Imported" on the Export page).
+    # Otherwise the Prepaid/Accruals derived status stays "pending" forever
+    # even though the QBO export is done from the user's perspective.
+    if new_status_str == "exported" and prev_status_str != "exported":
+        _now = datetime.utcnow()
+        for je in (
+            db.query(models.JournalEntry)
+            .filter(models.JournalEntry.transaction_id == tx.id)
+            .all()
+        ):
+            if not je.exported_at:
+                je.exported_at = _now
+
     db.commit()
     db.refresh(tx)
     return tx
