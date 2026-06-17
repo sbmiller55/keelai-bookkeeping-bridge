@@ -103,6 +103,33 @@ def _derive_status(ae: AccruedExpense, je: Optional[JournalEntry], this_month: s
     return "upcoming"
 
 
+def _has_existing_accrual_for_period(
+    client_id: int, vendor: str, target_month: str, db: Session,
+) -> Optional[AccruedExpense]:
+    """Return an existing AccruedExpense row for this vendor + month, or None.
+
+    Match is case- and whitespace-insensitive so an invoice imported as
+    'Morrison & Foerster LLP' still satisfies a rule stored as
+    'MORRISON & FOERSTER LLP'. Used by the standing-rule generator so it
+    skips flagging the rule when the user has already booked the period
+    via an invoice upload or a manual accrual."""
+    if not vendor:
+        return None
+    needle = vendor.strip().lower()
+    rows = (
+        db.query(AccruedExpense)
+        .filter(
+            AccruedExpense.client_id == client_id,
+            AccruedExpense.service_period == target_month,
+        )
+        .all()
+    )
+    for r in rows:
+        if (r.vendor_name or "").strip().lower() == needle:
+            return r
+    return None
+
+
 def _create_synthetic_transaction(
     client_id: int,
     vendor: str,
@@ -1289,6 +1316,21 @@ def generate_from_standing_rules(
     skipped = []
 
     for rule in rules:
+        # If an accrual has already been booked for this vendor + target
+        # month (typically because the user uploaded an invoice that
+        # auto-generated the JE), there's nothing for us to do here.
+        # Clear any stale attention flag and move on without flagging.
+        existing = _has_existing_accrual_for_period(client_id, rule.vendor_name, target_month, db)
+        if existing:
+            if rule.last_generated != target_month:
+                rule.last_generated = target_month
+            rule.attention_needed = False
+            rule.attention_month  = None
+            rule.attention_reason = None
+            source_label = "invoice" if existing.source_transaction_id else "manual entry"
+            skipped.append(f"{rule.vendor_name} (already booked via {source_label})")
+            continue
+
         if rule.amount is None:
             rule.attention_needed = True
             rule.attention_month  = target_month

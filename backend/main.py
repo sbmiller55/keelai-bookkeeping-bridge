@@ -213,7 +213,12 @@ def _run_monthly_standing_accrual_generation():
     from datetime import datetime
     from database import SessionLocal
     from models import Client, StandingAccrualRule
-    from routers.accruals import _generate_one_month, _months_in_range, _next_month_str
+    from routers.accruals import (
+        _generate_one_month,
+        _months_in_range,
+        _next_month_str,
+        _has_existing_accrual_for_period,
+    )
 
     target_month = datetime.utcnow().strftime("%Y-%m")
     db = SessionLocal()
@@ -231,6 +236,22 @@ def _run_monthly_standing_accrual_generation():
                 .all()
             )
             for rule in rules:
+                # If an accrual has already been booked for this vendor +
+                # target month (typically because the user uploaded an
+                # invoice that auto-generated the JE), don't flag the
+                # rule and don't double-book.
+                existing = _has_existing_accrual_for_period(
+                    client.id, rule.vendor_name, target_month, db,
+                )
+                if existing:
+                    if rule.last_generated != target_month:
+                        rule.last_generated = target_month
+                    rule.attention_needed = False
+                    rule.attention_month  = None
+                    rule.attention_reason = None
+                    skipped.append(f"{rule.vendor_name} (already booked)")
+                    continue
+
                 if rule.amount is None:
                     rule.attention_needed = True
                     rule.attention_month  = target_month
