@@ -253,13 +253,12 @@ def _run_monthly_standing_accrual_generation():
                     continue
 
                 if rule.amount is None:
-                    rule.attention_needed = True
-                    rule.attention_month  = target_month
-                    rule.attention_reason = (
-                        "Variable-amount vendor: create the accrual for this "
-                        "month manually with the actual invoice/estimate amount."
-                    )
-                    skipped.append(f"{rule.vendor_name} (no fixed amount — flagged)")
+                    # Variable-amount rules are coding hints, not monthly
+                    # auto-creators. Nothing to do unless an invoice arrives.
+                    rule.attention_needed = False
+                    rule.attention_month  = None
+                    rule.attention_reason = None
+                    skipped.append(f"{rule.vendor_name} (variable amount — coded on invoice arrival)")
                     continue
 
                 if rule.schedule_end_month:

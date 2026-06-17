@@ -1332,13 +1332,14 @@ def generate_from_standing_rules(
             continue
 
         if rule.amount is None:
-            rule.attention_needed = True
-            rule.attention_month  = target_month
-            rule.attention_reason = (
-                "Variable-amount vendor: create the accrual for this "
-                "month manually with the actual invoice/estimate amount."
-            )
-            skipped.append(f"{rule.vendor_name} (no fixed amount — flagged for review)")
+            # Variable-amount rules are coding hints for when an invoice
+            # arrives — not monthly auto-creators. There's nothing to
+            # generate proactively, and nothing for the user to do unless
+            # an invoice actually shows up. Clear any stale flag.
+            rule.attention_needed = False
+            rule.attention_month  = None
+            rule.attention_reason = None
+            skipped.append(f"{rule.vendor_name} (variable amount — coded on invoice arrival)")
             continue
 
         # Determine which months to generate. For a fixed-window prepaid
