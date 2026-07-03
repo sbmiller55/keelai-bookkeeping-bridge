@@ -7,11 +7,27 @@ and journal entry creation.
 
 import base64
 import os
+import threading
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode
 
 import httpx
+
+# Per-realm refresh locks. Intuit rotates the refresh token on every refresh
+# and invalidates the previous one, so two concurrent refreshes of the same
+# token will make one of them fail with a 400. Serialize refreshes per realm.
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def _lock_for(realm_id: str) -> threading.Lock:
+    with _refresh_locks_guard:
+        lock = _refresh_locks.get(realm_id)
+        if lock is None:
+            lock = threading.Lock()
+            _refresh_locks[realm_id] = lock
+        return lock
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Read at call time (not module load) so .env changes are picked up after restart.
@@ -152,6 +168,8 @@ class QBOClient:
         refresh_token: str,
         realm_id: str,
         token_expires_at: datetime,
+        on_refresh: Optional[Callable[[dict], None]] = None,
+        reload_tokens: Optional[Callable[[], Optional[dict]]] = None,
     ):
         self.access_token     = access_token
         self.refresh_token    = refresh_token
@@ -159,6 +177,16 @@ class QBOClient:
         self.token_expires_at = token_expires_at
         self.updated_tokens: Optional[dict] = None
         self._last_intuit_tid: str = ""
+        # on_refresh(tokens): persist the newly-rotated tokens IMMEDIATELY (in
+        #   its own committed transaction) so a later failure in the same
+        #   request can't lose them. Intuit invalidates the old refresh token
+        #   once a new one is issued, so an unpersisted rotation = dead account.
+        # reload_tokens(): return the latest {access_token, refresh_token,
+        #   token_expires_at} from the DB, so that after waiting on the refresh
+        #   lock we can adopt a token another request just rotated instead of
+        #   re-refreshing an already-consumed one.
+        self.on_refresh     = on_refresh
+        self.reload_tokens  = reload_tokens
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -167,8 +195,30 @@ class QBOClient:
         host = "sandbox-quickbooks.api.intuit.com" if sandbox else "quickbooks.api.intuit.com"
         return f"https://{host}/v3/company/{self.realm_id}"
 
+    def _token_is_fresh(self) -> bool:
+        return datetime.utcnow() < self.token_expires_at - timedelta(minutes=5)
+
     def _ensure_fresh_token(self):
-        if datetime.utcnow() >= self.token_expires_at - timedelta(minutes=5):
+        if self._token_is_fresh():
+            return
+
+        # Serialize refreshes for this realm so two concurrent requests don't
+        # both try to spend the same (single-use) refresh token.
+        with _lock_for(self.realm_id):
+            # Another request may have refreshed while we waited on the lock.
+            # Adopt its freshly-persisted token instead of refreshing again.
+            if self.reload_tokens is not None:
+                latest = self.reload_tokens()
+                if latest:
+                    self.refresh_token = latest.get("refresh_token") or self.refresh_token
+                    latest_access  = latest.get("access_token")
+                    latest_expires = latest.get("token_expires_at")
+                    if latest_access and latest_expires:
+                        self.access_token     = latest_access
+                        self.token_expires_at = latest_expires
+                        if self._token_is_fresh():
+                            return
+
             data = refresh_tokens(self.refresh_token)
             self.access_token     = data["access_token"]
             self.refresh_token    = data.get("refresh_token", self.refresh_token)
@@ -178,6 +228,10 @@ class QBOClient:
                 "refresh_token":    self.refresh_token,
                 "token_expires_at": self.token_expires_at,
             }
+            # Persist immediately (own transaction) — do NOT wait for end of
+            # request, or a later error would discard the rotated token.
+            if self.on_refresh is not None:
+                self.on_refresh(self.updated_tokens)
 
     def _headers(self) -> dict:
         self._ensure_fresh_token()

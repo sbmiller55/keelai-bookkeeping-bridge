@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
-from database import get_db
+from database import get_db, SessionLocal
 from models import Client, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
 
@@ -35,14 +35,54 @@ def _get_client(client_id: int, user: User, db: Session) -> Client:
     return client
 
 
+def _persist_tokens_standalone(client_id: int, tokens: dict) -> None:
+    """
+    Persist rotated QBO tokens in their OWN short-lived, committed transaction.
+
+    Used as the QBOClient.on_refresh callback. Isolated from the request's
+    session on purpose: Intuit invalidates the previous refresh token the
+    moment a new one is issued, so the new token MUST survive even if the rest
+    of the request later fails and rolls back.
+    """
+    db = SessionLocal()
+    try:
+        c = db.query(Client).filter(Client.id == client_id).first()
+        if c:
+            c.qbo_access_token     = tokens["access_token"]
+            c.qbo_refresh_token    = tokens["refresh_token"]
+            c.qbo_token_expires_at = tokens["token_expires_at"]
+            db.commit()
+    finally:
+        db.close()
+
+
+def _load_tokens_standalone(client_id: int) -> Optional[dict]:
+    """Return the latest persisted QBO tokens for a client (own session)."""
+    db = SessionLocal()
+    try:
+        c = db.query(Client).filter(Client.id == client_id).first()
+        if not c:
+            return None
+        return {
+            "access_token":     c.qbo_access_token,
+            "refresh_token":    c.qbo_refresh_token,
+            "token_expires_at": c.qbo_token_expires_at,
+        }
+    finally:
+        db.close()
+
+
 def _get_qbo_client(client: Client) -> qbo.QBOClient:
     if not client.qbo_access_token or not client.qbo_realm_id:
         raise HTTPException(400, "QuickBooks is not connected for this client")
+    client_id = client.id
     return qbo.QBOClient(
         access_token=client.qbo_access_token,
         refresh_token=client.qbo_refresh_token or "",
         realm_id=client.qbo_realm_id,
         token_expires_at=client.qbo_token_expires_at or datetime.utcnow(),
+        on_refresh=lambda tokens: _persist_tokens_standalone(client_id, tokens),
+        reload_tokens=lambda: _load_tokens_standalone(client_id),
     )
 
 
