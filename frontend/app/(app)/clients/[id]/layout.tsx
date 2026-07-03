@@ -105,7 +105,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     <div className="flex min-h-[calc(100vh-49px)] relative">
       {/* Sidebar */}
       <aside
-        className={`shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${
+        className={`shrink-0 self-start sticky top-0 h-[calc(100vh-49px)] bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${
           sidebarCollapsed ? "w-0 border-r-0" : "w-52"
         }`}
         aria-hidden={sidebarCollapsed}
@@ -129,7 +129,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
           </p>
         </div>
 
-        <nav className="flex-1 px-3 py-3 space-y-0.5">
+        <nav className="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
           {NAV_MAIN.map(({ label, suffix }) => (
             <NavLink key={suffix} label={label} suffix={suffix} />
           ))}
