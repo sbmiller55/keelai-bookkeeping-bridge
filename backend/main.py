@@ -25,7 +25,10 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    import os
+    # Railway injects the deployed commit SHA; expose it so a deploy can be
+    # verified as actually live (not just "backend is up").
+    return {"status": "ok", "commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "")[:12]}
 
 
 app.include_router(auth.router)
