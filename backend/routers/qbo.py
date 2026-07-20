@@ -112,9 +112,10 @@ class QboStatus(BaseModel):
 
 
 class SyncResult(BaseModel):
-    synced:          int
-    created_vendors: list[str]
-    errors:          list[str]
+    synced:            int
+    created_vendors:   list[str]
+    created_customers: list[str] = []
+    errors:            list[str]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -263,6 +264,25 @@ def get_accounts(
     return {"accounts": names, "cached_at": client.qbo_coa_cached_at}
 
 
+@router.get("/customers")
+def get_customers(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the list of active customer names pulled live from QBO."""
+    client = _get_client(client_id, current_user, db)
+    qbo_c  = _get_qbo_client(client)
+    try:
+        names = qbo_c.get_customer_names()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"QBO error fetching customers: {exc}")
+    _persist_token_refresh(client, qbo_c, db)
+    return {"customers": names}
+
+
 @router.post("/sync", response_model=SyncResult)
 def sync_to_qbo(
     client_id: int,
@@ -304,6 +324,9 @@ def sync_to_qbo(
     # Vendor cache: display_name → QBO vendor Id (avoids redundant API calls)
     vendor_cache: dict[str, str]  = {}
     created_vendors: list[str]    = []
+    # Customer cache: display_name → QBO customer Id (for income/deposit lines)
+    customer_cache: dict[str, str] = {}
+    created_customers: list[str]   = []
     errors: list[str]             = []
     synced                        = 0
 
@@ -356,6 +379,21 @@ def sync_to_qbo(
                 errors.append(f"JE {je.je_number or je.id}: {je.qbo_export_error}")
                 continue
 
+            # ── Resolve customer (for income/deposit lines) ─────────────────
+            customer_id: Optional[str] = None
+            if je.customer_name and je.customer_name.strip():
+                cname = je.customer_name.strip()
+                if cname not in customer_cache:
+                    try:
+                        cid, was_created = qbo_c.get_or_create_customer(cname)
+                        customer_cache[cname] = cid
+                        if was_created:
+                            created_customers.append(cname)
+                    except Exception as exc:
+                        errors.append(f"Customer '{cname}': {exc}")
+                        customer_cache[cname] = ""   # don't retry this customer
+                customer_id = customer_cache.get(cname) or None
+
             txn_date = (je.je_date or tx.date).strftime("%Y-%m-%d")
             memo     = je.memo or tx.description
 
@@ -393,6 +431,8 @@ def sync_to_qbo(
                         amount=je.amount,
                         vendor_id=vendor_id or "",
                         vendor_name=tx.counterparty_name or "",
+                        customer_id=customer_id or "",
+                        customer_name=je.customer_name or "",
                     )
                 je.qbo_je_id        = qbo_id
                 je.qbo_object_type  = "Purchase" if use_purchase else "JournalEntry"
@@ -411,7 +451,12 @@ def sync_to_qbo(
     db.commit()
     _persist_token_refresh(client, qbo_c, db)
 
-    return SyncResult(synced=synced, created_vendors=created_vendors, errors=errors)
+    return SyncResult(
+        synced=synced,
+        created_vendors=created_vendors,
+        created_customers=created_customers,
+        errors=errors,
+    )
 
 
 # ── Rollback (recovery from a bad force re-sync) ─────────────────────────────

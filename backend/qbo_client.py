@@ -382,6 +382,54 @@ class QBOClient:
             return vendor_id, False
         return self.create_vendor(display_name), True
 
+    # ── Customers ─────────────────────────────────────────────────────────────
+
+    def get_active_customers(self) -> list[dict]:
+        """Fetch all active customers. Handles pagination (max 1000 per page)."""
+        customers: list[dict] = []
+        start = 1
+        while True:
+            batch = self._query(
+                f"SELECT * FROM Customer WHERE Active = true STARTPOSITION {start} MAXRESULTS 1000"
+            )
+            customers.extend(batch)
+            if len(batch) < 1000:
+                break
+            start += 1000
+        return customers
+
+    def get_customer_names(self) -> list[str]:
+        """Return sorted, deduplicated list of active customer DisplayNames."""
+        seen: set[str] = set()
+        names: list[str] = []
+        for c in self.get_active_customers():
+            n = (c.get("DisplayName") or "").strip()
+            if n and n not in seen:
+                seen.add(n)
+                names.append(n)
+        return sorted(names)
+
+    def find_customer(self, display_name: str) -> Optional[str]:
+        """Return QBO customer Id by DisplayName, or None if not found."""
+        safe    = display_name.replace("'", "\\'")
+        results = self._query(f"SELECT * FROM Customer WHERE DisplayName = '{safe}'")
+        return results[0]["Id"] if results else None
+
+    def create_customer(self, display_name: str) -> str:
+        """Create a new customer in QBO and return its Id."""
+        result = self._post("/customer?minorversion=65", {"DisplayName": display_name})
+        return result["Customer"]["Id"]
+
+    def get_or_create_customer(self, display_name: str) -> tuple[str, bool]:
+        """
+        Return (customer_id, was_created).
+        Looks up by DisplayName; creates in QBO if not found.
+        """
+        customer_id = self.find_customer(display_name)
+        if customer_id:
+            return customer_id, False
+        return self.create_customer(display_name), True
+
     def get_or_create_account(
         self,
         name: str,
@@ -431,21 +479,26 @@ class QBOClient:
         amount: float,
         vendor_id: str = "",
         vendor_name: str = "",
+        customer_id: str = "",
+        customer_name: str = "",
     ) -> str:
         """
         Create a balanced two-line journal entry in QBO.
+
+        A Vendor entity (if given) is attached to the debit line; a Customer
+        entity (if given) is attached to the credit line — for deposits/interest
+        that credit an income account, this is what makes the entry show up in
+        QBO's "by Customer" income reports.
+
         Returns the QBO-assigned JournalEntry Id.
         """
-        def _line(line_id: str, posting_type: str, account_id: str, include_entity: bool = False) -> dict:
+        def _line(line_id: str, posting_type: str, account_id: str, entity: Optional[dict] = None) -> dict:
             detail: dict = {
                 "PostingType": posting_type,
                 "AccountRef":  {"value": account_id},
             }
-            if include_entity and vendor_id:
-                detail["Entity"] = {
-                    "Type":      "Vendor",
-                    "EntityRef": {"value": vendor_id, "name": vendor_name},
-                }
+            if entity:
+                detail["Entity"] = entity
             return {
                 "Id":          line_id,
                 "Amount":      round(abs(amount), 2),
@@ -454,13 +507,22 @@ class QBOClient:
                 "JournalEntryLineDetail": detail,
             }
 
+        debit_entity = (
+            {"Type": "Vendor", "EntityRef": {"value": vendor_id, "name": vendor_name}}
+            if vendor_id else None
+        )
+        credit_entity = (
+            {"Type": "Customer", "EntityRef": {"value": customer_id, "name": customer_name}}
+            if customer_id else None
+        )
+
         payload = {
             "DocNumber":   doc_number,
             "TxnDate":     txn_date,
             "PrivateNote": memo,
             "Line": [
-                _line("0", "Debit",  debit_account_id,  include_entity=True),
-                _line("1", "Credit", credit_account_id, include_entity=False),
+                _line("0", "Debit",  debit_account_id,  entity=debit_entity),
+                _line("1", "Credit", credit_account_id, entity=credit_entity),
             ],
         }
         result = self._post("/journalentry?minorversion=65", payload)

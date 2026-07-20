@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useAccounts } from "@/lib/useAccounts";
+import { useCustomers } from "@/lib/useCustomers";
 import {
   getTransactionsWithEntries,
   updateTransactionStatus,
@@ -26,7 +27,7 @@ import { useChatContext } from "@/lib/chat-context";
 
 const DEFAULT_COL_WIDTHS = {
   date: 120, description: 180, amount: 110, category: 110,
-  debit: 200, credit: 200, jeAmt: 150, memo: 180,
+  debit: 200, credit: 200, customer: 160, jeAmt: 150, memo: 180,
   conf: 70, reasoning: 160, actions: 110,
 };
 type ColKey = keyof typeof DEFAULT_COL_WIDTHS;
@@ -201,6 +202,139 @@ function AccountSelect({
                 className={`w-full text-left px-3 py-1.5 text-xs ${i === activeIdx ? "bg-indigo-600 text-white" : a === value ? "text-indigo-400 bg-gray-800/50" : "text-gray-200 hover:bg-gray-800"}`}
               >
                 {a}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Customer dropdown ─────────────────────────────────────────────────────────
+// Like AccountSelect, but for QBO customers. Unlike accounts, a typed name that
+// isn't in the list is ALLOWED — it gets created in QBO at sync time. Clearing
+// the field removes the customer from the entry.
+function CustomerSelect({
+  value,
+  onChange,
+  customers,
+  placeholder = "Customer…",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  customers: string[];
+  placeholder?: string;
+}) {
+  const [inputValue, setInputValue] = useState(value);
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [isTyping, setIsTyping] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { setInputValue(value); }, [value]);
+
+  // Resolve to canonical casing if the typed name matches an existing customer;
+  // otherwise keep the typed name verbatim (a new customer to be created).
+  const canonicalize = (raw: string): string => {
+    const t = raw.trim();
+    if (!t) return "";
+    const match = customers.find((c) => c.toLowerCase() === t.toLowerCase());
+    return match ?? t;
+  };
+
+  const commitTyped = () => {
+    const next = canonicalize(inputValue);
+    if (next !== value) onChange(next);
+    setInputValue(next);
+  };
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        commitTyped();
+        setOpen(false);
+        setIsTyping(false);
+      }
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputValue, value, onChange, customers]);
+
+  const filtered = (isTyping && inputValue)
+    ? customers.filter((c) => c.toLowerCase().includes(inputValue.toLowerCase()))
+    : customers;
+
+  useEffect(() => { setActiveIdx(0); }, [filtered.length]);
+
+  function commit(val: string) {
+    const next = canonicalize(val);
+    if (next !== value) onChange(next);
+    setInputValue(next);
+    setOpen(false);
+    setIsTyping(false);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (!open) { if (e.key === "ArrowDown" || e.key === "Enter") setOpen(true); return; }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.min(i + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (isTyping && !filtered[activeIdx]) commit(inputValue);   // new customer
+      else if (filtered[activeIdx]) commit(filtered[activeIdx]);
+      else commit(inputValue);
+    } else if (e.key === "Escape") {
+      setInputValue(value);
+      setOpen(false);
+      setIsTyping(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!listRef.current) return;
+    const el = listRef.current.children[activeIdx] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [activeIdx]);
+
+  return (
+    <div ref={ref} className="relative w-full">
+      <input
+        type="text"
+        value={inputValue}
+        placeholder={placeholder}
+        onChange={(e) => { setInputValue(e.target.value); setIsTyping(true); setOpen(true); setActiveIdx(0); }}
+        onFocus={(e) => { setOpen(true); setIsTyping(false); e.target.select(); }}
+        onKeyDown={handleKeyDown}
+        onBlur={() => {
+          setTimeout(() => {
+            if (ref.current && !ref.current.contains(document.activeElement)) {
+              commitTyped();
+              setOpen(false);
+              setIsTyping(false);
+            }
+          }, 150);
+        }}
+        className="w-full bg-transparent border border-transparent hover:border-gray-600 focus:border-indigo-500 focus:outline-none text-white rounded px-2 py-1 text-xs placeholder-gray-500"
+      />
+
+      {open && filtered.length > 0 && (
+        <div className="absolute z-50 mt-1 w-64 bg-gray-900 border border-gray-700 rounded-lg shadow-xl overflow-hidden">
+          <div ref={listRef} className="max-h-56 overflow-y-auto">
+            {filtered.map((c, i) => (
+              <button
+                key={c}
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); commit(c); }}
+                className={`w-full text-left px-3 py-1.5 text-xs ${i === activeIdx ? "bg-indigo-600 text-white" : c === value ? "text-indigo-400 bg-gray-800/50" : "text-gray-200 hover:bg-gray-800"}`}
+              >
+                {c}
               </button>
             ))}
           </div>
@@ -476,6 +610,7 @@ function JeRow({
   je,
   tx,
   accounts,
+  customers,
   isFirst,
   txRowCount,
   clientId,
@@ -489,6 +624,7 @@ function JeRow({
   je: JournalEntry;
   tx: TransactionWithEntries;
   accounts: string[];
+  customers: string[];
   isFirst: boolean;
   txRowCount: number;
   clientId: number;
@@ -503,6 +639,7 @@ function JeRow({
   const [credit, setCredit] = useState(je.credit_account);
   const [amount, setAmount] = useState(String(je.amount));
   const [memo, setMemo] = useState(je.memo ?? "");
+  const [customer, setCustomer] = useState(je.customer_name ?? "");
   const [jeDate, setJeDate] = useState(je.je_date?.slice(0, 10) ?? tx.date?.slice(0, 10) ?? "");
   const [amountFocused, setAmountFocused] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -522,6 +659,7 @@ function JeRow({
     setCredit(je.credit_account);
     setAmount(String(je.amount));
     setMemo(je.memo ?? "");
+    setCustomer(je.customer_name ?? "");
     setJeDate(je.je_date?.slice(0, 10) ?? tx.date?.slice(0, 10) ?? "");
     setDirty(false);
     setRulePrompt(null);
@@ -542,6 +680,12 @@ function JeRow({
     } finally {
       setSaving(false);
     }
+  }
+
+  function handleCustomerChange(v: string) {
+    if (v === customer) return;
+    setCustomer(v);
+    updateJournalEntry(je.id, { customer_name: v }).then(onUpdate);
   }
 
   function showRulePrompt(newDebit: string, newCredit: string) {
@@ -643,6 +787,12 @@ function JeRow({
   }
 
   const canDelete = txRowCount > 1;
+  // Customer tagging applies to money-in / income lines: deposits (positive
+  // amount) plus interest-earned entries regardless of sign.
+  const showCustomer =
+    tx.amount >= 0 ||
+    credit.toLowerCase().includes("interest earned") ||
+    debit.toLowerCase().includes("interest earned");
   const cellBase = "px-3 py-2 text-xs align-middle";
   const inputCls = "w-full bg-gray-800 border border-gray-700 text-white rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 font-mono";
 
@@ -652,7 +802,7 @@ function JeRow({
     <>
     {je.is_ai_matched && matchedInv && (
       <tr className="bg-amber-950/30 border-b border-amber-900/30">
-        <td colSpan={11} className="px-4 py-1.5">
+        <td colSpan={12} className="px-4 py-1.5">
           <div className="flex items-center gap-3 text-xs">
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-700/40 text-amber-200 border border-amber-700 font-medium">
               🔗 AI Matched
@@ -731,6 +881,15 @@ function JeRow({
       {/* Credit account */}
       <td className={`${cellBase}`}>
         <AccountSelect value={credit} onChange={handleCreditChange} accounts={accounts} />
+      </td>
+
+      {/* Customer — only for money-in / income (deposits + interest earned) */}
+      <td className={`${cellBase}`}>
+        {showCustomer ? (
+          <CustomerSelect value={customer} onChange={handleCustomerChange} customers={customers} />
+        ) : (
+          <span className="text-gray-700 text-xs px-2">—</span>
+        )}
       </td>
 
       {/* JE Amount */}
@@ -834,7 +993,7 @@ function JeRow({
 
     {rulePrompt && (
       <tr className="bg-amber-950/30 border-b border-amber-900/20">
-        <td colSpan={11} className="px-4 py-2">
+        <td colSpan={12} className="px-4 py-2">
           <div className="flex items-center gap-3 text-xs">
             <span className="text-amber-400 shrink-0">⊕ Rule</span>
             <span className="text-gray-300">
@@ -865,7 +1024,7 @@ function JeRow({
 
     {ruleSaved && !rulePrompt && (
       <tr className="bg-green-950/20 border-b border-green-900/20">
-        <td colSpan={11} className="px-4 py-1.5">
+        <td colSpan={12} className="px-4 py-1.5">
           <span className="text-green-400 text-xs">
             ✓ Rule saved
             {ruleAppliedCount > 0 ? ` — applied to ${ruleAppliedCount} additional pending transaction${ruleAppliedCount !== 1 ? "s" : ""}` : " — future transactions from this vendor will be coded automatically"}
@@ -898,7 +1057,7 @@ function DoubleBookWarning({
 }) {
   return (
     <tr>
-      <td colSpan={11} className="p-0">
+      <td colSpan={12} className="p-0">
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
           <div className="bg-gray-900 border border-amber-700 rounded-2xl w-full max-w-lg shadow-2xl">
             <div className="px-6 py-4 border-b border-amber-800/40">
@@ -949,7 +1108,7 @@ function NoJeRow({ tx }: { tx: TransactionWithEntries }) {
           {tx.amount < 0 ? "-" : "+"}${Math.abs(tx.amount).toLocaleString("en-US", { minimumFractionDigits: 2 })}
         </span>
       </td>
-      <td colSpan={8} className={cellBase}>
+      <td colSpan={9} className={cellBase}>
         <span className="text-red-400 text-xs">No journal entry — click &ldquo;Run AI Coding&rdquo; to generate</span>
       </td>
     </tr>
@@ -965,6 +1124,7 @@ export default function ReviewQueuePage() {
 
   const [items, setItems] = useState<TransactionWithEntries[]>([]);
   const { accounts } = useAccounts(clientId);
+  const { customers } = useCustomers(clientId);
   const [loading, setLoading] = useState(true);
   const [coding, setCoding] = useState(false);
   const [codingProgress, setCodingProgress] = useState<{ done: number; total: number } | null>(null);
@@ -1344,6 +1504,7 @@ export default function ReviewQueuePage() {
               <col style={{ width: colWidths.category }} />
               <col style={{ width: colWidths.debit }} />
               <col style={{ width: colWidths.credit }} />
+              <col style={{ width: colWidths.customer }} />
               <col style={{ width: colWidths.jeAmt }} />
               <col style={{ width: colWidths.memo }} />
               <col style={{ width: colWidths.conf }} />
@@ -1373,6 +1534,7 @@ export default function ReviewQueuePage() {
                   </button>
                   {handle("credit")}
                 </th>
+                <th className="px-3 py-2.5 text-left font-medium relative select-none">Customer{handle("customer")}</th>
                 <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{handle("jeAmt")}</th>
                 <th className="px-3 py-2.5 text-left font-medium relative select-none">Memo{handle("memo")}</th>
                 <th className="px-3 py-2.5 text-center font-medium relative select-none">
@@ -1396,6 +1558,7 @@ export default function ReviewQueuePage() {
                       je={je}
                       tx={tx}
                       accounts={accounts}
+                      customers={customers}
                       isFirst={idx === 0}
                       txRowCount={tx.journal_entries.length}
                       clientId={clientId}

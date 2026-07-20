@@ -127,6 +127,7 @@ class JournalEntryCreate(BaseModel):
     ai_reasoning: Optional[str] = None
     rule_applied: Optional[int] = None
     parent_je_id: Optional[int] = None
+    customer_name: Optional[str] = None
 
 
 class JournalEntryRead(BaseModel):
@@ -141,6 +142,7 @@ class JournalEntryRead(BaseModel):
     service_period_end: Optional[datetime] = None
     memo: Optional[str] = None
     description: Optional[str] = None
+    customer_name: Optional[str] = None
     ai_confidence: Optional[float] = None
     ai_reasoning: Optional[str] = None
     rule_applied: Optional[int] = None
@@ -177,6 +179,7 @@ class JournalEntryUpdate(BaseModel):
     service_period_end: Optional[datetime] = None
     memo: Optional[str] = None
     description: Optional[str] = None
+    customer_name: Optional[str] = None
     ai_confidence: Optional[float] = None
     ai_reasoning: Optional[str] = None
     approved_by: Optional[int] = None

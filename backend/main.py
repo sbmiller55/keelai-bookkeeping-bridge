@@ -86,6 +86,8 @@ def _migrate_db():
         ("journal_entries",       "matched_invoice_id",   "INTEGER"),
         ("journal_entries",       "is_ai_matched",        "BOOLEAN DEFAULT FALSE"),
         ("journal_entries",       "match_confidence",     "REAL"),
+        # Customer/Name to push onto the JE income line for deposits/interest
+        ("journal_entries",       "customer_name",        "TEXT"),
         # QBO chart-of-accounts cache (refreshed monthly on the 1st)
         ("clients",               "qbo_coa_cache",        "TEXT"),
         ("clients",               "qbo_coa_cached_at",    "TIMESTAMP"),

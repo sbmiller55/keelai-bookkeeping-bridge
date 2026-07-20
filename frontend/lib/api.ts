@@ -89,6 +89,7 @@ export interface JournalEntry {
   service_period_end: string | null;
   memo: string | null;
   description: string | null;
+  customer_name: string | null;
   ai_confidence: number | null;
   ai_reasoning: string | null;
   rule_applied: number | null;
@@ -122,6 +123,7 @@ export interface JournalEntryCreate {
   je_date?: string;
   memo?: string;
   description?: string;
+  customer_name?: string;
   service_period_start?: string;
   service_period_end?: string;
 }
@@ -867,6 +869,7 @@ export interface QboStatus {
 export interface QboSyncResult {
   synced: number;
   created_vendors: string[];
+  created_customers?: string[];
   errors: string[];
 }
 
@@ -895,6 +898,11 @@ export function getQboAccounts(clientId: number, refresh = false): Promise<strin
   const qs = refresh ? "?refresh=true" : "";
   return apiFetch<{ accounts: string[] }>(`/clients/${clientId}/qbo/accounts${qs}`)
     .then((r) => r.accounts);
+}
+
+export function getQboCustomers(clientId: number): Promise<string[]> {
+  return apiFetch<{ customers: string[] }>(`/clients/${clientId}/qbo/customers`)
+    .then((r) => r.customers);
 }
 
 export function syncToQbo(clientId: number, markExported = true, force = false): Promise<QboSyncResult> {

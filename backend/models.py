@@ -117,6 +117,7 @@ class JournalEntry(Base):
     service_period_end = Column(DateTime, nullable=True)
     memo = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
+    customer_name = Column(String, nullable=True)       # QBO Customer to tag on the income line (deposits/interest)
     ai_confidence = Column(Float, nullable=True)
     ai_reasoning = Column(Text, nullable=True)
     rule_applied = Column(Integer, ForeignKey("rules.id"), nullable=True)

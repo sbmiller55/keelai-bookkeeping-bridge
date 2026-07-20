@@ -93,7 +93,7 @@ def update_journal_entry(
     changed = payload.model_dump(exclude_unset=True)
 
     # Capture before state for auditable fields
-    audit_fields = {"debit_account", "credit_account", "amount", "memo"}
+    audit_fields = {"debit_account", "credit_account", "amount", "memo", "customer_name"}
     before = {f: getattr(je, f) for f in audit_fields if f in changed}
 
     for field, value in changed.items():
