@@ -481,14 +481,21 @@ class QBOClient:
         vendor_name: str = "",
         customer_id: str = "",
         customer_name: str = "",
+        customer_line: str = "credit",
     ) -> str:
         """
         Create a balanced two-line journal entry in QBO.
 
-        A Vendor entity (if given) is attached to the debit line; a Customer
-        entity (if given) is attached to the credit line — for deposits/interest
-        that credit an income account, this is what makes the entry show up in
-        QBO's "by Customer" income reports.
+        A Vendor entity (if given) is attached to the debit line. A Customer
+        entity (if given) is attached to the line(s) named by `customer_line`
+        ("debit", "credit", or "both").
+
+        QBO REQUIRES a customer on any line posting to an Accounts Receivable
+        account, so the caller must place the customer on whichever side is A/R.
+        For a plain income deposit (DR Bank / CR Income) the customer goes on the
+        credit line so it shows in QBO's "by Customer" income reports; for an A/R
+        entry (DR A/R / CR Income) it must go on the debit line ("both" also tags
+        the income line for reporting).
 
         Returns the QBO-assigned JournalEntry Id.
         """
@@ -507,14 +514,20 @@ class QBOClient:
                 "JournalEntryLineDetail": detail,
             }
 
-        debit_entity = (
+        vendor_entity = (
             {"Type": "Vendor", "EntityRef": {"value": vendor_id, "name": vendor_name}}
             if vendor_id else None
         )
-        credit_entity = (
+        customer_entity = (
             {"Type": "Customer", "EntityRef": {"value": customer_id, "name": customer_name}}
             if customer_id else None
         )
+        debit_customer  = customer_entity if customer_line in ("debit", "both") else None
+        credit_customer = customer_entity if customer_line in ("credit", "both") else None
+        # A customer on the debit line takes precedence over a vendor there (only
+        # relevant for A/R lines, which never legitimately carry a vendor).
+        debit_entity  = debit_customer or vendor_entity
+        credit_entity = credit_customer
 
         payload = {
             "DocNumber":   doc_number,

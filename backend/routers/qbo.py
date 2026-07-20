@@ -394,6 +394,18 @@ def sync_to_qbo(
                         customer_cache[cname] = ""   # don't retry this customer
                 customer_id = customer_cache.get(cname) or None
 
+            # QBO requires the customer on any Accounts Receivable line. Place it
+            # on whichever side is A/R; for an A/R debit (DR A/R / CR Income) tag
+            # both lines so the income line still attributes by customer.
+            debit_type_je  = account_types.get(debit_id, "")
+            credit_type_je = account_types.get(credit_id, "")
+            if debit_type_je == "Accounts Receivable":
+                customer_line = "both"
+            elif credit_type_je == "Accounts Receivable":
+                customer_line = "credit"
+            else:
+                customer_line = "credit"
+
             txn_date = (je.je_date or tx.date).strftime("%Y-%m-%d")
             memo     = je.memo or tx.description
 
@@ -433,6 +445,7 @@ def sync_to_qbo(
                         vendor_name=tx.counterparty_name or "",
                         customer_id=customer_id or "",
                         customer_name=je.customer_name or "",
+                        customer_line=customer_line,
                     )
                 je.qbo_je_id        = qbo_id
                 je.qbo_object_type  = "Purchase" if use_purchase else "JournalEntry"
