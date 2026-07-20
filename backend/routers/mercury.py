@@ -16,6 +16,7 @@ import models
 import mercury as mercury_client
 import ai_coder
 import rules_engine
+import interest_accrual
 
 
 _VENDOR_TOKEN_RE = re.compile(r"[^a-z0-9]+")
@@ -459,7 +460,37 @@ def _sync_one_client(
             je_created += 1
         db.flush()
 
+        # ── Pre-pass: Mercury interest income → accrual-basis split ──────────
+        # Same deterministic handling as the "Run AI Coding" path: recognize
+        # the income in the month earned (prior month-end) and the cash on the
+        # receipt date, as two linked JEs, ahead of rules and AI coding.
         for txn in new_txn_objects:
+            if txn.id in rule_coded_ids:
+                continue
+            if not interest_accrual.is_mercury_interest(txn):
+                continue
+            for jd in interest_accrual.build_interest_jes(txn):
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=jd["amount"],
+                    je_date=jd["je_date"],
+                    memo=jd["memo"],
+                    description=jd["description"],
+                    customer_name=jd["customer_name"],
+                    ai_confidence=jd["ai_confidence"],
+                    ai_reasoning=jd["ai_reasoning"],
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+        db.flush()
+
+        for txn in new_txn_objects:
+            if txn.id in rule_coded_ids:
+                continue
             matched_rule = rules_engine.match_rule(txn, active_rules)
             if matched_rule:
                 if (matched_rule.rule_action or "expense") == "reject":
@@ -812,6 +843,34 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
         rule_coded_ids.add(txn.id)
         je_created += 1
+    db.flush()
+
+    # ── Pre-pass: Mercury interest income → accrual-basis split ──────────────
+    # Recognize the income in the month it was earned (last day of the prior
+    # month) and the cash on the receipt date, as two linked JEs. Runs before
+    # the rules engine and AI coder and takes priority for these transactions.
+    for txn in pending:
+        if txn.id in rule_coded_ids:
+            continue
+        if not interest_accrual.is_mercury_interest(txn):
+            continue
+        for jd in interest_accrual.build_interest_jes(txn):
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
     db.flush()
 
     for txn in pending:

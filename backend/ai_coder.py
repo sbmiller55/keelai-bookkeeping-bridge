@@ -106,6 +106,7 @@ def _resolve_chart(client_obj) -> Optional[str]:
 _ALWAYS_VALID_ACCOUNTS = {
     "Interest Earned",
     "Interest Expense",
+    "Interest Receivable",   # used by the Mercury interest accrual split
     "Uncoded",
 }
 
