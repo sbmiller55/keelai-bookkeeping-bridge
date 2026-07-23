@@ -283,6 +283,43 @@ def get_payout_summaries(api_key: str, start: Optional[datetime], end: Optional[
     return out
 
 
+def get_payouts(api_key: str, start: Optional[datetime], end: Optional[datetime]) -> list[dict]:
+    """One normalized row per Stripe payout, for booking the bank-side entry
+    (DR Bank / CR Stripe Clearing) when the client has no bank feed importing
+    the deposit. `amount` is what actually lands in the bank.
+    """
+    s = _stripe(api_key)
+    params = {"limit": 100}
+    created = _epoch_range(start, end)
+    if created:
+        params["created"] = created
+
+    out: list[dict] = []
+    for payout in s.Payout.list(**params).auto_paging_iter():
+        payout = _d(payout)
+        # Only record payouts that have left (or are leaving) Stripe's balance.
+        if payout.get("status") not in ("paid", "in_transit"):
+            continue
+        currency = payout.get("currency") or "usd"
+        amount = _major(payout.get("amount"), currency)
+        if amount <= 0:
+            continue
+        raw = {"amount": amount, "currency": currency, "status": payout.get("status"),
+               "arrival_date": payout.get("arrival_date")}
+        out.append({
+            # Distinct id so it never collides with a per_payout revenue summary
+            # (which keys on the raw "po_..." id).
+            "stripe_charge_id": f"{payout['id']}:bank",
+            "stripe_object_type": "payout",
+            "date": _ts(payout.get("arrival_date") or payout.get("created")),
+            "description": "Stripe payout to bank",
+            "amount": amount,
+            "counterparty_name": None,
+            "raw_data": json.dumps(raw, default=str),
+        })
+    return out
+
+
 def test_connection(api_key: str) -> dict:
     """Cheap read to verify the key works and has charge access."""
     s = _stripe(api_key)

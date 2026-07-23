@@ -83,6 +83,7 @@ def _migrate_db():
         # Stripe revenue coding pipeline (added 2026-07)
         ("transactions",          "stripe_charge_id",   "TEXT"),
         ("transactions",          "stripe_object_type", "TEXT"),
+        ("stripe_config",         "record_payouts_from_stripe", "BOOLEAN DEFAULT FALSE"),
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("accrued_expenses",      "debit_account",       "TEXT"),

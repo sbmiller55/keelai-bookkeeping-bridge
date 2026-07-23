@@ -128,6 +128,7 @@ export default function ClientSettingsPage() {
     stripe_clearing_account: "Stripe Clearing",
     bank_account: "",
     payout_match_text: "stripe",
+    record_payouts_from_stripe: false,
   });
   const [stripeSaving, setStripeSaving] = useState(false);
   const [stripeSaved, setStripeSaved] = useState(false);
@@ -160,6 +161,7 @@ export default function ClientSettingsPage() {
         stripe_clearing_account: s.stripe_clearing_account ?? "Stripe Clearing",
         bank_account: s.bank_account ?? "",
         payout_match_text: s.payout_match_text ?? "stripe",
+        record_payouts_from_stripe: s.record_payouts_from_stripe,
       });
     }).catch(() => {});
 
@@ -290,6 +292,7 @@ export default function ClientSettingsPage() {
         stripe_clearing_account: stripeForm.stripe_clearing_account || null,
         bank_account: stripeForm.bank_account || null,
         payout_match_text: stripeForm.payout_match_text || "stripe",
+        record_payouts_from_stripe: stripeForm.record_payouts_from_stripe,
       };
       // Only send the key when the user typed a new one, so the saved key
       // isn't wiped when the masked field is left untouched.
@@ -461,7 +464,22 @@ export default function ClientSettingsPage() {
               onChange={(v) => setStripeForm((f) => ({ ...f, bank_account: v }))}
               accounts={accounts} placeholder="Select bank account…" />
           </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Record Stripe deposits to the bank?</label>
+            <select value={stripeForm.record_payouts_from_stripe ? "yes" : "no"}
+              onChange={(e) => setStripeForm((f) => ({ ...f, record_payouts_from_stripe: e.target.value === "yes" }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value="yes">Yes — record payouts from Stripe (no bank feed)</option>
+              <option value="no">No — a bank feed imports the deposits</option>
+            </select>
+          </div>
         </div>
+        {stripeForm.record_payouts_from_stripe && (
+          <p className="text-[11px] text-gray-600 mb-4 -mt-2">
+            Each Stripe payout books DR Bank / CR Stripe Clearing so the clearing account
+            zeroes out. Turn this off once a bank feed (Mercury/Plaid) imports the deposits.
+          </p>
+        )}
 
         <div className="flex items-center gap-3">
           <button onClick={handleSaveStripe} disabled={stripeSaving}

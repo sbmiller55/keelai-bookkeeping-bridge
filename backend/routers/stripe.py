@@ -130,6 +130,7 @@ def _config_read(cfg: models.StripeConfig) -> dict:
         "dispute_fees_account": cfg.dispute_fees_account,
         "bank_account": cfg.bank_account,
         "payout_match_text": cfg.payout_match_text,
+        "record_payouts_from_stripe": cfg.record_payouts_from_stripe,
         "last_sync": cfg.last_sync.isoformat() if cfg.last_sync else None,
     }
 
@@ -232,6 +233,13 @@ def sync_stripe(payload: StripeSyncRequest, db: Session = Depends(get_db),
                 normalized += stripe_coding_client.get_disputes(key, start, end)
             except Exception as exc:
                 errors.append(f"Disputes: {exc}")
+        # Bank-side payout entries (only for clients with no bank feed importing
+        # the deposit; otherwise the bank feed codes it to avoid double-counting).
+        if cfg.record_payouts_from_stripe:
+            try:
+                normalized += stripe_coding_client.get_payouts(key, start, end)
+            except Exception as exc:
+                errors.append(f"Payouts: {exc}")
     except Exception as exc:
         raise HTTPException(400, f"Stripe sync failed: {type(exc).__name__}: {exc}")
 

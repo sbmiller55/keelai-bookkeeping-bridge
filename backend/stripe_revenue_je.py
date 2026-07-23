@@ -214,6 +214,21 @@ def build_stripe_payout_summary_jes(txn, cfg) -> list[dict]:
     return jes
 
 
+def build_stripe_bank_payout_jes(txn, cfg) -> list[dict]:
+    """Book a Stripe payout into the bank (DR Bank / CR Stripe Clearing) directly
+    from Stripe data — used when the client has NO bank feed (Mercury/Plaid) to
+    import the deposit. Clears the balance built up by the coded charges."""
+    amount = abs(txn.amount or 0)
+    bank = cfg.bank_account or DEFAULT_BANK
+    clearing = cfg.stripe_clearing_account or DEFAULT_CLEARING
+    return [_je(
+        bank, clearing, amount, txn.date or datetime.utcnow(),
+        "Stripe payout to bank", None,
+        "Stripe payout recorded from Stripe (no bank feed): DR Bank / CR Stripe "
+        "Clearing — clears the clearing balance from the coded Stripe charges.",
+    )]
+
+
 def build_jes_for_stripe_txn(txn, cfg) -> list[dict]:
     """Dispatch to the right builder by stripe_object_type."""
     t = getattr(txn, "stripe_object_type", None) or "charge"
@@ -225,6 +240,8 @@ def build_jes_for_stripe_txn(txn, cfg) -> list[dict]:
         return build_stripe_dispute_jes(txn, cfg)
     if t == "payout_summary":
         return build_stripe_payout_summary_jes(txn, cfg)
+    if t == "payout":
+        return build_stripe_bank_payout_jes(txn, cfg)
     return []
 
 

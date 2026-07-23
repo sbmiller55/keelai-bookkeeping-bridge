@@ -471,6 +471,7 @@ class StripeConfigRead(BaseModel):
     dispute_fees_account: Optional[str] = None
     bank_account: Optional[str] = None
     payout_match_text: Optional[str] = None
+    record_payouts_from_stripe: bool = False
     last_sync: Optional[datetime] = None
 
 
@@ -487,6 +488,7 @@ class StripeConfigUpdate(BaseModel):
     dispute_fees_account: Optional[str] = None
     bank_account: Optional[str] = None
     payout_match_text: Optional[str] = None
+    record_payouts_from_stripe: Optional[bool] = None
 
 
 # ── Accrued Expense schemas ───────────────────────────────────────────────────

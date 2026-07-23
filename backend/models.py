@@ -385,6 +385,11 @@ class StripeConfig(Base):
     # Substring matched against the Mercury deposit's counterparty/description
     # to recognize a Stripe payout landing in the bank feed.
     payout_match_text = Column(String, default="stripe", nullable=False)
+    # When True, the Stripe sync records each payout itself as DR Bank / CR Stripe
+    # Clearing (for clients with NO bank feed importing the deposit). When a bank
+    # feed (Mercury/Plaid) later imports the payout, flip this False so the bank
+    # side isn't double-counted.
+    record_payouts_from_stripe = Column(Boolean, default=False, nullable=False)
     last_sync = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

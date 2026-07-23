@@ -741,6 +741,7 @@ export interface StripeConfig {
   dispute_fees_account: string | null;
   bank_account: string | null;
   payout_match_text: string | null;
+  record_payouts_from_stripe: boolean;
   last_sync: string | null;
 }
 
