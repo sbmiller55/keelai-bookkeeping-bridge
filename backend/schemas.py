@@ -457,6 +457,38 @@ class RevenueIntegrationSettingsUpdate(BaseModel):
     billcom_dev_key: Optional[str] = None
 
 
+class StripeConfigRead(BaseModel):
+    client_id: int
+    enabled: bool
+    stripe_api_key: Optional[str] = None  # masked
+    treatment: str
+    granularity: str
+    recognition_timing: str
+    attribute_customer: bool
+    revenue_account: Optional[str] = None
+    stripe_fees_account: Optional[str] = None
+    stripe_clearing_account: Optional[str] = None
+    dispute_fees_account: Optional[str] = None
+    bank_account: Optional[str] = None
+    payout_match_text: Optional[str] = None
+    last_sync: Optional[datetime] = None
+
+
+class StripeConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    stripe_api_key: Optional[str] = None
+    treatment: Optional[str] = None
+    granularity: Optional[str] = None
+    recognition_timing: Optional[str] = None
+    attribute_customer: Optional[bool] = None
+    revenue_account: Optional[str] = None
+    stripe_fees_account: Optional[str] = None
+    stripe_clearing_account: Optional[str] = None
+    dispute_fees_account: Optional[str] = None
+    bank_account: Optional[str] = None
+    payout_match_text: Optional[str] = None
+
+
 # ── Accrued Expense schemas ───────────────────────────────────────────────────
 
 class AccruedExpenseCreate(BaseModel):

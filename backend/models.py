@@ -86,13 +86,18 @@ class Transaction(Base):
     raw_data = Column(Text, nullable=True)
     invoice_text = Column(Text, nullable=True)
     mercury_status = Column(String(50), nullable=True)
+    # Stripe-native fields (source="stripe"). stripe_charge_id is the dedup key —
+    # it also holds refund ("re_...") / dispute ("dp_...") / payout-summary ("po_...")
+    # ids depending on stripe_object_type. Fee/net/gross live inside raw_data.
+    stripe_charge_id = Column(String, nullable=True, index=True)
+    stripe_object_type = Column(String, nullable=True)  # "charge" | "refund" | "dispute" | "payout_summary"
     status = Column(
         SAEnum(TransactionStatus),
         default=TransactionStatus.pending,
         nullable=False,
     )
     imported_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    source = Column(String, default="mercury", nullable=True)  # "mercury" | "depreciation" | "invoice"
+    source = Column(String, default="mercury", nullable=True)  # "mercury" | "stripe" | "depreciation" | "invoice"
     fixed_asset_id = Column(Integer, ForeignKey("fixed_assets.id"), nullable=True)
     # Invoice-only fields: tracks payment lifecycle for source='invoice' rows
     bill_status = Column(String(20), nullable=True)             # None | "unpaid" | "partial" | "paid"
@@ -341,6 +346,46 @@ class RevenueIntegrationSettings(Base):
     billcom_dev_key = Column(String, nullable=True)
     last_stripe_sync = Column(DateTime, nullable=True)
     last_billcom_sync = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class StripeConfig(Base):
+    """Per-client configuration for the Stripe revenue coding pipeline.
+
+    One row per client. Behavior is entirely data-driven so onboarding a new
+    client with different preferences requires no code — only setting these
+    fields (captured in the onboarding questionnaire / client Settings page).
+
+    This is deliberately separate from RevenueIntegrationSettings, whose
+    stripe_* fields drive the *revenue-recognition* path (RevenueContract).
+    Overloading those would fire two different pipelines from one flag.
+    """
+    __tablename__ = "stripe_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, unique=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    # Restricted (read-only) Stripe secret key. Falls back to
+    # RevenueIntegrationSettings.stripe_api_key when blank. Stored plaintext,
+    # consistent with the existing Mercury/Stripe key handling.
+    api_key = Column(Text, nullable=True)
+    # "gross_plus_fees" (GAAP: full revenue, fees as a separate expense) | "net"
+    treatment = Column(String(20), default="gross_plus_fees", nullable=False)
+    # "per_charge" (one entry per charge, customer-attributed) | "per_payout" (summary)
+    granularity = Column(String(20), default="per_charge", nullable=False)
+    # "charge_date" | "available_on" (when funds become available)
+    recognition_timing = Column(String(20), default="charge_date", nullable=False)
+    attribute_customer = Column(Boolean, default=True, nullable=False)
+    # Account-name mappings — must match the client's QBO chart of accounts exactly.
+    revenue_account = Column(String, nullable=True)
+    stripe_fees_account = Column(String, nullable=True)
+    stripe_clearing_account = Column(String, default="Stripe Clearing", nullable=True)
+    dispute_fees_account = Column(String, nullable=True)  # None → falls back to stripe_fees_account
+    bank_account = Column(String, nullable=True)          # None → auto-detect from the Mercury deposit's account
+    # Substring matched against the Mercury deposit's counterparty/description
+    # to recognize a Stripe payout landing in the bank feed.
+    payout_match_text = Column(String, default="stripe", nullable=False)
+    last_sync = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

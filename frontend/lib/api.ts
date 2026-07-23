@@ -725,6 +725,82 @@ export function syncMercury(
   });
 }
 
+// ── Stripe revenue coding ─────────────────────────────────────────────────────
+
+export interface StripeConfig {
+  client_id: number;
+  enabled: boolean;
+  stripe_api_key: string | null;   // masked ("***") when set
+  treatment: "gross_plus_fees" | "net";
+  granularity: "per_charge" | "per_payout";
+  recognition_timing: "charge_date" | "available_on";
+  attribute_customer: boolean;
+  revenue_account: string | null;
+  stripe_fees_account: string | null;
+  stripe_clearing_account: string | null;
+  dispute_fees_account: string | null;
+  bank_account: string | null;
+  payout_match_text: string | null;
+  last_sync: string | null;
+}
+
+export interface StripeSyncResult {
+  client_id: number;
+  client_name: string;
+  imported: number;
+  skipped: number;
+  je_created: number;
+  errors: string[];
+  range_start: string | null;
+  range_end: string | null;
+  last_sync: string | null;
+}
+
+export function getStripeSettings(clientId: number): Promise<StripeConfig> {
+  return apiFetch(`/stripe/settings?client_id=${clientId}`);
+}
+
+export function updateStripeSettings(
+  clientId: number,
+  data: Partial<Omit<StripeConfig, "client_id" | "last_sync">>,
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/stripe/settings?client_id=${clientId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export function testStripeConnection(clientId: number): Promise<{ ok: boolean; has_charges?: boolean }> {
+  return apiFetch(`/stripe/test?client_id=${clientId}`, { method: "POST" });
+}
+
+export function syncStripe(
+  clientId: number,
+  dateRange: DateRangeOption = "since_last_sync",
+  customStart?: string,
+  customEnd?: string,
+): Promise<StripeSyncResult> {
+  // Fetches charges/refunds/payouts from Stripe and codes them. Can take a while.
+  return apiFetch<StripeSyncResult>("/stripe/sync", {
+    method: "POST",
+    timeoutMs: 5 * 60 * 1000,
+    body: JSON.stringify({
+      client_id: clientId,
+      date_range: dateRange,
+      custom_start: customStart ?? null,
+      custom_end: customEnd ?? null,
+    }),
+  });
+}
+
+export function codeStripe(
+  clientId: number,
+  limit?: number,
+): Promise<{ je_created: number; message: string }> {
+  const qs = limit ? `&limit=${limit}` : "";
+  return apiFetch(`/stripe/code?client_id=${clientId}${qs}`, { method: "POST" });
+}
+
 export interface Vendor {
   name: string;
   count: number;

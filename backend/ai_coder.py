@@ -107,6 +107,7 @@ _ALWAYS_VALID_ACCOUNTS = {
     "Interest Earned",
     "Interest Expense",
     "Interest Receivable",   # used by the Mercury interest accrual split
+    "Stripe Clearing",       # used by the Stripe revenue coding pipeline (default clearing account)
     "Uncoded",
 }
 

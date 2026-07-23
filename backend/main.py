@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import Base, engine
 from auth import get_current_user
-from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo, fixed_assets, accruals, revenue, billcom
+from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo, fixed_assets, accruals, revenue, billcom, stripe
 
 
 def create_tables():
@@ -48,6 +48,7 @@ app.include_router(fixed_assets.router)
 app.include_router(accruals.router)
 app.include_router(revenue.router)
 app.include_router(billcom.router)
+app.include_router(stripe.router)
 
 
 def _run_daily_backup():
@@ -79,6 +80,9 @@ def _migrate_db():
         ("close_checklist_items", "recurrence",     "TEXT DEFAULT 'monthly'"),
         ("transactions",          "source",          "TEXT DEFAULT 'mercury'"),
         ("transactions",          "fixed_asset_id",  "INTEGER"),
+        # Stripe revenue coding pipeline (added 2026-07)
+        ("transactions",          "stripe_charge_id",   "TEXT"),
+        ("transactions",          "stripe_object_type", "TEXT"),
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("accrued_expenses",      "debit_account",       "TEXT"),

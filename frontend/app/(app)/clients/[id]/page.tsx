@@ -5,7 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   getClient, getTransactions, syncMercury, getCloseChecklist,
-  Client, Transaction, MercurySyncResult, DateRangeOption, CloseChecklistItem,
+  getStripeSettings, syncStripe,
+  Client, Transaction, MercurySyncResult, StripeSyncResult, DateRangeOption, CloseChecklistItem,
 } from "@/lib/api";
 
 // ── Due date helpers (mirrors close/page.tsx) ─────────────────────────────────
@@ -119,6 +120,12 @@ export default function ClientOverviewPage() {
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
 
+  const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [stripeSyncing, setStripeSyncing] = useState(false);
+  const [stripeSyncResult, setStripeSyncResult] = useState<StripeSyncResult | null>(null);
+  const [stripeSyncError, setStripeSyncError] = useState<string | null>(null);
+  const [stripeDateRange, setStripeDateRange] = useState<DateRangeOption>("since_last_sync");
+
   async function loadData() {
     setLoading(true);
     try {
@@ -136,6 +143,27 @@ export default function ClientOverviewPage() {
   }
 
   useEffect(() => { loadData(); }, [clientId]);
+
+  useEffect(() => {
+    getStripeSettings(clientId).then((s) => setStripeEnabled(s.enabled)).catch(() => {});
+  }, [clientId]);
+
+  async function handleStripeSync() {
+    setStripeSyncing(true);
+    setStripeSyncResult(null);
+    setStripeSyncError(null);
+    try {
+      const result = await syncStripe(clientId, stripeDateRange);
+      setStripeSyncResult(result);
+      if (result.imported > 0) {
+        router.push(`/clients/${clientId}/review`);
+      }
+    } catch (err: unknown) {
+      setStripeSyncError(err instanceof Error ? err.message : "Stripe sync failed");
+    } finally {
+      setStripeSyncing(false);
+    }
+  }
 
   async function handleSync() {
     setSyncing(true);
@@ -268,6 +296,74 @@ export default function ClientOverviewPage() {
         </div>
       )}
       {syncResult && <SyncDetail result={syncResult} />}
+
+      {/* Stripe sync (only when enabled for this client) */}
+      {stripeEnabled && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-6">
+          <p className="text-sm font-medium text-gray-300 mb-3">Sync Stripe Revenue</p>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Date range</label>
+              <select
+                value={stripeDateRange}
+                onChange={(e) => setStripeDateRange(e.target.value as DateRangeOption)}
+                className="bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {DATE_RANGE_OPTIONS.filter((o) => o.value !== "custom").map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              onClick={handleStripeSync}
+              disabled={stripeSyncing}
+              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors min-w-[160px] justify-center"
+            >
+              {stripeSyncing ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                  Importing &amp; coding…
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Sync &amp; Code
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {stripeSyncError && (
+        <div className="mb-6 bg-red-950 border border-red-800 text-red-300 rounded-lg px-4 py-3 text-sm">
+          Stripe sync failed: {stripeSyncError}
+        </div>
+      )}
+      {stripeSyncResult && (
+        <div className="mb-6 bg-gray-900 border border-gray-700 rounded-xl p-5 text-sm space-y-2">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-green-400 font-semibold">Stripe sync complete</span>
+            <span className="text-gray-600">·</span>
+            <span className="text-white">{stripeSyncResult.imported} charges imported</span>
+            {stripeSyncResult.je_created > 0 && (
+              <><span className="text-gray-600">·</span>
+              <span className="text-indigo-400">{stripeSyncResult.je_created} journal entries coded</span></>
+            )}
+            {stripeSyncResult.skipped > 0 && (
+              <><span className="text-gray-600">·</span>
+              <span className="text-gray-400">{stripeSyncResult.skipped} already imported</span></>
+            )}
+          </div>
+          {stripeSyncResult.errors.length > 0 && (
+            <ul className="text-yellow-400 text-xs list-disc list-inside space-y-0.5">
+              {stripeSyncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">

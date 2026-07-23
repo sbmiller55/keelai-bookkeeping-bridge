@@ -2,7 +2,30 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings } from "@/lib/api";
+import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings, getStripeSettings, updateStripeSettings, testStripeConnection, StripeConfig } from "@/lib/api";
+import { useAccounts } from "@/lib/useAccounts";
+
+// Simple account picker backed by the live QBO chart of accounts. Falls back to
+// a free-text input when QBO isn't connected yet (so the field is still usable).
+function AccountPicker({
+  value, onChange, accounts, placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  accounts: string[];
+  placeholder: string;
+}) {
+  const cls = "w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500";
+  if (!accounts.length) {
+    return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={cls} />;
+  }
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={cls}>
+      <option value="">{placeholder}</option>
+      {accounts.map((a) => <option key={a} value={a}>{a}</option>)}
+    </select>
+  );
+}
 
 function UploadField({
   label,
@@ -91,6 +114,27 @@ export default function ClientSettingsPage() {
   const [billcomTestMsg, setBillcomTestMsg] = useState<string | null>(null);
   const [billcomError, setBillcomError] = useState<string | null>(null);
 
+  const { accounts } = useAccounts(clientId);
+  const [stripeSettings, setStripeSettings] = useState<StripeConfig | null>(null);
+  const [stripeForm, setStripeForm] = useState({
+    enabled: false,
+    api_key: "",
+    treatment: "gross_plus_fees" as StripeConfig["treatment"],
+    granularity: "per_charge" as StripeConfig["granularity"],
+    recognition_timing: "charge_date" as StripeConfig["recognition_timing"],
+    attribute_customer: true,
+    revenue_account: "",
+    stripe_fees_account: "",
+    stripe_clearing_account: "Stripe Clearing",
+    bank_account: "",
+    payout_match_text: "stripe",
+  });
+  const [stripeSaving, setStripeSaving] = useState(false);
+  const [stripeSaved, setStripeSaved] = useState(false);
+  const [stripeTesting, setStripeTesting] = useState(false);
+  const [stripeTestMsg, setStripeTestMsg] = useState<string | null>(null);
+  const [stripeError, setStripeError] = useState<string | null>(null);
+
   useEffect(() => {
     getClient(clientId).then((c) => {
       setClient(c);
@@ -101,6 +145,22 @@ export default function ClientSettingsPage() {
     getRevenueIntegrationSettings(clientId).then((s) => {
       setBillcomSettings(s);
       setBillcomForm({ username: s.billcom_username ?? "", password: "", org_id: s.billcom_org_id ?? "", dev_key: "", enabled: s.billcom_enabled });
+    }).catch(() => {});
+    getStripeSettings(clientId).then((s) => {
+      setStripeSettings(s);
+      setStripeForm({
+        enabled: s.enabled,
+        api_key: "",
+        treatment: s.treatment,
+        granularity: s.granularity,
+        recognition_timing: s.recognition_timing,
+        attribute_customer: s.attribute_customer,
+        revenue_account: s.revenue_account ?? "",
+        stripe_fees_account: s.stripe_fees_account ?? "",
+        stripe_clearing_account: s.stripe_clearing_account ?? "Stripe Clearing",
+        bank_account: s.bank_account ?? "",
+        payout_match_text: s.payout_match_text ?? "stripe",
+      });
     }).catch(() => {});
 
     // Refresh QBO status when the tab regains focus (user closes callback tab)
@@ -214,6 +274,53 @@ export default function ClientSettingsPage() {
     }
   }
 
+  async function handleSaveStripe() {
+    setStripeSaving(true);
+    setStripeError(null);
+    setStripeSaved(false);
+    try {
+      const payload: Record<string, unknown> = {
+        enabled: stripeForm.enabled,
+        treatment: stripeForm.treatment,
+        granularity: stripeForm.granularity,
+        recognition_timing: stripeForm.recognition_timing,
+        attribute_customer: stripeForm.attribute_customer,
+        revenue_account: stripeForm.revenue_account || null,
+        stripe_fees_account: stripeForm.stripe_fees_account || null,
+        stripe_clearing_account: stripeForm.stripe_clearing_account || null,
+        bank_account: stripeForm.bank_account || null,
+        payout_match_text: stripeForm.payout_match_text || "stripe",
+      };
+      // Only send the key when the user typed a new one, so the saved key
+      // isn't wiped when the masked field is left untouched.
+      if (stripeForm.api_key) payload.stripe_api_key = stripeForm.api_key;
+      await updateStripeSettings(clientId, payload);
+      const fresh = await getStripeSettings(clientId);
+      setStripeSettings(fresh);
+      setStripeForm((f) => ({ ...f, api_key: "" }));
+      setStripeSaved(true);
+      setStripeTestMsg(null);
+      setTimeout(() => setStripeSaved(false), 3000);
+    } catch (e: unknown) {
+      setStripeError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setStripeSaving(false);
+    }
+  }
+
+  async function handleTestStripe() {
+    setStripeTesting(true);
+    setStripeTestMsg(null);
+    try {
+      const result = await testStripeConnection(clientId);
+      setStripeTestMsg(result.ok ? "Connected successfully" : "Connection failed");
+    } catch (e: unknown) {
+      setStripeTestMsg(e instanceof Error ? e.message : "Connection failed");
+    } finally {
+      setStripeTesting(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -248,6 +355,128 @@ export default function ClientSettingsPage() {
           >
             {savingKey ? "Saving…" : keySaved ? "Saved ✓" : "Save"}
           </button>
+        </div>
+      </section>
+
+      {/* Stripe Integration */}
+      <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
+        <div className="flex items-start justify-between mb-1">
+          <h2 className="text-base font-semibold text-white">Stripe Revenue</h2>
+          <button type="button"
+            onClick={() => setStripeForm((f) => ({ ...f, enabled: !f.enabled }))}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${stripeForm.enabled ? "bg-indigo-600" : "bg-gray-700"}`}>
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${stripeForm.enabled ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Record Stripe revenue into the coding pipeline. Charges post gross revenue with
+          Stripe fees broken out; payouts clear against the bank automatically.
+        </p>
+        {stripeError && <p className="text-red-400 text-xs mb-3">{stripeError}</p>}
+
+        {/* API key */}
+        <label className="text-xs text-gray-400 mb-1 block">Restricted API key</label>
+        <input
+          type="password"
+          value={stripeForm.api_key}
+          onChange={(e) => setStripeForm((f) => ({ ...f, api_key: e.target.value }))}
+          placeholder={stripeSettings?.stripe_api_key ? "••••••• (saved — enter a new key to replace)" : "rk_live_…"}
+          className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 mb-1"
+        />
+        <p className="text-[11px] text-gray-600 mb-4">
+          Create a <span className="text-gray-400">restricted</span> key in Stripe → Developers → API keys,
+          with <span className="text-gray-400">Read</span> access to Charges, Balance transactions, Payouts, and Customers.
+        </p>
+
+        {/* Treatment / granularity / timing */}
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Fee treatment</label>
+            <select value={stripeForm.treatment}
+              onChange={(e) => setStripeForm((f) => ({ ...f, treatment: e.target.value as StripeConfig["treatment"] }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value="gross_plus_fees">Gross revenue, fees as expense (GAAP)</option>
+              <option value="net">Net of fees</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Granularity</label>
+            <select value={stripeForm.granularity}
+              onChange={(e) => setStripeForm((f) => ({ ...f, granularity: e.target.value as StripeConfig["granularity"] }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value="per_charge">One entry per charge</option>
+              <option value="per_payout">One summary per payout</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Recognize revenue</label>
+            <select value={stripeForm.recognition_timing}
+              onChange={(e) => setStripeForm((f) => ({ ...f, recognition_timing: e.target.value as StripeConfig["recognition_timing"] }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value="charge_date">On the charge date</option>
+              <option value="available_on">When funds are available</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Customer attribution</label>
+            <select value={stripeForm.attribute_customer ? "yes" : "no"}
+              onChange={(e) => setStripeForm((f) => ({ ...f, attribute_customer: e.target.value === "yes" }))}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value="yes">Attribute each charge to a customer</option>
+              <option value="no">No customer attribution</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Account mappings */}
+        {accounts.length === 0 && (
+          <p className="text-[11px] text-amber-400/80 mb-2">
+            Connect QuickBooks below to pick accounts from your chart of accounts. You can type names for now.
+          </p>
+        )}
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Revenue account</label>
+            <AccountPicker value={stripeForm.revenue_account}
+              onChange={(v) => setStripeForm((f) => ({ ...f, revenue_account: v }))}
+              accounts={accounts} placeholder="Select income account…" />
+          </div>
+          {stripeForm.treatment === "gross_plus_fees" && (
+            <div>
+              <label className="text-xs text-gray-400 mb-1 block">Stripe fees account</label>
+              <AccountPicker value={stripeForm.stripe_fees_account}
+                onChange={(v) => setStripeForm((f) => ({ ...f, stripe_fees_account: v }))}
+                accounts={accounts} placeholder="Select expense account…" />
+            </div>
+          )}
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Stripe clearing account</label>
+            <AccountPicker value={stripeForm.stripe_clearing_account}
+              onChange={(v) => setStripeForm((f) => ({ ...f, stripe_clearing_account: v }))}
+              accounts={accounts} placeholder="Select clearing account…" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 mb-1 block">Bank account (payouts land here)</label>
+            <AccountPicker value={stripeForm.bank_account}
+              onChange={(v) => setStripeForm((f) => ({ ...f, bank_account: v }))}
+              accounts={accounts} placeholder="Select bank account…" />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button onClick={handleSaveStripe} disabled={stripeSaving}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
+            {stripeSaving ? "Saving…" : stripeSaved ? "Saved ✓" : "Save"}
+          </button>
+          <button type="button" onClick={handleTestStripe} disabled={stripeTesting}
+            className="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 rounded-lg transition-colors">
+            {stripeTesting ? "Testing…" : "Test Connection"}
+          </button>
+          {stripeTestMsg && (
+            <span className={`text-xs ${stripeTestMsg.includes("success") ? "text-green-400" : "text-red-400"}`}>
+              {stripeTestMsg}
+            </span>
+          )}
         </div>
       </section>
 

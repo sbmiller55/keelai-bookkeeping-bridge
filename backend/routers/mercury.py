@@ -17,6 +17,7 @@ import mercury as mercury_client
 import ai_coder
 import rules_engine
 import interest_accrual
+import stripe_revenue_je
 
 
 _VENDOR_TOKEN_RE = re.compile(r"[^a-z0-9]+")
@@ -488,6 +489,38 @@ def _sync_one_client(
             rule_coded_ids.add(txn.id)
         db.flush()
 
+        # ── Pre-pass: Stripe payout deposits → Stripe Clearing ───────────────
+        # A Stripe payout lands in the Mercury bank feed as a deposit. Code it
+        # DR bank / CR Stripe Clearing (using the SAME clearing account the
+        # /stripe charge coding credited) so the clearing account nets to zero.
+        # The clearing-account name lives in stripe_revenue_je, the single
+        # source of truth for both sides.
+        _scfg = stripe_revenue_je.load_stripe_config(client.id, db)
+        if getattr(_scfg, "enabled", False):
+            for txn in new_txn_objects:
+                if txn.id in rule_coded_ids:
+                    continue
+                if not stripe_revenue_je.is_stripe_payout(txn, _scfg):
+                    continue
+                for jd in stripe_revenue_je.build_stripe_payout_jes(txn, _scfg):
+                    db.add(models.JournalEntry(
+                        je_number=_je_num,
+                        transaction_id=txn.id,
+                        debit_account=jd["debit_account"],
+                        credit_account=jd["credit_account"],
+                        amount=jd["amount"],
+                        je_date=jd["je_date"],
+                        memo=jd["memo"],
+                        description=jd["description"],
+                        customer_name=jd["customer_name"],
+                        ai_confidence=jd["ai_confidence"],
+                        ai_reasoning=jd["ai_reasoning"],
+                    ))
+                    je_created += 1
+                    _je_num += 1
+                rule_coded_ids.add(txn.id)
+            db.flush()
+
         for txn in new_txn_objects:
             if txn.id in rule_coded_ids:
                 continue
@@ -794,6 +827,8 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
+            # Stripe-sourced rows are coded by /stripe/code, not the Mercury AI path.
+            or_(models.Transaction.source.is_(None), models.Transaction.source != "stripe"),
             ~models.Transaction.id.in_(really_coded_ids) if really_coded_ids else True,
         )
         .order_by(models.Transaction.date.asc(), models.Transaction.id.asc())
@@ -872,6 +907,33 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
             _je_num += 1
         rule_coded_ids.add(txn.id)
     db.flush()
+
+    # ── Pre-pass: Stripe payout deposits → Stripe Clearing (same as live sync) ──
+    _scfg = stripe_revenue_je.load_stripe_config(client_id, db)
+    if getattr(_scfg, "enabled", False):
+        for txn in pending:
+            if txn.id in rule_coded_ids:
+                continue
+            if not stripe_revenue_je.is_stripe_payout(txn, _scfg):
+                continue
+            for jd in stripe_revenue_je.build_stripe_payout_jes(txn, _scfg):
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=jd["amount"],
+                    je_date=jd["je_date"],
+                    memo=jd["memo"],
+                    description=jd["description"],
+                    customer_name=jd["customer_name"],
+                    ai_confidence=jd["ai_confidence"],
+                    ai_reasoning=jd["ai_reasoning"],
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+        db.flush()
 
     for txn in pending:
         if txn.id in rule_coded_ids:
@@ -1043,6 +1105,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
+            or_(models.Transaction.source.is_(None), models.Transaction.source != "stripe"),
             ~models.Transaction.id.in_(really_coded_after) if really_coded_after else True,
         )
         .count()
