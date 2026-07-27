@@ -152,6 +152,65 @@ def _apply_invoice_match(
         ae.payment_je_id = je.id
     return je_num + 1
 
+
+def _rematch_pending_payments(client_id: int, db: Session) -> int:
+    """Reconcile pending outgoing payments against invoices — the guardrail
+    against double-booked accruals.
+
+    The invoice-text coding path (ai_coder.code_outgoing_payment_with_invoice)
+    books BOTH an accrual and a payment on the payment transaction. When the same
+    invoice is ALSO entered separately (source='invoice'), that accrual is a
+    duplicate. This pass finds any pending outgoing payment that matches an
+    unpaid invoice and re-codes it as a payment-only clearing entry
+    (DR accrued / CR bank) linked to the invoice, deleting the duplicate accrual.
+
+    Enforces the invariant "a payment matching an invoice books only the cash
+    clearing, never a second accrual." Idempotent (matched payments carry
+    matched_invoice_id and are skipped); never touches approved/exported payments
+    or ones hand-corrected via a rule. Returns the number reconciled.
+
+    Must run after EVERY sync and on manual coding so a duplicate accrual can
+    never persist once the invoice is present — do not gate it behind an
+    unchunked-only manual call.
+    """
+    rematched = 0
+    je_num = models.next_je_number(db)
+    candidates = (
+        db.query(models.Transaction)
+        .filter(
+            models.Transaction.client_id == client_id,
+            models.Transaction.status == models.TransactionStatus.pending,
+            models.Transaction.kind == "outgoingPayment",
+            models.Transaction.amount < 0,
+        )
+        .all()
+    )
+    for txn in candidates:
+        existing_jes = (
+            db.query(models.JournalEntry)
+            .filter(models.JournalEntry.transaction_id == txn.id)
+            .all()
+        )
+        if not existing_jes:
+            continue  # uncoded — the main coding loop handles it
+        if any(je.matched_invoice_id for je in existing_jes):
+            continue  # already matched to an invoice
+        if any(je.rule_applied for je in existing_jes):
+            continue  # hand-corrected via a rule — leave it
+        match = _find_matching_invoice(txn, db)
+        if match is None:
+            continue
+        invoice, conf = match
+        for je in existing_jes:
+            db.delete(je)
+        db.flush()
+        je_num = _apply_invoice_match(txn, invoice, conf, db, je_num)
+        rematched += 1
+    if rematched:
+        db.flush()
+    return rematched
+
+
 router = APIRouter(prefix="/mercury", tags=["mercury"])
 
 DateRangeOption = Literal[
@@ -605,6 +664,13 @@ def _sync_one_client(
                     je_created += 1
                     _je_num += 1
 
+    # Reconcile payments against invoices so a payment that booked a standalone
+    # accrual (invoice-text path) never keeps a duplicate once its separate
+    # invoice entry exists. Runs every sync — the guardrail against double
+    # accruals; not gated on new_txn_objects since an invoice may have arrived
+    # separately for a payment synced earlier.
+    _rematch_pending_payments(client.id, db)
+
     db.commit()
 
     date_earliest = min(imported_dates).strftime("%Y-%m-%d") if imported_dates else None
@@ -716,58 +782,13 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
     """Original code_pending body, instrumented and wrapped so unhandled
     exceptions surface as JSON instead of a bodyless 500."""
 
-    # ── Rematch pass: re-check ALREADY-CODED pending payments against invoices.
-    # This catches the case where a payment was imported and AI-coded before its
-    # invoice was uploaded — without this, the payment never gets matched. Only
-    # touches outgoing payments that are still pending (not approved/exported)
-    # and not already AI-matched or hand-corrected via a rule.
-    #
-    # When `limit` is set, the frontend is chunking through a backlog — the
-    # rematch is a global pass over every pending outgoing payment, so running
-    # it on every chunk wastes a lot of work. Skip it entirely in chunked mode;
-    # callers can run an unlimited call (or a separate /rematch endpoint) when
-    # they want it.
-    rematched = 0
-    _rematch_je_num = models.next_je_number(db)
-    rematch_candidates = (
-        []
-        if (limit is not None and limit > 0)
-        else (
-            db.query(models.Transaction)
-            .filter(
-                models.Transaction.client_id == client_id,
-                models.Transaction.status == models.TransactionStatus.pending,
-                models.Transaction.kind == "outgoingPayment",
-                models.Transaction.amount < 0,
-            )
-            .all()
-        )
-    )
-    for txn in rematch_candidates:
-        existing_jes = (
-            db.query(models.JournalEntry)
-            .filter(models.JournalEntry.transaction_id == txn.id)
-            .all()
-        )
-        if not existing_jes:
-            continue   # uncoded — main loop below will handle
-        # Skip if already matched or hand-corrected via a rule
-        if any(je.matched_invoice_id for je in existing_jes):
-            continue
-        if any(je.rule_applied for je in existing_jes):
-            continue
-        match = _find_matching_invoice(txn, db)
-        if match is None:
-            continue
-        invoice, conf = match
-        # Replace existing JEs with the matched coding
-        for je in existing_jes:
-            db.delete(je)
-        db.flush()
-        _rematch_je_num = _apply_invoice_match(txn, invoice, conf, db, _rematch_je_num)
-        rematched += 1
-    if rematched:
-        db.flush()
+    # ── Rematch pass: reconcile already-coded pending payments against invoices,
+    # collapsing any duplicate accrual to a payment-only clearing entry. See
+    # _rematch_pending_payments. This also runs automatically after every sync,
+    # so it's the guardrail — not a manual-only step. Chunked calls (limit set)
+    # skip it because the sync path and unchunked calls already cover it, and a
+    # global pass on every chunk would be wasteful.
+    rematched = 0 if (limit is not None and limit > 0) else _rematch_pending_payments(client_id, db)
 
     # A transaction counts as "really coded" only if it has at least one JE whose
     # debit AND credit are real accounts (neither equals "Uncoded" nor begins with
