@@ -47,6 +47,7 @@ from schemas import (
     AccruedExpenseRead,
     AccruedExpenseUpdate,
     AccrualSummary,
+    PrepaidScheduleRequest,
     StandingAccrualRuleCreate,
     StandingAccrualRuleRead,
     StandingAccrualRuleUpdate,
@@ -1378,3 +1379,130 @@ def generate_from_standing_rules(
 
     db.commit()
     return {"generated": generated, "skipped": skipped, "month": target_month}
+
+
+@router.post("/prepaid-from-transaction")
+def prepaid_from_transaction(
+    client_id: int,
+    body: PrepaidScheduleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Turn a single Review-Queue transaction into a prepaid expense with a full
+    amortization schedule — the one-off equivalent of the Fixed Asset flow.
+
+    Books the capitalization JE (DR prepaid / CR bank) on the source transaction
+    for review/export, then materializes one amortization entry per month as an
+    AccruedExpense + JE + synthetic transaction (scheduled for future months,
+    pending once the month-end arrives). Those AccruedExpense rows carry a
+    credit_account containing "prepaid" so they appear in the Prepaid Expenses
+    tab and auto-release monthly — no standing rule involved (a true one-off).
+    """
+    import calendar as _cal
+    _get_client(client_id, current_user, db)
+    tx = (
+        db.query(Transaction)
+        .filter(Transaction.id == body.transaction_id, Transaction.client_id == client_id)
+        .first()
+    )
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+    if body.num_months < 1:
+        raise HTTPException(400, "num_months must be at least 1")
+    try:
+        start = datetime.strptime(body.service_start, "%Y-%m")
+    except ValueError:
+        raise HTTPException(400, "service_start must be YYYY-MM")
+
+    total = round(abs(tx.amount or 0), 2)
+    if total <= 0:
+        raise HTTPException(400, "Transaction amount must be non-zero")
+    n = body.num_months
+    monthly = round(total / n, 2)
+    prepaid_account = body.prepaid_account
+    expense_account = body.expense_account
+    bank_account = body.bank_account or tx.mercury_account_name or "Mercury Checking"
+    vendor = tx.counterparty_name or tx.description or "Vendor"
+    description = body.description or (tx.description or vendor)[:255]
+
+    # 1) Capitalization JE on the source transaction (replaces its current coding)
+    db.query(JournalEntry).filter(JournalEntry.transaction_id == tx.id).delete()
+    db.add(JournalEntry(
+        transaction_id=tx.id,
+        je_number=next_je_number(db),
+        debit_account=prepaid_account,
+        credit_account=bank_account,
+        amount=total,
+        je_date=tx.date,
+        memo=f"Prepaid: {vendor}"[:80],
+        ai_confidence=1.0,
+        ai_reasoning=f"Capitalized to {prepaid_account}; amortized over {n} months.",
+    ))
+    db.flush()
+
+    # 2) One amortization entry per month (AccruedExpense + JE + synthetic tx)
+    now = datetime.utcnow()
+    months = []
+    cur = start
+    for _ in range(n):
+        months.append(cur)
+        cur = datetime(cur.year + 1, 1, 1) if cur.month == 12 else datetime(cur.year, cur.month + 1, 1)
+
+    created = 0
+    for i, m in enumerate(months):
+        amount = round(total - monthly * (n - 1), 2) if i == n - 1 else monthly  # last month absorbs rounding
+        last_day = _cal.monthrange(m.year, m.month)[1]
+        period_end = datetime(m.year, m.month, last_day)
+        period_str = m.strftime("%Y-%m")
+        status = TransactionStatus.pending if period_end <= now else TransactionStatus.scheduled
+
+        amort_tx = Transaction(
+            client_id=client_id,
+            date=period_end,
+            description=f"Amortize prepaid: {vendor} ({period_str})"[:255],
+            amount=-amount,
+            status=status,
+            source="accrual",
+        )
+        db.add(amort_tx)
+        db.flush()
+        amort_je = JournalEntry(
+            transaction_id=amort_tx.id,
+            je_number=next_je_number(db),
+            debit_account=expense_account,
+            credit_account=prepaid_account,
+            amount=amount,
+            je_date=period_end,
+            memo=f"{vendor} {m.strftime('%b %Y')} amortization"[:80],
+            ai_confidence=1.0,
+            ai_reasoning=f"Month {i + 1} of {n}: amortization of prepaid {vendor}.",
+        )
+        db.add(amort_je)
+        db.flush()
+        db.add(AccruedExpense(
+            client_id=client_id,
+            vendor_name=vendor,
+            description=description,
+            service_period=period_str,
+            amount=amount,
+            accrual_je_id=amort_je.id,
+            status=AccruedExpenseStatus.accrued,
+            ai_confidence=1.0,
+            ai_reasoning=f"Prepaid amortization schedule for {vendor}.",
+            standing_rule_id=None,
+            debit_account=expense_account,
+            credit_account=prepaid_account,
+        ))
+        created += 1
+
+    db.commit()
+    return {
+        "transaction_id": tx.id,
+        "prepaid_account": prepaid_account,
+        "expense_account": expense_account,
+        "total": total,
+        "months": created,
+        "monthly": monthly,
+        "service_start": body.service_start,
+        "message": f"Capitalized ${total:.2f} and scheduled {created} months of amortization.",
+    }

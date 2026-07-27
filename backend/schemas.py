@@ -457,6 +457,16 @@ class RevenueIntegrationSettingsUpdate(BaseModel):
     billcom_dev_key: Optional[str] = None
 
 
+class PrepaidScheduleRequest(BaseModel):
+    transaction_id: int
+    prepaid_account: str = "Prepaid expenses"      # DR on capitalization / CR on amortization
+    expense_account: str                            # DR on amortization
+    service_start: str                              # "YYYY-MM"
+    num_months: int = 12
+    description: Optional[str] = None                # groups the schedule in the Prepaid tab
+    bank_account: Optional[str] = None              # CR on capitalization; defaults to the txn's account
+
+
 class StripeConfigRead(BaseModel):
     client_id: int
     enabled: bool

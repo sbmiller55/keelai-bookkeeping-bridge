@@ -16,6 +16,7 @@ import {
   syncMercury,
   suggestFixedAsset,
   createFixedAsset,
+  codeAsPrepaidSchedule,
   TransactionWithEntries,
   JournalEntry,
   DateRangeOption,
@@ -383,6 +384,99 @@ const FA_DEP_METHODS = [
   { value: "double_declining", label: "Double-Declining Balance" },
 ];
 
+function PrepaidPanel({
+  tx, clientId, accounts, onConfirm, onClose,
+}: {
+  tx: TransactionWithEntries;
+  clientId: number;
+  accounts: string[];
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const [prepaidAcct, setPrepaidAcct] = useState("Prepaid expenses");
+  const [expenseAcct, setExpenseAcct] = useState("");
+  const [startMonth, setStartMonth] = useState(
+    (tx.date ?? "").slice(0, 7) || new Date().toISOString().slice(0, 7)
+  );
+  const [numMonths, setNumMonths] = useState("12");
+  const [description, setDescription] = useState(tx.description || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const total = Math.abs(tx.amount);
+  const n = Math.max(1, parseInt(numMonths) || 1);
+  const monthly = Math.round((total / n) * 100) / 100;
+  const inputCls = "w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500";
+
+  async function handleConfirm() {
+    setSaving(true); setError(null);
+    try {
+      await codeAsPrepaidSchedule(clientId, {
+        transaction_id: tx.id,
+        prepaid_account: prepaidAcct,
+        expense_account: expenseAcct,
+        service_start: startMonth,
+        num_months: n,
+        description: description || undefined,
+      });
+      onConfirm();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to create prepaid schedule");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg shadow-2xl">
+        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-white">Code as Prepaid Expense</h2>
+            <p className="text-xs text-gray-500 mt-0.5">{tx.description}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none ml-4">×</button>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-lg px-3 py-2 text-xs text-indigo-300">
+            Capitalizes ${total.toFixed(2)} to the prepaid account, then amortizes ~${monthly.toFixed(2)}/mo over {n} months. Each month appears in the Prepaid Expenses tab and releases to the Review Queue on its month-end.
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Description (groups the schedule)</label>
+            <input value={description} onChange={e => setDescription(e.target.value)} className={inputCls} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Prepaid asset account</label>
+              <AccountSelect value={prepaidAcct} onChange={setPrepaidAcct} accounts={accounts} className={inputCls} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Expense account (amortization)</label>
+              <AccountSelect value={expenseAcct} onChange={setExpenseAcct} accounts={accounts} className={inputCls} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Start month</label>
+              <input type="month" value={startMonth} onChange={e => setStartMonth(e.target.value)} className={inputCls} />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1"># of months</label>
+              <input type="number" min={1} value={numMonths} onChange={e => setNumMonths(e.target.value)} className={inputCls} />
+            </div>
+          </div>
+          {error && <p className="text-red-400 text-xs">{error}</p>}
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
+            <button onClick={handleConfirm} disabled={saving || !expenseAcct || !prepaidAcct}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+              {saving ? "Creating…" : "Create prepaid schedule"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FixedAssetPanel({
   tx, jeId, clientId, accounts, onConfirm, onClose,
 }: {
@@ -620,6 +714,7 @@ function JeRow({
   onReject,
   onSplit,
   onMarkAsFixedAsset,
+  onMarkAsPrepaid,
 }: {
   je: JournalEntry;
   tx: TransactionWithEntries;
@@ -634,6 +729,7 @@ function JeRow({
   onReject: (txId: number) => Promise<void>;
   onSplit: (txId: number) => Promise<void>;
   onMarkAsFixedAsset: (tx: TransactionWithEntries, jeId: number) => void;
+  onMarkAsPrepaid: (tx: TransactionWithEntries) => void;
 }) {
   const [debit, setDebit] = useState(je.debit_account);
   const [credit, setCredit] = useState(je.credit_account);
@@ -985,6 +1081,14 @@ function JeRow({
               >
                 🏗
               </button>
+              <button
+                onClick={() => onMarkAsPrepaid(tx)}
+                disabled={!!acting}
+                className="px-2 py-1 text-gray-500 hover:text-indigo-400 hover:bg-gray-700 text-xs rounded transition-colors disabled:opacity-50"
+                title="Code as Prepaid Expense"
+              >
+                🗓
+              </button>
             </>
           )}
         </div>
@@ -1139,6 +1243,7 @@ export default function ReviewQueuePage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
   const [fixedAssetTarget, setFixedAssetTarget] = useState<{ tx: TransactionWithEntries; jeId: number } | null>(null);
+  const [prepaidTarget, setPrepaidTarget] = useState<TransactionWithEntries | null>(null);
 
   // Resize drag logic
   function startResize(col: ColKey, e: React.MouseEvent) {
@@ -1398,6 +1503,18 @@ export default function ReviewQueuePage() {
           onClose={() => setFixedAssetTarget(null)}
         />
       )}
+      {prepaidTarget && (
+        <PrepaidPanel
+          tx={prepaidTarget}
+          clientId={clientId}
+          accounts={accounts}
+          onConfirm={() => {
+            setPrepaidTarget(null);
+            reload();
+          }}
+          onClose={() => setPrepaidTarget(null)}
+        />
+      )}
 
       {/* Header */}
       <div className="mb-4 flex items-center gap-3 flex-wrap">
@@ -1568,6 +1685,7 @@ export default function ReviewQueuePage() {
                       onReject={handleReject}
                       onSplit={handleSplit}
                       onMarkAsFixedAsset={(t, jeId) => setFixedAssetTarget({ tx: t, jeId })}
+                      onMarkAsPrepaid={(t) => setPrepaidTarget(t)}
                     />
                   ))
                 )

@@ -440,6 +440,23 @@ export function clearAllTransactions(clientId: number): Promise<void> {
   return apiFetch<void>(`/transactions/?client_id=${clientId}`, { method: "DELETE" });
 }
 
+// Turn one Review-Queue transaction into a prepaid expense with a full
+// amortization schedule that lives in the Prepaid Expenses tab (one-off).
+export function codeAsPrepaidSchedule(clientId: number, data: {
+  transaction_id: number;
+  prepaid_account: string;
+  expense_account: string;
+  service_start: string;   // "YYYY-MM"
+  num_months: number;
+  description?: string;
+  bank_account?: string;
+}): Promise<{ months: number; total: number; monthly: number; message: string }> {
+  return apiFetch(`/clients/${clientId}/accruals/prepaid-from-transaction`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 export interface TransactionWithEntries extends Transaction {
   journal_entries: JournalEntry[];
 }
