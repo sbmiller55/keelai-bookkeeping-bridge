@@ -320,14 +320,14 @@ function ServicePeriodCell({ contract, clientId, onReload }: {
   const [end, setEnd] = useState((contract.service_period_end ?? "").slice(0, 10));
   const [saving, setSaving] = useState(false);
 
-  async function save() {
+  // Auto-save the moment a date is picked — no button required.
+  async function save(newStart: string, newEnd: string) {
     setSaving(true);
     try {
       await updateRevenueContract(clientId, contract.id, {
-        service_period_start: start || undefined,
-        service_period_end: end || undefined,
+        service_period_start: newStart || undefined,
+        service_period_end: newEnd || undefined,
       });
-      setEditing(false);
       onReload();
     } finally {
       setSaving(false);
@@ -349,13 +349,15 @@ function ServicePeriodCell({ contract, clientId, onReload }: {
   }
   return (
     <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-1">
-      <input type="date" value={start} onChange={(e) => setStart(e.target.value)}
+      <input type="date" value={start}
+        onChange={(e) => { const v = e.target.value; setStart(v); save(v, end); }}
         className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-white" />
       <span className="text-gray-600">–</span>
-      <input type="date" value={end} onChange={(e) => setEnd(e.target.value)}
+      <input type="date" value={end}
+        onChange={(e) => { const v = e.target.value; setEnd(v); save(start, v); }}
         className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-white" />
-      <button onClick={save} disabled={saving} className="text-green-400 px-1" title="Save">{saving ? "…" : "✓"}</button>
-      <button onClick={() => setEditing(false)} className="text-gray-500 px-1" title="Cancel">✗</button>
+      {saving && <span className="text-gray-500 text-xs">saving…</span>}
+      <button onClick={() => setEditing(false)} className="text-gray-500 px-1" title="Done">✕</button>
     </div>
   );
 }

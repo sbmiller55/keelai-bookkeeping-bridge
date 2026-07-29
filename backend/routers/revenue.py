@@ -344,8 +344,10 @@ def update_contract(
     # If the service period (or stream) changed, rebuild the recognition schedule
     # so the months match — but only when nothing has been generated yet, so we
     # never orphan already-generated journal entries.
-    if ("service_period_start" in changed or "service_period_end" in changed
-            or "revenue_stream_id" in changed) and contract.revenue_stream_id:
+    if (("service_period_start" in changed or "service_period_end" in changed
+            or "revenue_stream_id" in changed)
+            and contract.revenue_stream_id
+            and contract.service_period_start and contract.service_period_end):
         stream = db.query(RevenueStream).filter(
             RevenueStream.id == contract.revenue_stream_id
         ).first()
