@@ -41,6 +41,61 @@ def _assert_transaction_owned(tx_id: int, user: models.User, db: Session) -> mod
     return tx
 
 
+def _cascade_revenue_recode(edited_je: models.JournalEntry, changed: dict, db: Session) -> int:
+    """When a revenue-recognition JE's account is re-coded, propagate that account
+    across the whole contract's schedule — every not-yet-exported month's JE — and
+    update the revenue stream so FUTURE generated months follow it too. In-place
+    account updates only (no delete), so the schedule's je_id links stay intact.
+    Returns the number of other JEs updated."""
+    entry = (
+        db.query(models.RevenueScheduleEntry)
+        .filter(models.RevenueScheduleEntry.je_id == edited_je.id)
+        .first()
+    )
+    if not entry:
+        return 0
+    contract = (
+        db.query(models.RevenueContract)
+        .filter(models.RevenueContract.id == entry.contract_id)
+        .first()
+    )
+    if not contract:
+        return 0
+    stream = (
+        db.query(models.RevenueStream)
+        .filter(models.RevenueStream.id == contract.revenue_stream_id)
+        .first()
+        if contract.revenue_stream_id else None
+    )
+    # Update the stream so FUTURE generated months use the corrected account.
+    if stream:
+        bt = stream.billing_type.value if hasattr(stream.billing_type, "value") else str(stream.billing_type)
+        if "credit_account" in changed:
+            stream.revenue_account = edited_je.credit_account          # recognition JEs credit revenue
+        if "debit_account" in changed:
+            if bt in ("monthly_arrears", "invoice_completion"):
+                stream.ar_account = edited_je.debit_account            # AR-based recognition
+            else:
+                stream.deferred_revenue_account = edited_je.debit_account
+    # Cascade to every OTHER JE in this contract's schedule that isn't exported yet.
+    others = (
+        db.query(models.JournalEntry)
+        .join(models.RevenueScheduleEntry, models.RevenueScheduleEntry.je_id == models.JournalEntry.id)
+        .filter(
+            models.RevenueScheduleEntry.contract_id == contract.id,
+            models.JournalEntry.id != edited_je.id,
+            models.JournalEntry.exported_at.is_(None),
+        )
+        .all()
+    )
+    for oje in others:
+        if "credit_account" in changed:
+            oje.credit_account = edited_je.credit_account
+        if "debit_account" in changed:
+            oje.debit_account = edited_je.debit_account
+    return len(others)
+
+
 @router.get("/", response_model=List[schemas.JournalEntryRead])
 def list_journal_entries(
     transaction_id: Optional[int] = Query(None),
@@ -98,6 +153,17 @@ def update_journal_entry(
 
     for field, value in changed.items():
         setattr(je, field, value)
+
+    # If this is a revenue-recognition JE and its account(s) changed, cascade the
+    # new account across the whole contract's schedule + the revenue stream.
+    if "debit_account" in changed or "credit_account" in changed:
+        tx = (
+            db.query(models.Transaction)
+            .filter(models.Transaction.id == je.transaction_id)
+            .first()
+        )
+        if tx and tx.source == "revenue":
+            _cascade_revenue_recode(je, changed, db)
 
     db.commit()
     db.refresh(je)
