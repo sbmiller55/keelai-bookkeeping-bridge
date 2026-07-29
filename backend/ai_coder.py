@@ -1,7 +1,9 @@
 """AI-powered journal entry coding engine using Claude Sonnet."""
 import calendar
+import difflib
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -119,18 +121,71 @@ def _parse_coa_set(chart: Optional[str]) -> Optional[set]:
     return {line.strip().lower() for line in chart.splitlines() if line.strip()}
 
 
-def _validate_account(name: str, coa_set: Optional[set]) -> str:
+def _parse_coa_names(chart: Optional[str]) -> Optional[list]:
+    """Return the canonical (original-cased) account names from chart text."""
+    if not chart:
+        return None
+    seen, out = set(), []
+    for line in chart.splitlines():
+        s = line.strip()
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+    return out
+
+
+def _norm_acct(s: str) -> str:
+    """Normalize an account name for tolerant matching: lowercase, collapse any
+    punctuation/&/whitespace runs to single spaces (so 'Accounting, Tax & Finance
+    fees' == 'Accounting Tax and Finance fees' modulo the 'and')."""
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _validate_account(name: str, coa_names: Optional[list]) -> str:
+    """Map an AI-produced account name to a real QBO account.
+
+    Tries progressively looser (but still safe) matches so near-misses become the
+    correct canonical account instead of an 'Uncoded [x]' placeholder:
+      1. exact (case-insensitive)
+      2. punctuation/&/whitespace-normalized
+      3. singular/plural of the normalized form
+      4. high-threshold fuzzy (difflib ratio >= 0.9) — catches typos, not
+         opposite-category accounts
+    Falls back to 'Uncoded [name]' only when there's genuinely no close match, so
+    the reviewer still sees it. Returns name unchanged when no COA is loaded.
     """
-    Return name unchanged if it's in the COA (or no COA loaded).
-    Return 'Uncoded' with a warning prefix if it looks invented.
-    """
-    if coa_set is None:
-        return name  # no COA to validate against
-    if name.lower() in coa_set:
+    if not coa_names:
         return name
     if name in _ALWAYS_VALID_ACCOUNTS:
         return name
-    # Account not found in COA — flag it so the reviewer notices
+
+    by_lower = {c.lower(): c for c in coa_names}
+    if name.lower() in by_lower:
+        return by_lower[name.lower()]
+    if name.lower() in {a.lower() for a in _ALWAYS_VALID_ACCOUNTS}:
+        return name
+
+    by_norm: dict = {}
+    for c in coa_names:
+        by_norm.setdefault(_norm_acct(c), c)
+
+    target = _norm_acct(name)
+    if not target:
+        return f"Uncoded [{name}]"
+    if target in by_norm:
+        return by_norm[target]
+
+    def _deplural(s: str) -> str:
+        return s[:-1] if s.endswith("s") else s
+    dt = _deplural(target)
+    for nc, canonical in by_norm.items():
+        if _deplural(nc) == dt:
+            return canonical
+
+    close = difflib.get_close_matches(target, list(by_norm.keys()), n=1, cutoff=0.9)
+    if close:
+        return by_norm[close[0]]
+
     return f"Uncoded [{name}]"
 
 
@@ -366,7 +421,7 @@ def _build_system(chart_of_accounts: Optional[str], policy: Optional[str]) -> st
     return "\n".join(parts)
 
 
-def _code_one(txn_dict: dict, system: str, api_key: str, coa_set: Optional[set] = None) -> list[dict]:
+def _code_one(txn_dict: dict, system: str, api_key: str, coa_names: Optional[list] = None) -> list[dict]:
     """Call Claude Sonnet to code a single transaction. Returns list of JE dicts (1 for standard, N for prepaid)."""
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
@@ -437,8 +492,8 @@ def _code_one(txn_dict: dict, system: str, api_key: str, coa_set: Optional[set] 
         raw_debit = str(data.get("debit_account", "Uncoded"))[:255]
         raw_credit = str(data.get("credit_account", "Uncoded"))[:255]
         return [{
-            "debit_account": _validate_account(raw_debit, coa_set),
-            "credit_account": _validate_account(raw_credit, coa_set),
+            "debit_account": _validate_account(raw_debit, coa_names),
+            "credit_account": _validate_account(raw_credit, coa_names),
             "amount": abs(float(txn_dict.get("amount", 0))),
             "je_date": None,
             "memo": str(data.get("memo", ""))[:500],
@@ -662,7 +717,7 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
         )
     policy = _read_file_safe(client_obj.policy_path)
     system = _build_system(chart, policy)
-    coa_set = _parse_coa_set(chart)
+    coa_names = _parse_coa_names(chart)
 
     _CC_KINDS = {"creditCardTransaction", "cardTransaction"}
 
@@ -686,7 +741,7 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
     max_workers = min(8, len(txn_dicts))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_id = {
-            pool.submit(_code_one, td, system, api_key, coa_set): td["id"]
+            pool.submit(_code_one, td, system, api_key, coa_names): td["id"]
             for td in txn_dicts
         }
         for future in as_completed(future_to_id):
