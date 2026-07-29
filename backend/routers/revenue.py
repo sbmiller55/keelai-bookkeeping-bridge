@@ -335,11 +335,30 @@ def update_contract(
     ).first()
     if not contract:
         raise HTTPException(404, "Contract not found")
-    for field, val in body.model_dump(exclude_none=True).items():
+    changed = body.model_dump(exclude_none=True)
+    for field, val in changed.items():
         if field == "status":
             contract.status = RevenueContractStatus(val)
         else:
             setattr(contract, field, val)
+    # If the service period (or stream) changed, rebuild the recognition schedule
+    # so the months match — but only when nothing has been generated yet, so we
+    # never orphan already-generated journal entries.
+    if ("service_period_start" in changed or "service_period_end" in changed
+            or "revenue_stream_id" in changed) and contract.revenue_stream_id:
+        stream = db.query(RevenueStream).filter(
+            RevenueStream.id == contract.revenue_stream_id
+        ).first()
+        has_generated = (
+            db.query(RevenueScheduleEntry)
+            .filter(
+                RevenueScheduleEntry.contract_id == contract.id,
+                RevenueScheduleEntry.je_id.isnot(None),
+            )
+            .first()
+        )
+        if stream and not has_generated:
+            _create_schedule_entries(contract, stream, db)
     db.commit()
     return _enrich_contract(contract, db)
 

@@ -280,6 +280,8 @@ export default function RevenuePage() {
             onGenerateJes={handleGenerateJes}
             onStatusChange={handleStatusChange}
             onDelete={handleDelete}
+            clientId={clientId}
+            onReload={load}
           />
         </>
       )}
@@ -308,7 +310,57 @@ function SummaryCard({ label, value, color }: { label: string; value: string; co
 
 // ── Recognition Schedule Tab ──────────────────────────────────────────────────
 
-function ScheduleTab({ contracts, streamMap, expanded, setExpanded, generatingJe, onGenerateJes, onStatusChange, onDelete }: {
+function ServicePeriodCell({ contract, clientId, onReload }: {
+  contract: RevenueContract;
+  clientId: number;
+  onReload: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [start, setStart] = useState((contract.service_period_start ?? "").slice(0, 10));
+  const [end, setEnd] = useState((contract.service_period_end ?? "").slice(0, 10));
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await updateRevenueContract(clientId, contract.id, {
+        service_period_start: start || undefined,
+        service_period_end: end || undefined,
+      });
+      setEditing(false);
+      onReload();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+        className="text-left text-gray-400 hover:text-indigo-400 border-b border-dashed border-gray-700 hover:border-indigo-500"
+        title="Click to edit the service period"
+      >
+        {contract.service_period_start && contract.service_period_end
+          ? `${fmtDate(contract.service_period_start)} – ${fmtDate(contract.service_period_end)}`
+          : "— set period"}
+      </button>
+    );
+  }
+  return (
+    <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-1">
+      <input type="date" value={start} onChange={(e) => setStart(e.target.value)}
+        className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-white" />
+      <span className="text-gray-600">–</span>
+      <input type="date" value={end} onChange={(e) => setEnd(e.target.value)}
+        className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-xs text-white" />
+      <button onClick={save} disabled={saving} className="text-green-400 px-1" title="Save">{saving ? "…" : "✓"}</button>
+      <button onClick={() => setEditing(false)} className="text-gray-500 px-1" title="Cancel">✗</button>
+    </div>
+  );
+}
+
+function ScheduleTab({ contracts, streamMap, expanded, setExpanded, generatingJe, onGenerateJes, onStatusChange, onDelete, clientId, onReload }: {
   contracts: RevenueContract[];
   streamMap: Record<number, RevenueStream>;
   expanded: number | null;
@@ -317,6 +369,8 @@ function ScheduleTab({ contracts, streamMap, expanded, setExpanded, generatingJe
   onGenerateJes: (id: number) => void;
   onStatusChange: (c: RevenueContract, status: string) => void;
   onDelete: (id: number) => void;
+  clientId: number;
+  onReload: () => void;
 }) {
   if (contracts.length === 0) {
     return (
@@ -371,10 +425,8 @@ function ScheduleTab({ contracts, streamMap, expanded, setExpanded, generatingJe
                     )}
                   </td>
                   <td className="px-4 py-3 text-gray-400 text-xs">{fmtDate(c.billing_date)}</td>
-                  <td className="px-4 py-3 text-xs text-gray-400">
-                    {c.service_period_start && c.service_period_end
-                      ? `${fmtDate(c.service_period_start)} – ${fmtDate(c.service_period_end)}`
-                      : "—"}
+                  <td className="px-4 py-3 text-xs">
+                    <ServicePeriodCell contract={c} clientId={clientId} onReload={onReload} />
                   </td>
                   <td className="px-4 py-3 text-right text-xs font-mono text-white">{fmt(c.total_contract_value)}</td>
                   <td className="px-4 py-3 text-right text-xs font-mono text-green-400">{fmt(c.amount_recognized)}</td>
