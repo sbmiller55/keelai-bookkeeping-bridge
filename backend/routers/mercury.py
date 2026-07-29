@@ -850,7 +850,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
             # Stripe-sourced rows are coded by /stripe/code, not the Mercury AI path.
-            or_(models.Transaction.source.is_(None), models.Transaction.source != "stripe"),
+            or_(models.Transaction.source.is_(None), models.Transaction.source == "mercury"),
             ~models.Transaction.id.in_(really_coded_ids) if really_coded_ids else True,
         )
         .order_by(models.Transaction.date.asc(), models.Transaction.id.asc())
@@ -1127,7 +1127,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         .filter(
             models.Transaction.client_id == client_id,
             models.Transaction.status == models.TransactionStatus.pending,
-            or_(models.Transaction.source.is_(None), models.Transaction.source != "stripe"),
+            or_(models.Transaction.source.is_(None), models.Transaction.source == "mercury"),
             ~models.Transaction.id.in_(really_coded_after) if really_coded_after else True,
         )
         .count()
