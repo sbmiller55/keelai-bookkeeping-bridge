@@ -778,3 +778,59 @@ def code_as_prepaid(
 @router.delete("/", status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
 def bulk_delete_transactions():
     raise HTTPException(status_code=405, detail="Bulk transaction deletion is disabled.")
+
+
+class DeleteByIdsRequest(BaseModel):
+    client_id: int
+    transaction_ids: List[int]
+    confirm: str = ""
+
+
+@router.post("/delete-by-ids")
+def delete_transactions_by_ids(
+    payload: DeleteByIdsRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a SPECIFIC, explicit list of transactions (and their JEs/audit logs)
+    for one client. Scoped to confirmed IDs only — never a status/source filter —
+    so it can't accidentally sweep good data. Requires confirm='YES'."""
+    client = (
+        db.query(models.Client)
+        .filter(models.Client.id == payload.client_id, models.Client.user_id == current_user.id)
+        .first()
+    )
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    if payload.confirm != "YES":
+        raise HTTPException(status_code=400, detail="Pass confirm='YES' to delete.")
+    ids = list({int(i) for i in payload.transaction_ids})
+    if not ids:
+        return {"deleted": 0, "message": "No ids provided."}
+
+    # Only touch transactions that actually belong to this client.
+    owned = {
+        row[0]
+        for row in db.query(models.Transaction.id)
+        .filter(models.Transaction.id.in_(ids), models.Transaction.client_id == payload.client_id)
+        .all()
+    }
+    skipped = [i for i in ids if i not in owned]
+    if not owned:
+        return {"deleted": 0, "skipped": skipped, "message": "None of the given ids belong to this client."}
+
+    owned_list = list(owned)
+    db.query(models.JournalEntry).filter(
+        models.JournalEntry.transaction_id.in_(owned_list)
+    ).delete(synchronize_session=False)
+    db.query(models.AuditLog).filter(
+        models.AuditLog.transaction_id.in_(owned_list)
+    ).delete(synchronize_session=False)
+    deleted = (
+        db.query(models.Transaction)
+        .filter(models.Transaction.id.in_(owned_list), models.Transaction.client_id == payload.client_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"deleted": deleted, "skipped": skipped,
+            "message": f"Deleted {deleted} transaction(s) and their journal entries."}

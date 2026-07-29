@@ -261,15 +261,16 @@ class SyncResponse(BaseModel):
 
 
 def _resolve_api_key(client: models.Client) -> tuple[str, str]:
-    env_key = os.getenv("MERCURY_API_KEY")
-    if env_key:
-        return env_key, "env"
+    # Use the CLIENT's OWN key only. The global MERCURY_API_KEY env var must never
+    # be applied to a client that isn't its owner — doing so pulls one company's
+    # Mercury data into another client's books (a cross-client leak). A client with
+    # no Mercury key of its own simply cannot sync Mercury.
     if client.mercury_api_key_encrypted:
         return client.mercury_api_key_encrypted, "client"
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         detail=f"No Mercury API key configured for client '{client.name}'. "
-               "Add a key in Settings or set the MERCURY_API_KEY environment variable.",
+               "Add this client's own Mercury API key in Settings to sync.",
     )
 
 
