@@ -458,6 +458,7 @@ def generate_recognition_jes(
             amount=entry.amount,
             je_date=je_date,
             memo=memo[:80],
+            customer_name=contract.customer_name,
             ai_confidence=1.0,
             ai_reasoning=f"ASC 606 recognition for {contract.customer_name}, {stream.name}, {entry.period}.",
         )
@@ -470,6 +471,7 @@ def generate_recognition_jes(
     # Cash receipt for a paid contract (DR bank / CR AR).
     if _generate_payment_je(contract, stream, db):
         created.append("payment")
+    _ensure_customer_on_jes(contract, db)
 
     db.commit()
     return {"created": created, "contract_id": contract_id}
@@ -591,6 +593,7 @@ def generate_all_jes(
                 amount=entry.amount,
                 je_date=je_date,
                 memo=memo[:80],
+                customer_name=contract.customer_name,
                 ai_confidence=1.0,
                 ai_reasoning=f"ASC 606 recognition for {contract.customer_name}, {stream.name}, {entry.period}.",
             )
@@ -603,6 +606,8 @@ def generate_all_jes(
         # Cash receipt for paid contracts — even if recognition was already done.
         if _generate_payment_je(contract, stream, db):
             total_created += 1
+        # Ensure the customer is on every JE (backfills existing ones too).
+        _ensure_customer_on_jes(contract, db)
 
     db.commit()
     return {"created": total_created, "errors": errors}
@@ -897,6 +902,7 @@ def _generate_payment_je(contract: RevenueContract, stream: Optional[RevenueStre
         amount=amount,
         je_date=pay_date,
         memo=f"Cash receipt: {contract.customer_name} inv {contract.invoice_number or ''}"[:80],
+        customer_name=contract.customer_name,
         ai_confidence=1.0,
         ai_reasoning=f"AR cash receipt for {contract.customer_name} (paid per {contract.source}).",
     )
@@ -904,6 +910,31 @@ def _generate_payment_je(contract: RevenueContract, stream: Optional[RevenueStre
     db.flush()
     contract.payment_je_id = je.id
     return True
+
+
+def _ensure_customer_on_jes(contract: RevenueContract, db: Session) -> int:
+    """Set customer_name = contract.customer_name on every JE tied to this contract
+    (recognition entries + cash receipt). QBO requires a customer on AR/income
+    lines. Backfills existing JEs and is idempotent. Returns the count updated."""
+    if not contract.customer_name:
+        return 0
+    je_ids = {
+        e.je_id for e in db.query(RevenueScheduleEntry)
+        .filter(
+            RevenueScheduleEntry.contract_id == contract.id,
+            RevenueScheduleEntry.je_id.isnot(None),
+        ).all()
+    }
+    if contract.payment_je_id:
+        je_ids.add(contract.payment_je_id)
+    if not je_ids:
+        return 0
+    n = 0
+    for je in db.query(JournalEntry).filter(JournalEntry.id.in_(list(je_ids))).all():
+        if je.customer_name != contract.customer_name:
+            je.customer_name = contract.customer_name
+            n += 1
+    return n
 
 
 def _sync_mercury_revenue(client_id: int, client, streams_dicts: list, db: Session) -> list:
