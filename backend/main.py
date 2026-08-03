@@ -84,6 +84,9 @@ def _migrate_db():
         ("transactions",          "stripe_charge_id",   "TEXT"),
         ("transactions",          "stripe_object_type", "TEXT"),
         ("stripe_config",         "record_payouts_from_stripe", "BOOLEAN DEFAULT FALSE"),
+        # AR cash-receipt JEs for paid revenue contracts (added 2026-08)
+        ("revenue_streams",       "bank_account",   "TEXT"),
+        ("revenue_contracts",     "payment_je_id",  "INTEGER"),
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("accrued_expenses",      "debit_account",       "TEXT"),

@@ -54,9 +54,49 @@ class BillComClient:
             raise RuntimeError(f"Bill.com API error: {data.get('response_message')}")
         return data.get("response_data", {})
 
-    def get_invoices(self) -> list[dict]:
-        """Fetch AR invoices from Bill.com with customer name resolution."""
+    def get_received_payments(self) -> dict:
+        """Return {invoice_id: payment_date} from Bill.com received-payment (AR)
+        records — the only place the actual payment DATE lives. Defensive: any
+        failure or unexpected shape just yields an empty/partial map so the
+        invoice sync is never broken by it."""
         import json as _json
+        inv_to_date: dict = {}
+        start = 0
+        while True:
+            try:
+                raw = self._get("List/ReceivedPay.json", {
+                    "data": _json.dumps({"start": start, "max": 999, "filters": [], "sort": []})
+                })
+            except Exception:
+                break
+            page = raw if isinstance(raw, list) else []
+            for rp in page:
+                try:
+                    pdate = _parse_billcom_date(rp.get("paymentDate") or rp.get("processDate"))
+                    if not pdate:
+                        continue
+                    # invoicePays links a received payment to the invoice(s) it settled
+                    pays = rp.get("invoicePays") or rp.get("invoicePayments") or []
+                    ids = [ip.get("invoiceId") for ip in pays if ip.get("invoiceId")] or ([rp.get("invoiceId")] if rp.get("invoiceId") else [])
+                    for iid in ids:
+                        if iid and (iid not in inv_to_date or pdate > inv_to_date[iid]):
+                            inv_to_date[iid] = pdate
+                except Exception:
+                    continue
+            if len(page) < 999:
+                break
+            start += 999
+        return inv_to_date
+
+    def get_invoices(self) -> list[dict]:
+        """Fetch AR invoices from Bill.com with customer name + payment-date resolution."""
+        import json as _json
+
+        # Payment dates come from the received-payment records, not the invoice.
+        try:
+            payment_dates = self.get_received_payments()
+        except Exception:
+            payment_dates = {}
 
         # Build customer ID → name map first
         try:
@@ -98,6 +138,7 @@ class BillComClient:
                     "billing_date": _parse_billcom_date(inv.get("invoiceDate")),
                     "due_date": _parse_billcom_date(inv.get("dueDate")),
                     "payment_received": is_paid,
+                    "payment_date": payment_dates.get(inv.get("id")) if is_paid else None,
                     "description": inv.get("description") or "",
                     "raw": inv,
                 })

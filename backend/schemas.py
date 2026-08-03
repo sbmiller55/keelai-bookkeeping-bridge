@@ -335,6 +335,7 @@ class RevenueStreamCreate(BaseModel):
     revenue_account: str
     deferred_revenue_account: str = "Deferred Revenue"
     ar_account: str = "Accounts Receivable"
+    bank_account: Optional[str] = None
 
 
 class RevenueStreamUpdate(BaseModel):
@@ -343,6 +344,7 @@ class RevenueStreamUpdate(BaseModel):
     revenue_account: Optional[str] = None
     deferred_revenue_account: Optional[str] = None
     ar_account: Optional[str] = None
+    bank_account: Optional[str] = None
     active: Optional[bool] = None
 
 
@@ -354,6 +356,7 @@ class RevenueStreamRead(BaseModel):
     revenue_account: str
     deferred_revenue_account: str
     ar_account: str
+    bank_account: Optional[str] = None
     active: bool
     created_at: datetime
 

@@ -285,6 +285,10 @@ class RevenueStream(Base):
     revenue_account = Column(String, nullable=False)
     deferred_revenue_account = Column(String, default="Deferred Revenue", nullable=False)
     ar_account = Column(String, default="Accounts Receivable", nullable=False)
+    # Bank/cash account that customer payments land in (for the AR cash-receipt
+    # JE: DR bank / CR AR). No bank feed needed — comes from the source's payment
+    # data (e.g. Bill.com).
+    bank_account = Column(String, nullable=True)
     active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -307,6 +311,7 @@ class RevenueContract(Base):
     amount_recognized = Column(Float, default=0.0, nullable=False)
     payment_received = Column(Boolean, default=False, nullable=False)
     payment_date = Column(DateTime, nullable=True)
+    payment_je_id = Column(Integer, nullable=True)   # the cash-receipt JE (DR bank / CR AR), once booked
     status = Column(
         SAEnum(RevenueContractStatus),
         default=RevenueContractStatus.active,

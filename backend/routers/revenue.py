@@ -467,6 +467,10 @@ def generate_recognition_jes(
         entry.je_id = je.id
         created.append(entry.period)
 
+    # Cash receipt for a paid contract (DR bank / CR AR).
+    if _generate_payment_je(contract, stream, db):
+        created.append("payment")
+
     db.commit()
     return {"created": created, "contract_id": contract_id}
 
@@ -549,8 +553,6 @@ def generate_all_jes(
             RevenueScheduleEntry.contract_id == contract.id,
             RevenueScheduleEntry.je_id == None,
         ).all()
-        if not entries:
-            continue
 
         billing_type = BillingType(stream.billing_type) if isinstance(stream.billing_type, str) else stream.billing_type
 
@@ -596,6 +598,10 @@ def generate_all_jes(
             db.flush()
 
             entry.je_id = je.id
+            total_created += 1
+
+        # Cash receipt for paid contracts — even if recognition was already done.
+        if _generate_payment_je(contract, stream, db):
             total_created += 1
 
     db.commit()
@@ -770,6 +776,9 @@ def _upsert_contract(
             # Update payment status
             if raw_contract.get("payment_received") and not existing.payment_received:
                 existing.payment_received = True
+            # Backfill the payment date whenever we now have one and it's missing
+            # (e.g. a contract already marked paid before we fetched dates).
+            if raw_contract.get("payment_date") and not existing.payment_date:
                 existing.payment_date = raw_contract.get("payment_date")
             return None  # already exists
 
@@ -844,6 +853,57 @@ def _create_schedule_entries(contract: RevenueContract, stream: RevenueStream, d
             recognized=False,
         )
         db.add(entry)
+
+
+def _generate_payment_je(contract: RevenueContract, stream: Optional[RevenueStream], db: Session) -> bool:
+    """Book the AR cash receipt for a PAID revenue contract: DR bank / CR AR,
+    dated on the payment date (falling back to due/billing date). Idempotent via
+    contract.payment_je_id; requires the stream's bank_account to be set; and only
+    fires once revenue has actually been recognized (AR debited) so we never push
+    AR negative. Returns True if a receipt JE was created."""
+    if not contract.payment_received or contract.payment_je_id:
+        return False
+    if not stream or not stream.bank_account:
+        return False
+    amount = abs(contract.total_contract_value or 0)
+    if amount <= 0:
+        return False
+    has_recognition = (
+        db.query(RevenueScheduleEntry)
+        .filter(
+            RevenueScheduleEntry.contract_id == contract.id,
+            RevenueScheduleEntry.je_id.isnot(None),
+        )
+        .first()
+    )
+    if not has_recognition:
+        return False
+    pay_date = contract.payment_date or contract.due_date or contract.billing_date or datetime.utcnow()
+    tx = Transaction(
+        client_id=contract.client_id,
+        date=pay_date,
+        description=f"Payment received - {contract.customer_name} - {contract.invoice_number or ''}"[:255],
+        amount=amount,
+        status=TransactionStatus.pending,
+        source="revenue",
+    )
+    db.add(tx)
+    db.flush()
+    je = JournalEntry(
+        transaction_id=tx.id,
+        je_number=next_je_number(db),
+        debit_account=stream.bank_account,
+        credit_account=stream.ar_account,
+        amount=amount,
+        je_date=pay_date,
+        memo=f"Cash receipt: {contract.customer_name} inv {contract.invoice_number or ''}"[:80],
+        ai_confidence=1.0,
+        ai_reasoning=f"AR cash receipt for {contract.customer_name} (paid per {contract.source}).",
+    )
+    db.add(je)
+    db.flush()
+    contract.payment_je_id = je.id
+    return True
 
 
 def _sync_mercury_revenue(client_id: int, client, streams_dicts: list, db: Session) -> list:
