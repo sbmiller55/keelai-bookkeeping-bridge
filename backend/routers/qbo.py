@@ -35,6 +35,36 @@ def _get_client(client_id: int, user: User, db: Session) -> Client:
     return client
 
 
+def _qbo_error_detail(exc: Exception, action: str) -> str:
+    """Turn a raw QBO/httpx failure into a message a bookkeeper can act on.
+
+    The common failure is a token-refresh 400 on Intuit's OAuth endpoint
+    (`.../tokens/bearer`) — the QBO connection has expired or the refresh token
+    was rotated out from under us. That surfaced as a raw
+    "Client error '400 Bad Request' for url '.../tokens/bearer'" string, which
+    reads like the account NAMES are wrong when the real fix is to reconnect
+    QuickBooks. Detect that case and say so plainly; otherwise pass the detail
+    through so genuine COA problems are still visible.
+
+    `action` completes the sentence "Couldn't {action}".
+    """
+    s = str(exc).lower()
+    is_auth = (
+        "tokens/bearer" in s
+        or "invalid_grant" in s
+        or ("refresh" in s and "token" in s)
+        or "401" in s
+        or ("oauth" in s and "400" in s)
+    )
+    if is_auth:
+        return (
+            f"Couldn't {action} — your QuickBooks connection has expired and needs "
+            "to be reconnected. Go to Settings → Connect QuickBooks to re-authorize. "
+            "(This is a QuickBooks sign-in issue, not a problem with your account names.)"
+        )
+    return f"Couldn't {action}: {exc}"
+
+
 def _persist_tokens_standalone(client_id: int, tokens: dict) -> None:
     """
     Persist rotated QBO tokens in their OWN short-lived, committed transaction.
@@ -260,7 +290,7 @@ def get_accounts(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"QBO error fetching accounts: {exc}")
+        raise HTTPException(502, _qbo_error_detail(exc, "load your QuickBooks chart of accounts"))
     return {"accounts": names, "cached_at": client.qbo_coa_cached_at}
 
 
@@ -278,7 +308,7 @@ def get_customers(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(502, f"QBO error fetching customers: {exc}")
+        raise HTTPException(502, _qbo_error_detail(exc, "load your QuickBooks customer list"))
     _persist_token_refresh(client, qbo_c, db)
     return {"customers": names}
 
@@ -319,7 +349,7 @@ def sync_to_qbo(
     try:
         account_map, account_types = qbo_c.build_account_lookup()
     except Exception as exc:
-        raise HTTPException(502, f"Failed to fetch QBO Chart of Accounts: {exc}")
+        raise HTTPException(502, _qbo_error_detail(exc, "load your QuickBooks chart of accounts"))
 
     # Vendor cache: display_name → QBO vendor Id (avoids redundant API calls)
     vendor_cache: dict[str, str]  = {}
