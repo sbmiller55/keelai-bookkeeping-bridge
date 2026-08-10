@@ -386,8 +386,10 @@ def _seed_contextbridge_rules():
         ("description_contains",  "PEO_EPLI",               "Uncoded",                           "Uncoded",                      True,  "reject"),
         ("description_contains",  "PEO_WORKER",             "Uncoded",                           "Uncoded",                      True,  "reject"),
         ("description_contains",  "HSACONTRBT",             "Uncoded",                           "Uncoded",                      True,  "reject"),
-        ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest earned",              True,  "expense"),
-        ("description_contains",  "Dividend posted",        "Mercury Treasury - 1",              "Interest Earned",              True,  "expense"),
+        # No "Dividend posted" rule: Mercury Treasury money-market dividends are
+        # interest on cash paid a month in arrears, and interest_accrual's
+        # pre-pass splits them across the earned and received months. A rule here
+        # would only ever book the whole amount in the receipt month.
         ("description_contains",  "Mercury IO Cashback",    "Mercury Checking (9882) - 1",       "Credit Card Rewards",          True,  "expense"),
         ("counterparty_contains", "Buckner",                "Accrued Expenses",                  "Mercury Checking (9882) - 1",  True,  "expense"),
     ]

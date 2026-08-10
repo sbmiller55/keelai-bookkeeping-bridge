@@ -1,7 +1,7 @@
 """
 Deterministic accrual-basis handling for Mercury interest income.
 
-Mercury pays the interest *earned* in month N on the 1st day of month N+1.
+Mercury pays the interest *earned* in month N in the first days of month N+1.
 On an accrual basis the income belongs to month N (the period earned), while
 the cash only lands in month N+1 (received). So an incoming Mercury interest
 deposit is split into two linked journal entries:
@@ -24,6 +24,26 @@ INTEREST_CUSTOMER   = "Mercury Interest"
 # Fallback only — normally we debit the transaction's own Mercury account.
 DEFAULT_BANK_ACCOUNT = "Mercury Checking"
 
+# A deposit is treated as *last month's* earnings paid in arrears only when it
+# lands early in the month. Mercury posts on the 1st–4th; anything later in the
+# month is same-month income and is booked directly, with no receivable.
+ARREARS_CUTOFF_DAY = 15
+
+# Phrases that identify an interest-income deposit. Mercury describes the same
+# economic event three different ways depending on the product:
+#   - savings/checking:  "July interest payment", counterparty "Savings Interest"
+#   - treasury sweep:    "Dividend posted: cusip:… (JPMorgan U.S. Treasury Plus
+#                         Money Market Fund - Capital Class)"
+#   - treasury cash:     "Interest posted"
+# The money-market "dividend" is interest on cash, not an equity distribution,
+# and the chart books it to Interest Earned — so it takes the same accrual
+# split. Payments *out* can never match: only positive amounts get here.
+_INTEREST_PHRASES = (
+    "interest",
+    "dividend posted",
+    "money market",
+)
+
 
 def is_mercury_interest(txn) -> bool:
     """
@@ -31,7 +51,7 @@ def is_mercury_interest(txn) -> bool:
 
     Matches when the transaction is a Mercury deposit (source is Mercury and
     amount is positive) whose description / counterparty / category / kind
-    mentions "interest".
+    contains one of _INTEREST_PHRASES.
     """
     if (getattr(txn, "source", None) or "mercury") != "mercury":
         return False
@@ -43,7 +63,7 @@ def is_mercury_interest(txn) -> bool:
         getattr(txn, "mercury_category", "") or "",
         getattr(txn, "kind", "") or "",
     )
-    return any("interest" in h.lower() for h in haystacks)
+    return any(p in h.lower() for h in haystacks for p in _INTEREST_PHRASES)
 
 
 def _earned_month_end(receipt_date: datetime) -> datetime:
@@ -52,17 +72,65 @@ def _earned_month_end(receipt_date: datetime) -> datetime:
     return first_of_receipt_month - timedelta(days=1)
 
 
-def build_interest_jes(txn) -> list[dict]:
+def resolve_bank_account(txn, coa_names=None) -> str:
     """
-    Return the two accrual journal-entry dicts for a Mercury interest deposit.
-    Both share the transaction, so the Review Queue renders them as two linked
-    rows. Keys map directly onto models.JournalEntry columns.
+    The chart-of-accounts name for the Mercury account the deposit landed in.
+
+    Mercury's own label ("Mercury Treasury") rarely matches the QBO account
+    ("Mercury Treasury - 1"), and the QBO sync rejects a JE whose account name
+    isn't in the chart. Run the label through the same tolerant matcher the AI
+    coder uses so the split posts to the real account.
+    """
+    raw = getattr(txn, "mercury_account_name", None) or DEFAULT_BANK_ACCOUNT
+    if not coa_names:
+        return raw
+    try:
+        from ai_coder import _validate_account
+    except Exception:
+        return raw
+    resolved = _validate_account(raw, coa_names)
+    # _validate_account brackets unmatched names as "Uncoded [x]" for a human to
+    # fix; for a bank account that's worse than Mercury's own label, so keep the
+    # label and let the export surface the mismatch.
+    return raw if resolved.startswith("Uncoded [") else resolved
+
+
+def build_interest_jes(txn, coa_names=None) -> list[dict]:
+    """
+    Return the accrual journal-entry dicts for a Mercury interest deposit.
+
+    Normally two entries — accrue the income to the month earned, then clear the
+    receivable when the cash lands — sharing the transaction so the Review Queue
+    renders them as linked rows. A deposit that arrives after ARREARS_CUTOFF_DAY
+    is same-month income and comes back as a single entry.
+
+    Keys map directly onto models.JournalEntry columns.
     """
     receipt_date = txn.date or datetime.utcnow()
-    earned_end   = _earned_month_end(receipt_date)
-    period       = earned_end.strftime("%B %Y")            # e.g. "June 2026"
     amount       = abs(txn.amount or 0)
-    bank         = getattr(txn, "mercury_account_name", None) or DEFAULT_BANK_ACCOUNT
+    bank         = resolve_bank_account(txn, coa_names)
+
+    if receipt_date.day > ARREARS_CUTOFF_DAY:
+        period = receipt_date.strftime("%B %Y")
+        return [
+            {
+                "debit_account":  bank,
+                "credit_account": INTEREST_EARNED,
+                "amount":         amount,
+                "je_date":        receipt_date,
+                "memo":           f"Interest earned - {period}",
+                "description":    f"Interest earned - {period}",
+                "customer_name":  INTEREST_CUSTOMER,
+                "ai_confidence":  1.0,
+                "ai_reasoning":   (
+                    "Interest received within the month it was earned — recorded "
+                    "directly to income, no accrual needed."
+                ),
+            },
+        ]
+
+    earned_end   = _earned_month_end(receipt_date)
+    period       = earned_end.strftime("%B %Y")            # e.g. "July 2026"
 
     note = (
         "Split into two entries for accrual basis — income recognized "

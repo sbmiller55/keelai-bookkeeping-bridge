@@ -525,12 +525,19 @@ def _sync_one_client(
         # Same deterministic handling as the "Run AI Coding" path: recognize
         # the income in the month earned (prior month-end) and the cash on the
         # receipt date, as two linked JEs, ahead of rules and AI coding.
+        # The live chart resolves Mercury's account label ("Mercury Treasury")
+        # to the real QBO account ("Mercury Treasury - 1") on the cash entry.
+        try:
+            import ai_coder as _ai
+            _coa_names = _ai._parse_coa_names(_ai._resolve_chart(client))
+        except Exception:
+            _coa_names = None
         for txn in new_txn_objects:
             if txn.id in rule_coded_ids:
                 continue
             if not interest_accrual.is_mercury_interest(txn):
                 continue
-            for jd in interest_accrual.build_interest_jes(txn):
+            for jd in interest_accrual.build_interest_jes(txn, _coa_names):
                 db.add(models.JournalEntry(
                     je_number=_je_num,
                     transaction_id=txn.id,
@@ -821,8 +828,10 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         import ai_coder as _ai
         coa = _ai._resolve_chart(client)
         coa_set = _ai._parse_coa_set(coa)
+        coa_names = _ai._parse_coa_names(coa)
     except Exception:
         coa_set = None
+        coa_names = None
     if coa_set and really_coded_ids:
         always_valid = {a.lower() for a in _ai._ALWAYS_VALID_ACCOUNTS}
         valid_or_always = coa_set | always_valid
@@ -911,7 +920,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
             continue
         if not interest_accrual.is_mercury_interest(txn):
             continue
-        for jd in interest_accrual.build_interest_jes(txn):
+        for jd in interest_accrual.build_interest_jes(txn, coa_names):
             db.add(models.JournalEntry(
                 je_number=_je_num,
                 transaction_id=txn.id,
