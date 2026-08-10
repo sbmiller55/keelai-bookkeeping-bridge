@@ -24,10 +24,11 @@ INTEREST_CUSTOMER   = "Mercury Interest"
 # Fallback only — normally we debit the transaction's own Mercury account.
 DEFAULT_BANK_ACCOUNT = "Mercury Checking"
 
-# A deposit is treated as *last month's* earnings paid in arrears only when it
-# lands early in the month. Mercury posts on the 1st–4th; anything later in the
-# month is same-month income and is booked directly, with no receivable.
-ARREARS_CUTOFF_DAY = 15
+# The accrual split applies to deposits landing on or after this date only.
+# Earlier months are closed and already exported to QBO the old way (a single
+# entry in the receipt month); re-coding one of them — a stale-COA sweep, a
+# re-sync, a manual re-run — must not silently restate a closed period.
+EFFECTIVE_FROM = datetime(2026, 8, 1)
 
 # Phrases that identify an interest-income deposit. Mercury describes the same
 # economic event three different ways depending on the product:
@@ -50,13 +51,15 @@ def is_mercury_interest(txn) -> bool:
     True for an incoming Mercury interest-income deposit.
 
     Matches when the transaction is a Mercury deposit (source is Mercury and
-    amount is positive) whose description / counterparty / category / kind
-    contains one of _INTEREST_PHRASES.
+    amount is positive) dated on or after EFFECTIVE_FROM, whose description /
+    counterparty / category / kind contains one of _INTEREST_PHRASES.
     """
     if (getattr(txn, "source", None) or "mercury") != "mercury":
         return False
     if (txn.amount or 0) <= 0:            # income only, not an interest expense
         return False
+    if (txn.date or datetime.utcnow()) < EFFECTIVE_FROM:
+        return False                      # closed period — leave it alone
     haystacks = (
         txn.description or "",
         getattr(txn, "counterparty_name", "") or "",
@@ -97,37 +100,19 @@ def resolve_bank_account(txn, coa_names=None) -> str:
 
 def build_interest_jes(txn, coa_names=None) -> list[dict]:
     """
-    Return the accrual journal-entry dicts for a Mercury interest deposit.
+    Return the two accrual journal-entry dicts for a Mercury interest deposit:
+    accrue the income to the month earned, then clear the receivable when the
+    cash lands. Both share the transaction, so the Review Queue renders them as
+    two linked rows.
 
-    Normally two entries — accrue the income to the month earned, then clear the
-    receivable when the cash lands — sharing the transaction so the Review Queue
-    renders them as linked rows. A deposit that arrives after ARREARS_CUTOFF_DAY
-    is same-month income and comes back as a single entry.
+    Interest is always paid in arrears, so the earned period is the month before
+    the receipt date no matter what day of the month the deposit posts.
 
     Keys map directly onto models.JournalEntry columns.
     """
     receipt_date = txn.date or datetime.utcnow()
     amount       = abs(txn.amount or 0)
     bank         = resolve_bank_account(txn, coa_names)
-
-    if receipt_date.day > ARREARS_CUTOFF_DAY:
-        period = receipt_date.strftime("%B %Y")
-        return [
-            {
-                "debit_account":  bank,
-                "credit_account": INTEREST_EARNED,
-                "amount":         amount,
-                "je_date":        receipt_date,
-                "memo":           f"Interest earned - {period}",
-                "description":    f"Interest earned - {period}",
-                "customer_name":  INTEREST_CUSTOMER,
-                "ai_confidence":  1.0,
-                "ai_reasoning":   (
-                    "Interest received within the month it was earned — recorded "
-                    "directly to income, no accrual needed."
-                ),
-            },
-        ]
 
     earned_end   = _earned_month_end(receipt_date)
     period       = earned_end.strftime("%B %Y")            # e.g. "July 2026"
