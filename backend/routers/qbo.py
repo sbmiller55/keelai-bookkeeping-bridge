@@ -398,10 +398,22 @@ def sync_to_qbo(
             # build_account_map indexes both case-sensitive and lowercased keys,
             # so fall back to lowercase if the exact-case key misses (e.g. AI
             # returned "Employee Benefits" but QBO stores "Employee benefits").
-            debit_fqn  = qbo.normalize_account_name(je.debit_account)
-            credit_fqn = qbo.normalize_account_name(je.credit_account)
-            debit_id   = account_map.get(debit_fqn)  or account_map.get(debit_fqn.lower())
-            credit_id  = account_map.get(credit_fqn) or account_map.get(credit_fqn.lower())
+            # Fall back to the bare account name when the parent-qualified name
+            # misses. QBO_PARENT is a hand-maintained map; when it disagrees with
+            # the real chart (an account moved to top level, or was never a child)
+            # the FQN it builds doesn't exist and the export dies on a perfectly
+            # valid account. The bare name is what QBO indexes anyway, so try it
+            # before giving up.
+            def _resolve_account(name: str) -> tuple[str, Optional[str]]:
+                fqn = qbo.normalize_account_name(name)
+                for key in (fqn, fqn.lower(), name, name.lower()):
+                    acct_id = account_map.get(key)
+                    if acct_id:
+                        return fqn, acct_id
+                return fqn, None
+
+            debit_fqn,  debit_id  = _resolve_account(je.debit_account)
+            credit_fqn, credit_id = _resolve_account(je.credit_account)
 
             if not debit_id or not credit_id:
                 missing = [n for n, i in [(debit_fqn, debit_id), (credit_fqn, credit_id)] if not i]

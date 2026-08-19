@@ -17,6 +17,7 @@ import mercury as mercury_client
 import ai_coder
 import rules_engine
 import interest_accrual
+import payroll_clearing
 import stripe_revenue_je
 
 
@@ -556,6 +557,67 @@ def _sync_one_client(
             rule_coded_ids.add(txn.id)
         db.flush()
 
+        # ── Pre-pass: Mercury Treasury fees → accrual-basis split ────────────
+        # The fee Mercury charges on the Treasury account is a cost of earning
+        # the interest, so it reduces Interest Earned (not Banking Fees) and is
+        # recognized in the month earned, with the cash on the charge date.
+        # Runs ahead of the rules engine, so the catch-all category rule and any
+        # Banking Fees rule never see these transactions.
+        for txn in new_txn_objects:
+            if txn.id in rule_coded_ids:
+                continue
+            if not interest_accrual.is_treasury_fee(txn):
+                continue
+            for jd in interest_accrual.build_treasury_fee_jes(txn, _coa_names):
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=jd["amount"],
+                    je_date=jd["je_date"],
+                    memo=jd["memo"],
+                    description=jd["description"],
+                    customer_name=jd["customer_name"],
+                    ai_confidence=jd["ai_confidence"],
+                    ai_reasoning=jd["ai_reasoning"],
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+        db.flush()
+
+        # ── Pre-pass: Rippling / PEOPLE CENTER → payroll liability clearing ──
+        # Rippling's own QBO integration already booked the expense and the
+        # liability; these Mercury debits only settle it. Coding them as new
+        # expenses would double-book payroll, so they clear the liability and
+        # carry a note telling the approver to check QBO for a duplicate first.
+        # Runs ahead of the rules engine, which would otherwise reject them.
+        for txn in new_txn_objects:
+            if txn.id in rule_coded_ids:
+                continue
+            jds = payroll_clearing.build_payroll_clearing_jes(txn, _coa_names)
+            if not jds:
+                continue
+            for jd in jds:
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=jd["amount"],
+                    je_date=jd["je_date"],
+                    memo=jd["memo"],
+                    description=jd["description"],
+                    customer_name=jd["customer_name"],
+                    ai_confidence=jd["ai_confidence"],
+                    ai_reasoning=jd["ai_reasoning"],
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+        db.flush()
+
         # ── Pre-pass: Stripe payout deposits → Stripe Clearing ───────────────
         # A Stripe payout lands in the Mercury bank feed as a deposit. Code it
         # DR bank / CR Stripe Clearing (using the SAME clearing account the
@@ -921,6 +983,64 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         if not interest_accrual.is_mercury_interest(txn):
             continue
         for jd in interest_accrual.build_interest_jes(txn, coa_names):
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
+    db.flush()
+
+    # ── Pre-pass: Mercury Treasury fees → accrual-basis split (same as sync) ──
+    # Reduce Interest Earned in the month the interest was earned (last day of
+    # the prior month), then move the cash on the charge date, as two linked
+    # JEs. Runs before the rules engine and AI coder and takes priority for
+    # these transactions, overriding any Banking Fees coding.
+    for txn in pending:
+        if txn.id in rule_coded_ids:
+            continue
+        if not interest_accrual.is_treasury_fee(txn):
+            continue
+        for jd in interest_accrual.build_treasury_fee_jes(txn, coa_names):
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
+    db.flush()
+
+    # ── Pre-pass: Rippling / PEOPLE CENTER → payroll liability clearing ──────
+    # Same as live sync: settle the liability Rippling's QBO integration already
+    # booked, rather than booking a second expense. Runs before the rules engine
+    # and AI coder; every entry waits in the Review Queue for approval.
+    for txn in pending:
+        if txn.id in rule_coded_ids:
+            continue
+        jds = payroll_clearing.build_payroll_clearing_jes(txn, coa_names)
+        if not jds:
+            continue
+        for jd in jds:
             db.add(models.JournalEntry(
                 je_number=_je_num,
                 transaction_id=txn.id,

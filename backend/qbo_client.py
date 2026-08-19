@@ -71,7 +71,11 @@ QBO_PARENT: dict[str, str] = {
     "Travel meals":                           "Travel",
     "Vehicle rental":                         "Travel",
     "Series Seed":                            "Preferred stock",
-    "Interest Earned":                        "Other Income",
+    # No "Interest Earned" entry: it is a TOP-LEVEL account in QBO, not a child
+    # of "Other Income" (which is its own separate top-level account). Mapping it
+    # to a parent produced the FQN "Other Income:Interest Earned", which doesn't
+    # exist, and every journal entry crediting interest income failed to export
+    # with "Account(s) not found in QBO".
 }
 
 # Mercury API name normalization — same as frontend MERCURY_NAME_MAP
