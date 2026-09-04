@@ -153,9 +153,14 @@ class SyncResult(BaseModel):
 @router.get("/auth-url")
 def get_auth_url(
     client_id: int,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Return the Intuit OAuth URL. The client_id is passed as OAuth state."""
+    # /callback already refuses to attach tokens to a client you don't own, so
+    # this was not exploitable — but there is no reason to mint a URL carrying
+    # someone else's client id as state, so it is checked here too.
+    _get_client(client_id, current_user, db)
     url = qbo.get_auth_url(state=str(client_id))
     return {"url": url}
 

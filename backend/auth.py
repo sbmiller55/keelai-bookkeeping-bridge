@@ -15,7 +15,16 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production-bookke
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Pin the work factor rather than inheriting passlib's default. The default is
+# currently 12, but it is a library default: a dependency bump could silently
+# lower the cost of every new hash. Existing hashes carry their own cost in the
+# string, so raising this later only affects passwords set from then on.
+BCRYPT_ROUNDS = 12
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=BCRYPT_ROUNDS,
+)
 bearer_scheme = HTTPBearer()
 
 

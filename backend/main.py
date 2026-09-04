@@ -41,6 +41,39 @@ def _safe_detail(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+class SecurityHeadersMiddleware:
+    """Attach baseline security headers to every API response.
+
+    `no-store` matters most here: responses carry bank transactions and journal
+    entries, and neither a browser cache nor an intermediary should retain them.
+    """
+
+    _HEADERS = [
+        (b"x-content-type-options", b"nosniff"),
+        (b"x-frame-options", b"DENY"),
+        (b"referrer-policy", b"no-referrer"),
+        (b"cache-control", b"no-store"),
+        (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+    ]
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                existing = {k.lower() for k, _ in message.get("headers", [])}
+                message["headers"] = list(message.get("headers", [])) + [
+                    (k, v) for k, v in self._HEADERS if k not in existing
+                ]
+            await send(message)
+
+        await self.app(scope, receive, _send)
+
+
 class JsonErrorMiddleware:
     """Turn an unhandled exception into a JSON 500 *below* the CORS layer.
 
@@ -103,6 +136,7 @@ ALLOWED_ORIGINS = sorted(set(_DEFAULT_ORIGINS + _extra_origins))
 
 # Order matters: add_middleware pushes onto the front of the stack, so CORS
 # must be added LAST to end up outermost and wrap the JSON error response.
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(JsonErrorMiddleware)
 app.add_middleware(
     CORSMiddleware,

@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, EmailStr, field_serializer
+from pydantic import BaseModel, EmailStr, Field, field_serializer
 
 # Stored credentials are never sent back to the browser. Endpoints return this
 # placeholder instead, which stays truthy so the UI can still show "connected".
@@ -11,10 +11,20 @@ SECRET_MASK = "***"
 
 # ── User schemas ──────────────────────────────────────────────────────────────
 
+# Length is the property that actually resists guessing; composition rules mostly
+# push people toward predictable substitutions. Only a floor is enforced.
+MIN_PASSWORD_LENGTH = 10
+
+
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
     name: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
 
 class UserRead(BaseModel):
