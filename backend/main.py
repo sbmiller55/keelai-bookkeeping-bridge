@@ -3,6 +3,7 @@ load_dotenv()
 
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from database import Base, engine
 from auth import get_current_user
@@ -15,6 +16,52 @@ def create_tables():
 
 app = FastAPI(title="Bookkeeping Bridge", version="1.0.0")
 
+
+class JsonErrorMiddleware:
+    """Turn an unhandled exception into a JSON 500 *below* the CORS layer.
+
+    Starlette builds its own 500 above every user middleware, so that response
+    ships without Access-Control-Allow-Origin. The browser then blocks it and
+    reports the fetch as an opaque "NetworkError when attempting to fetch
+    resource" — which is what the user sees instead of the real error. Catching
+    here means the 500 still passes back through CORSMiddleware and the actual
+    message reaches the UI.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        response_started = False
+
+        async def _send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception as exc:
+            import sys, traceback
+            traceback.print_exc()
+            sys.stderr.flush()
+            # Headers are already on the wire — nothing left to rewrite.
+            if response_started:
+                raise
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": f"{type(exc).__name__}: {exc}"},
+            )
+            await response(scope, receive, send)
+
+
+# Order matters: add_middleware pushes onto the front of the stack, so CORS
+# must be added LAST to end up outermost and wrap the JSON error response.
+app.add_middleware(JsonErrorMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

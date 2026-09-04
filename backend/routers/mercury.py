@@ -485,263 +485,36 @@ def _sync_one_client(
                 db.delete(t)
                 phantoms_removed += 1
 
-    # Flush to get IDs assigned (needed for FK in JournalEntry)
+    # Commit the import before any coding runs. Coding can fail on its own —
+    # AI coding needs the live QBO chart, so a lapsed QuickBooks connection
+    # raises here — and it used to take the whole request down with it: the
+    # rollback threw away transactions Mercury had already handed us, so
+    # last_sync_at never moved and the next retry re-fetched and re-failed the
+    # same way. The import stands on its own; a coding failure is reported.
     client.last_sync_at = datetime.utcnow()
-    db.flush()
+    db.commit()
 
     # ── Coding: AI invoice match → rules → AI coding ──
     je_created = 0
-    if new_txn_objects:
-        for t in new_txn_objects:
-            db.refresh(t)
+    try:
+        if new_txn_objects:
+            je_created = _code_new_transactions(client, db, new_txn_objects)
 
-        active_rules = (
-            db.query(models.Rule)
-            .filter(models.Rule.client_id == client.id, models.Rule.active == True)
-            .all()
+        # Reconcile payments against invoices so a payment that booked a standalone
+        # accrual (invoice-text path) never keeps a duplicate once its separate
+        # invoice entry exists. Runs every sync — the guardrail against double
+        # accruals; not gated on new_txn_objects since an invoice may have arrived
+        # separately for a payment synced earlier.
+        _rematch_pending_payments(client.id, db)
+        db.commit()
+    except Exception as exc:
+        import traceback as _tb; _tb.print_exc()
+        db.rollback()
+        je_created = 0
+        errors.append(
+            f"Imported {imported} transaction(s), but coding them failed: "
+            f"{type(exc).__name__}: {exc}"
         )
-
-        rule_coded_ids: set[int] = set()
-        _je_num = models.next_je_number(db)
-
-        # ── Pre-pass: AI payment matching to existing invoices ──
-        # For each new outgoing Mercury payment, look for an unmatched invoice
-        # (same vendor + amount within 2%). If matched, pre-code as
-        # DR accrued / CR bank to prevent double-booking the expense.
-        for txn in new_txn_objects:
-            if (txn.kind or "") != "outgoingPayment":
-                continue
-            if (txn.amount or 0) >= 0:
-                continue
-            match = _find_matching_invoice(txn, db)
-            if match is None:
-                continue
-            invoice, conf = match
-            _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
-            rule_coded_ids.add(txn.id)
-            je_created += 1
-        db.flush()
-
-        # ── Pre-pass: Mercury interest income → accrual-basis split ──────────
-        # Same deterministic handling as the "Run AI Coding" path: recognize
-        # the income in the month earned (prior month-end) and the cash on the
-        # receipt date, as two linked JEs, ahead of rules and AI coding.
-        # The live chart resolves Mercury's account label ("Mercury Treasury")
-        # to the real QBO account ("Mercury Treasury - 1") on the cash entry.
-        try:
-            import ai_coder as _ai
-            _coa_names = _ai._parse_coa_names(_ai._resolve_chart(client))
-        except Exception:
-            _coa_names = None
-        for txn in new_txn_objects:
-            if txn.id in rule_coded_ids:
-                continue
-            if not interest_accrual.is_mercury_interest(txn):
-                continue
-            for jd in interest_accrual.build_interest_jes(txn, _coa_names):
-                db.add(models.JournalEntry(
-                    je_number=_je_num,
-                    transaction_id=txn.id,
-                    debit_account=jd["debit_account"],
-                    credit_account=jd["credit_account"],
-                    amount=jd["amount"],
-                    je_date=jd["je_date"],
-                    memo=jd["memo"],
-                    description=jd["description"],
-                    customer_name=jd["customer_name"],
-                    ai_confidence=jd["ai_confidence"],
-                    ai_reasoning=jd["ai_reasoning"],
-                ))
-                je_created += 1
-                _je_num += 1
-            rule_coded_ids.add(txn.id)
-        db.flush()
-
-        # ── Pre-pass: Mercury Treasury fees → accrual-basis split ────────────
-        # The fee Mercury charges on the Treasury account is a cost of earning
-        # the interest, so it reduces Interest Earned (not Banking Fees) and is
-        # recognized in the month earned, with the cash on the charge date.
-        # Runs ahead of the rules engine, so the catch-all category rule and any
-        # Banking Fees rule never see these transactions.
-        for txn in new_txn_objects:
-            if txn.id in rule_coded_ids:
-                continue
-            if not interest_accrual.is_treasury_fee(txn):
-                continue
-            for jd in interest_accrual.build_treasury_fee_jes(txn, _coa_names):
-                db.add(models.JournalEntry(
-                    je_number=_je_num,
-                    transaction_id=txn.id,
-                    debit_account=jd["debit_account"],
-                    credit_account=jd["credit_account"],
-                    amount=jd["amount"],
-                    je_date=jd["je_date"],
-                    memo=jd["memo"],
-                    description=jd["description"],
-                    customer_name=jd["customer_name"],
-                    ai_confidence=jd["ai_confidence"],
-                    ai_reasoning=jd["ai_reasoning"],
-                ))
-                je_created += 1
-                _je_num += 1
-            rule_coded_ids.add(txn.id)
-        db.flush()
-
-        # ── Pre-pass: Rippling / PEOPLE CENTER → payroll liability clearing ──
-        # Rippling's own QBO integration already booked the expense and the
-        # liability; these Mercury debits only settle it. Coding them as new
-        # expenses would double-book payroll, so they clear the liability and
-        # carry a note telling the approver to check QBO for a duplicate first.
-        # Runs ahead of the rules engine, which would otherwise reject them.
-        for txn in new_txn_objects:
-            if txn.id in rule_coded_ids:
-                continue
-            jds = payroll_clearing.build_payroll_clearing_jes(txn, _coa_names)
-            if not jds:
-                continue
-            for jd in jds:
-                db.add(models.JournalEntry(
-                    je_number=_je_num,
-                    transaction_id=txn.id,
-                    debit_account=jd["debit_account"],
-                    credit_account=jd["credit_account"],
-                    amount=jd["amount"],
-                    je_date=jd["je_date"],
-                    memo=jd["memo"],
-                    description=jd["description"],
-                    customer_name=jd["customer_name"],
-                    ai_confidence=jd["ai_confidence"],
-                    ai_reasoning=jd["ai_reasoning"],
-                ))
-                je_created += 1
-                _je_num += 1
-            rule_coded_ids.add(txn.id)
-        db.flush()
-
-        # ── Pre-pass: Stripe payout deposits → Stripe Clearing ───────────────
-        # A Stripe payout lands in the Mercury bank feed as a deposit. Code it
-        # DR bank / CR Stripe Clearing (using the SAME clearing account the
-        # /stripe charge coding credited) so the clearing account nets to zero.
-        # The clearing-account name lives in stripe_revenue_je, the single
-        # source of truth for both sides.
-        _scfg = stripe_revenue_je.load_stripe_config(client.id, db)
-        if getattr(_scfg, "enabled", False):
-            for txn in new_txn_objects:
-                if txn.id in rule_coded_ids:
-                    continue
-                if not stripe_revenue_je.is_stripe_payout(txn, _scfg):
-                    continue
-                for jd in stripe_revenue_je.build_stripe_payout_jes(txn, _scfg):
-                    db.add(models.JournalEntry(
-                        je_number=_je_num,
-                        transaction_id=txn.id,
-                        debit_account=jd["debit_account"],
-                        credit_account=jd["credit_account"],
-                        amount=jd["amount"],
-                        je_date=jd["je_date"],
-                        memo=jd["memo"],
-                        description=jd["description"],
-                        customer_name=jd["customer_name"],
-                        ai_confidence=jd["ai_confidence"],
-                        ai_reasoning=jd["ai_reasoning"],
-                    ))
-                    je_created += 1
-                    _je_num += 1
-                rule_coded_ids.add(txn.id)
-            db.flush()
-
-        for txn in new_txn_objects:
-            if txn.id in rule_coded_ids:
-                continue
-            matched_rule = rules_engine.match_rule(txn, active_rules)
-            if matched_rule:
-                if (matched_rule.rule_action or "expense") == "reject":
-                    txn.status = models.TransactionStatus.rejected
-                    rule_coded_ids.add(txn.id)
-                    continue
-                je_data_list = rules_engine.apply_rule_jes(matched_rule, txn)
-                if not je_data_list:
-                    continue
-                for jd in je_data_list:
-                    db.add(models.JournalEntry(
-                        je_number=_je_num,
-                        transaction_id=txn.id,
-                        debit_account=jd["debit_account"],
-                        credit_account=jd["credit_account"],
-                        amount=abs(jd.get("amount", txn.amount)),
-                        je_date=jd.get("je_date"),
-                        memo=jd.get("memo"),
-                        rule_applied=matched_rule.id,
-                        ai_confidence=jd.get("ai_confidence", 1.0),
-                        ai_reasoning=jd.get("ai_reasoning"),
-                        is_recurring=jd.get("is_recurring", False),
-                        recur_frequency=jd.get("recur_frequency"),
-                        recur_end_date=jd.get("recur_end_date"),
-                    ))
-                    je_created += 1
-                    _je_num += 1
-                rule_coded_ids.add(txn.id)
-
-        # AI codes whatever rules didn't catch
-        ai_candidates = [t for t in new_txn_objects if t.id not in rule_coded_ids]
-        if ai_candidates:
-            # Split: outgoing payments with invoice text get accrual coding; rest get standard coding
-            invoice_candidates = [t for t in ai_candidates if t.kind == "outgoingPayment" and t.invoice_text]
-            standard_candidates = [t for t in ai_candidates if t not in invoice_candidates]
-
-            if standard_candidates:
-                ai_coded = ai_coder.code_transactions(standard_candidates, client)
-                for txn_id, je_data_list in ai_coded:
-                    for je_data in je_data_list:
-                        db.add(models.JournalEntry(
-                            je_number=_je_num,
-                            transaction_id=txn_id,
-                            debit_account=je_data["debit_account"],
-                            credit_account=je_data["credit_account"],
-                            amount=abs(je_data.get("amount") or next((t.amount for t in standard_candidates if t.id == txn_id), 0)),
-                            je_date=je_data.get("je_date"),
-                            memo=je_data.get("memo"),
-                            ai_confidence=je_data.get("ai_confidence"),
-                            ai_reasoning=je_data.get("ai_reasoning"),
-                            service_period_start=je_data.get("service_period_start"),
-                            service_period_end=je_data.get("service_period_end"),
-                            is_recurring=je_data.get("is_recurring", False),
-                            recur_frequency=je_data.get("recur_frequency"),
-                            recur_end_date=je_data.get("recur_end_date"),
-                        ))
-                        je_created += 1
-                        _je_num += 1
-
-            for txn in invoice_candidates:
-                je_list = ai_coder.code_outgoing_payment_with_invoice(txn, txn.invoice_text, client)
-                for je_data in je_list:
-                    db.add(models.JournalEntry(
-                        je_number=_je_num,
-                        transaction_id=txn.id,
-                        debit_account=je_data["debit_account"],
-                        credit_account=je_data["credit_account"],
-                        amount=abs(je_data.get("amount", txn.amount)),
-                        je_date=je_data.get("je_date"),
-                        memo=je_data.get("memo"),
-                        ai_confidence=je_data.get("ai_confidence"),
-                        ai_reasoning=je_data.get("ai_reasoning"),
-                        service_period_start=je_data.get("service_period_start"),
-                        service_period_end=je_data.get("service_period_end"),
-                        is_recurring=je_data.get("is_recurring", False),
-                        recur_frequency=je_data.get("recur_frequency"),
-                        recur_end_date=je_data.get("recur_end_date"),
-                    ))
-                    je_created += 1
-                    _je_num += 1
-
-    # Reconcile payments against invoices so a payment that booked a standalone
-    # accrual (invoice-text path) never keeps a duplicate once its separate
-    # invoice entry exists. Runs every sync — the guardrail against double
-    # accruals; not gated on new_txn_objects since an invoice may have arrived
-    # separately for a payment synced earlier.
-    _rematch_pending_payments(client.id, db)
-
-    db.commit()
 
     date_earliest = min(imported_dates).strftime("%Y-%m-%d") if imported_dates else None
     date_latest = max(imported_dates).strftime("%Y-%m-%d") if imported_dates else None
@@ -1588,3 +1361,256 @@ def merge_transfers(
 @router.get("/status")
 def mercury_status(current_user: models.User = Depends(get_current_user)):
     return {"global_key_configured": bool(os.getenv("MERCURY_API_KEY"))}
+
+
+
+def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: list) -> int:
+    """Code a freshly imported batch: invoice match → deterministic pre-passes →
+    rules → AI. Returns the number of journal entries created.
+
+    Split out of _sync_one_client so the caller can commit the import first and
+    surface a coding failure without rolling the import back.
+    """
+    je_created = 0
+    for t in new_txn_objects:
+        db.refresh(t)
+
+    active_rules = (
+        db.query(models.Rule)
+        .filter(models.Rule.client_id == client.id, models.Rule.active == True)
+        .all()
+    )
+
+    rule_coded_ids: set[int] = set()
+    _je_num = models.next_je_number(db)
+
+    # ── Pre-pass: AI payment matching to existing invoices ──
+    # For each new outgoing Mercury payment, look for an unmatched invoice
+    # (same vendor + amount within 2%). If matched, pre-code as
+    # DR accrued / CR bank to prevent double-booking the expense.
+    for txn in new_txn_objects:
+        if (txn.kind or "") != "outgoingPayment":
+            continue
+        if (txn.amount or 0) >= 0:
+            continue
+        match = _find_matching_invoice(txn, db)
+        if match is None:
+            continue
+        invoice, conf = match
+        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
+        rule_coded_ids.add(txn.id)
+        je_created += 1
+    db.flush()
+
+    # ── Pre-pass: Mercury interest income → accrual-basis split ──────────
+    # Same deterministic handling as the "Run AI Coding" path: recognize
+    # the income in the month earned (prior month-end) and the cash on the
+    # receipt date, as two linked JEs, ahead of rules and AI coding.
+    # The live chart resolves Mercury's account label ("Mercury Treasury")
+    # to the real QBO account ("Mercury Treasury - 1") on the cash entry.
+    try:
+        import ai_coder as _ai
+        _coa_names = _ai._parse_coa_names(_ai._resolve_chart(client))
+    except Exception:
+        _coa_names = None
+    for txn in new_txn_objects:
+        if txn.id in rule_coded_ids:
+            continue
+        if not interest_accrual.is_mercury_interest(txn):
+            continue
+        for jd in interest_accrual.build_interest_jes(txn, _coa_names):
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
+    db.flush()
+
+    # ── Pre-pass: Mercury Treasury fees → accrual-basis split ────────────
+    # The fee Mercury charges on the Treasury account is a cost of earning
+    # the interest, so it reduces Interest Earned (not Banking Fees) and is
+    # recognized in the month earned, with the cash on the charge date.
+    # Runs ahead of the rules engine, so the catch-all category rule and any
+    # Banking Fees rule never see these transactions.
+    for txn in new_txn_objects:
+        if txn.id in rule_coded_ids:
+            continue
+        if not interest_accrual.is_treasury_fee(txn):
+            continue
+        for jd in interest_accrual.build_treasury_fee_jes(txn, _coa_names):
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
+    db.flush()
+
+    # ── Pre-pass: Rippling / PEOPLE CENTER → payroll liability clearing ──
+    # Rippling's own QBO integration already booked the expense and the
+    # liability; these Mercury debits only settle it. Coding them as new
+    # expenses would double-book payroll, so they clear the liability and
+    # carry a note telling the approver to check QBO for a duplicate first.
+    # Runs ahead of the rules engine, which would otherwise reject them.
+    for txn in new_txn_objects:
+        if txn.id in rule_coded_ids:
+            continue
+        jds = payroll_clearing.build_payroll_clearing_jes(txn, _coa_names)
+        if not jds:
+            continue
+        for jd in jds:
+            db.add(models.JournalEntry(
+                je_number=_je_num,
+                transaction_id=txn.id,
+                debit_account=jd["debit_account"],
+                credit_account=jd["credit_account"],
+                amount=jd["amount"],
+                je_date=jd["je_date"],
+                memo=jd["memo"],
+                description=jd["description"],
+                customer_name=jd["customer_name"],
+                ai_confidence=jd["ai_confidence"],
+                ai_reasoning=jd["ai_reasoning"],
+            ))
+            je_created += 1
+            _je_num += 1
+        rule_coded_ids.add(txn.id)
+    db.flush()
+
+    # ── Pre-pass: Stripe payout deposits → Stripe Clearing ───────────────
+    # A Stripe payout lands in the Mercury bank feed as a deposit. Code it
+    # DR bank / CR Stripe Clearing (using the SAME clearing account the
+    # /stripe charge coding credited) so the clearing account nets to zero.
+    # The clearing-account name lives in stripe_revenue_je, the single
+    # source of truth for both sides.
+    _scfg = stripe_revenue_je.load_stripe_config(client.id, db)
+    if getattr(_scfg, "enabled", False):
+        for txn in new_txn_objects:
+            if txn.id in rule_coded_ids:
+                continue
+            if not stripe_revenue_je.is_stripe_payout(txn, _scfg):
+                continue
+            for jd in stripe_revenue_je.build_stripe_payout_jes(txn, _scfg):
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=jd["amount"],
+                    je_date=jd["je_date"],
+                    memo=jd["memo"],
+                    description=jd["description"],
+                    customer_name=jd["customer_name"],
+                    ai_confidence=jd["ai_confidence"],
+                    ai_reasoning=jd["ai_reasoning"],
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+        db.flush()
+
+    for txn in new_txn_objects:
+        if txn.id in rule_coded_ids:
+            continue
+        matched_rule = rules_engine.match_rule(txn, active_rules)
+        if matched_rule:
+            if (matched_rule.rule_action or "expense") == "reject":
+                txn.status = models.TransactionStatus.rejected
+                rule_coded_ids.add(txn.id)
+                continue
+            je_data_list = rules_engine.apply_rule_jes(matched_rule, txn)
+            if not je_data_list:
+                continue
+            for jd in je_data_list:
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=jd["debit_account"],
+                    credit_account=jd["credit_account"],
+                    amount=abs(jd.get("amount", txn.amount)),
+                    je_date=jd.get("je_date"),
+                    memo=jd.get("memo"),
+                    rule_applied=matched_rule.id,
+                    ai_confidence=jd.get("ai_confidence", 1.0),
+                    ai_reasoning=jd.get("ai_reasoning"),
+                    is_recurring=jd.get("is_recurring", False),
+                    recur_frequency=jd.get("recur_frequency"),
+                    recur_end_date=jd.get("recur_end_date"),
+                ))
+                je_created += 1
+                _je_num += 1
+            rule_coded_ids.add(txn.id)
+
+    # AI codes whatever rules didn't catch
+    ai_candidates = [t for t in new_txn_objects if t.id not in rule_coded_ids]
+    if ai_candidates:
+        # Split: outgoing payments with invoice text get accrual coding; rest get standard coding
+        invoice_candidates = [t for t in ai_candidates if t.kind == "outgoingPayment" and t.invoice_text]
+        standard_candidates = [t for t in ai_candidates if t not in invoice_candidates]
+
+        if standard_candidates:
+            ai_coded = ai_coder.code_transactions(standard_candidates, client)
+            for txn_id, je_data_list in ai_coded:
+                for je_data in je_data_list:
+                    db.add(models.JournalEntry(
+                        je_number=_je_num,
+                        transaction_id=txn_id,
+                        debit_account=je_data["debit_account"],
+                        credit_account=je_data["credit_account"],
+                        amount=abs(je_data.get("amount") or next((t.amount for t in standard_candidates if t.id == txn_id), 0)),
+                        je_date=je_data.get("je_date"),
+                        memo=je_data.get("memo"),
+                        ai_confidence=je_data.get("ai_confidence"),
+                        ai_reasoning=je_data.get("ai_reasoning"),
+                        service_period_start=je_data.get("service_period_start"),
+                        service_period_end=je_data.get("service_period_end"),
+                        is_recurring=je_data.get("is_recurring", False),
+                        recur_frequency=je_data.get("recur_frequency"),
+                        recur_end_date=je_data.get("recur_end_date"),
+                    ))
+                    je_created += 1
+                    _je_num += 1
+
+        for txn in invoice_candidates:
+            je_list = ai_coder.code_outgoing_payment_with_invoice(txn, txn.invoice_text, client)
+            for je_data in je_list:
+                db.add(models.JournalEntry(
+                    je_number=_je_num,
+                    transaction_id=txn.id,
+                    debit_account=je_data["debit_account"],
+                    credit_account=je_data["credit_account"],
+                    amount=abs(je_data.get("amount", txn.amount)),
+                    je_date=je_data.get("je_date"),
+                    memo=je_data.get("memo"),
+                    ai_confidence=je_data.get("ai_confidence"),
+                    ai_reasoning=je_data.get("ai_reasoning"),
+                    service_period_start=je_data.get("service_period_start"),
+                    service_period_end=je_data.get("service_period_end"),
+                    is_recurring=je_data.get("is_recurring", False),
+                    recur_frequency=je_data.get("recur_frequency"),
+                    recur_end_date=je_data.get("recur_end_date"),
+                ))
+                je_created += 1
+                _je_num += 1
+    return je_created

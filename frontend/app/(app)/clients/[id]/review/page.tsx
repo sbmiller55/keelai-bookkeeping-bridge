@@ -1363,11 +1363,18 @@ export default function ReviewQueuePage() {
         dateRange === "custom" ? customStart : undefined,
         dateRange === "custom" ? customEnd : undefined,
       );
-      // Re-code any pending transactions still left with Uncoded JEs.
+      // Re-code any pending transactions still left with Uncoded JEs. The
+      // import already committed, so a coding failure isn't a failed sync —
+      // but it does need saying out loud (a lapsed QBO connection lands here).
       try {
         await runCodingLoop();
       } catch (codeErr) {
         console.error("Post-sync coding failed:", codeErr);
+        setCodingError(
+          codeErr instanceof Error
+            ? `Transactions imported, but AI coding failed: ${codeErr.message}`
+            : "Transactions imported, but AI coding failed.",
+        );
       }
       reload();
     } catch (err: unknown) {

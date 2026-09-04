@@ -179,7 +179,11 @@ export default function ClientOverviewPage() {
       );
       clearTimeout(phaseTimer);
       setSyncResult(result.results[0]);
-      if (result.total_imported > 0) {
+      // Stay put when the sync reported problems (e.g. import succeeded but AI
+      // coding couldn't run) — SyncDetail renders them, and jumping to the
+      // review queue would throw the explanation away.
+      const hadErrors = result.results.some((r) => r.errors.length > 0);
+      if (result.total_imported > 0 && !hadErrors) {
         router.push(`/clients/${clientId}/review`);
       } else {
         const [c, t] = await Promise.all([getClient(clientId), getTransactions(clientId)]);
