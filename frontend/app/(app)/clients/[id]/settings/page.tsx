@@ -139,7 +139,10 @@ export default function ClientSettingsPage() {
   useEffect(() => {
     getClient(clientId).then((c) => {
       setClient(c);
-      setMercuryKey(c.mercury_api_key_encrypted ?? "");
+      // The API returns only a mask ("***") for a stored key, never the key
+      // itself. Leave the field blank and treat blank as "keep what's saved",
+      // the same way the Stripe and Bill.com forms below work.
+      setMercuryKey("");
       setPolicyName(c.policy_path ? c.policy_path.split("/").pop() ?? null : null);
     }).finally(() => setLoading(false));
     getQboStatus(clientId).then(setQboStatus).catch(() => {});
@@ -200,10 +203,11 @@ export default function ClientSettingsPage() {
   }
 
   async function saveMercuryKey() {
+    if (!mercuryKey.trim()) return;   // blank = leave the saved key alone
     setSavingKey(true);
     setKeySaved(false);
     try {
-      const updated = await updateClient(clientId, { mercury_api_key_encrypted: mercuryKey });
+      const updated = await updateClient(clientId, { mercury_api_key_encrypted: mercuryKey.trim() });
       setClient(updated);
       setKeySaved(true);
       setTimeout(() => setKeySaved(false), 3000);
@@ -342,13 +346,18 @@ export default function ClientSettingsPage() {
       {/* Mercury API Key */}
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
         <h2 className="text-base font-semibold text-white mb-1">Mercury API Key</h2>
-        <p className="text-xs text-gray-500 mb-4">Used when syncing transactions for this client.</p>
+        <p className="text-xs text-gray-500 mb-4">
+          Used when syncing transactions for this client.{" "}
+          {client?.mercury_api_key_encrypted
+            ? "A key is saved — leave this blank to keep it, or paste a new one to replace it."
+            : "No key saved yet."}
+        </p>
         <div className="flex gap-2">
           <input
             type="password"
             value={mercuryKey}
             onChange={(e) => setMercuryKey(e.target.value)}
-            placeholder="secret-token:mercury_production_…"
+            placeholder={client?.mercury_api_key_encrypted ? "•••••••• (saved)" : "secret-token:mercury_production_…"}
             className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-white placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
           <button

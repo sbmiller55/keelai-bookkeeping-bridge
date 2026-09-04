@@ -13,6 +13,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from database import Base
+from crypto import EncryptedText
 import enum
 
 
@@ -49,10 +50,10 @@ class Client(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     name = Column(String, nullable=False)
-    mercury_api_key_encrypted = Column(Text, nullable=True)
-    qbo_oauth_token = Column(Text, nullable=True)       # legacy — kept for compat
-    qbo_access_token = Column(Text, nullable=True)
-    qbo_refresh_token = Column(Text, nullable=True)
+    mercury_api_key_encrypted = Column(EncryptedText, nullable=True)
+    qbo_oauth_token = Column(EncryptedText, nullable=True)   # legacy — kept for compat
+    qbo_access_token = Column(EncryptedText, nullable=True)
+    qbo_refresh_token = Column(EncryptedText, nullable=True)
     qbo_realm_id = Column(String, nullable=True)
     qbo_token_expires_at = Column(DateTime, nullable=True)
     chart_of_accounts_path = Column(String, nullable=True)
@@ -343,10 +344,10 @@ class RevenueIntegrationSettings(Base):
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, unique=True)
     mercury_revenue_enabled = Column(Boolean, default=False, nullable=False)
     stripe_enabled = Column(Boolean, default=False, nullable=False)
-    stripe_api_key = Column(Text, nullable=True)
+    stripe_api_key = Column(EncryptedText, nullable=True)
     billcom_enabled = Column(Boolean, default=False, nullable=False)
     billcom_username = Column(String, nullable=True)
-    billcom_password = Column(Text, nullable=True)
+    billcom_password = Column(EncryptedText, nullable=True)
     billcom_org_id = Column(String, nullable=True)
     billcom_dev_key = Column(String, nullable=True)
     last_stripe_sync = Column(DateTime, nullable=True)
@@ -371,9 +372,9 @@ class StripeConfig(Base):
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, unique=True)
     enabled = Column(Boolean, default=False, nullable=False)
     # Restricted (read-only) Stripe secret key. Falls back to
-    # RevenueIntegrationSettings.stripe_api_key when blank. Stored plaintext,
-    # consistent with the existing Mercury/Stripe key handling.
-    api_key = Column(Text, nullable=True)
+    # RevenueIntegrationSettings.stripe_api_key when blank. Encrypted at rest;
+    # see crypto.EncryptedText.
+    api_key = Column(EncryptedText, nullable=True)
     # "gross_plus_fees" (GAAP: full revenue, fees as a separate expense) | "net"
     treatment = Column(String(20), default="gross_plus_fees", nullable=False)
     # "per_charge" (one entry per charge, customer-attributed) | "per_payout" (summary)

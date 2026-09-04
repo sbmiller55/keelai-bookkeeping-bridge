@@ -1,6 +1,8 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
+
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,6 +17,28 @@ def create_tables():
 
 
 app = FastAPI(title="Bookkeeping Bridge", version="1.0.0")
+
+
+def _safe_detail(exc: Exception) -> str:
+    """A message the browser can show without leaking internals.
+
+    Application-level errors (a lapsed QuickBooks connection, a bad value) carry
+    text written for the user, and showing it is the whole point of this
+    middleware. Database and HTTP-client failures do not: their messages embed
+    SQL, table layouts, connection strings and URLs with credentials. Those get
+    a generic line, and the full traceback goes to the logs either way.
+    """
+    opaque = (
+        "sqlalchemy", "psycopg2", "asyncpg", "botocore", "boto3",
+        "urllib3", "httpx", "requests", "http.client", "ssl", "socket",
+    )
+    module = type(exc).__module__ or ""
+    if any(module.startswith(p) for p in opaque):
+        return (
+            f"Internal error ({type(exc).__name__}). The details were written "
+            "to the server log."
+        )
+    return f"{type(exc).__name__}: {exc}"
 
 
 class JsonErrorMiddleware:
@@ -52,19 +76,37 @@ class JsonErrorMiddleware:
             # Headers are already on the wire — nothing left to rewrite.
             if response_started:
                 raise
-            response = JSONResponse(
-                status_code=500,
-                content={"detail": f"{type(exc).__name__}: {exc}"},
+            await JSONResponse(status_code=500, content={"detail": _safe_detail(exc)})(
+                scope, receive, send
             )
-            await response(scope, receive, send)
 
+
+# Only the app's own front ends may call this API from a browser. It was
+# previously open to every origin, which let any page on the internet drive the
+# API with a token it had got hold of. Extra origins can be added without a code
+# change via CORS_ALLOW_ORIGINS (comma-separated).
+_DEFAULT_ORIGINS = [
+    "https://app.keelai.co",
+    "https://frontend-production-b146e.up.railway.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_extra_origins = [
+    o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()
+]
+_frontend_url = os.environ.get("RAILWAY_SERVICE_FRONTEND_URL", "").strip()
+if _frontend_url:
+    _extra_origins.append(
+        _frontend_url if _frontend_url.startswith("http") else f"https://{_frontend_url}"
+    )
+ALLOWED_ORIGINS = sorted(set(_DEFAULT_ORIGINS + _extra_origins))
 
 # Order matters: add_middleware pushes onto the front of the stack, so CORS
 # must be added LAST to end up outermost and wrap the JSON error response.
 app.add_middleware(JsonErrorMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -575,6 +617,24 @@ def on_startup():
                 _log(f"[startup] backup warning (non-fatal): {exc}")
             _log("[startup] migrating db...")
             _migrate_db()
+            # Encrypt any credential still sitting in the DB as plaintext.
+            # Idempotent, so it's safe on every boot; a no-op when
+            # ENCRYPTION_KEY isn't configured.
+            try:
+                import crypto
+                if crypto.is_configured():
+                    from database import SessionLocal as _SL
+                    _db = _SL()
+                    try:
+                        n = crypto.encrypt_existing_rows(_db)
+                        _log(f"[startup] credential encryption: {n} value(s) converted")
+                    finally:
+                        _db.close()
+                else:
+                    _log("[startup] WARNING: ENCRYPTION_KEY is not set — "
+                         "stored API keys and OAuth tokens remain plaintext at rest")
+            except Exception as exc:
+                _log(f"[startup] credential encryption warning (non-fatal): {exc}")
             _log("[startup] seeding admin...")
             _seed_admin()
             _log("[startup] seeding ContextBridge rules...")

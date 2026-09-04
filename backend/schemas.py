@@ -1,6 +1,12 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_serializer
+
+# Stored credentials are never sent back to the browser. Endpoints return this
+# placeholder instead, which stays truthy so the UI can still show "connected".
+# A write carrying this value is ignored rather than saved — see
+# routers/clients.update_client.
+SECRET_MASK = "***"
 
 
 # ── User schemas ──────────────────────────────────────────────────────────────
@@ -59,6 +65,11 @@ class ClientRead(BaseModel):
     last_sync_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("mercury_api_key_encrypted", "qbo_oauth_token")
+    def _mask_secret(self, value: Optional[str], _info) -> Optional[str]:
+        """Report only whether a credential is set, never its value."""
+        return SECRET_MASK if value else None
 
 
 class ClientUpdate(BaseModel):

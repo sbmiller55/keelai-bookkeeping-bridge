@@ -4,13 +4,21 @@ Email inbound webhook — receives forwarded invoices and creates journal entrie
 Uses Cloudmailin JSON format (free forever, no domain needed).
 1. Sign up at cloudmailin.com
 2. You'll get a free address like abc123@cloudmailin.net
-3. Set Target URL to: https://your-server/email/inbound?token=bb-inbound-2026
+3. Set Target URL to: https://your-server/email/inbound?token=$INBOUND_EMAIL_TOKEN
+   (substitute the real value; never write the token down in this repo — it is
+   the only thing standing between the public internet and a write into the
+   books, and this repo is public)
 4. Set format to "JSON (Normalized)"
 5. Set INBOUND_EMAIL_ADDRESS=abc123@cloudmailin.net in .env
+
+Optionally append &client_id=N to bind the address to one client. Without it the
+webhook only accepts mail when exactly one client is Mercury-connected; it will
+not guess between several.
 """
 import base64
 import json
 import os
+import secrets
 from datetime import datetime
 from typing import Optional
 
@@ -18,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from auth import get_current_user
 import models
 import ai_coder
 import mercury as mercury_client
@@ -26,10 +35,19 @@ router = APIRouter(prefix="/email", tags=["email"])
 
 
 def _verify_token(token: Optional[str]) -> None:
+    """Reject anything without the shared secret.
+
+    This used to return early when INBOUND_EMAIL_TOKEN was unset, which meant a
+    missing env var silently opened an unauthenticated write path into the
+    books. It now fails closed: no configured token, no inbound mail.
+    """
     expected = os.getenv("INBOUND_EMAIL_TOKEN", "")
     if not expected:
-        return
-    if token != expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Inbound email is not configured.",
+        )
+    if not token or not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
 
 
@@ -49,12 +67,28 @@ def _extract_pdf_text(attachments: list) -> Optional[str]:
     return None
 
 
-def _pick_client(db: Session) -> Optional[models.Client]:
-    return (
+def _pick_client(db: Session, client_id: Optional[int] = None) -> Optional[models.Client]:
+    """Resolve which client's books an inbound invoice belongs to.
+
+    An explicit client_id from the webhook URL wins. Otherwise this only
+    resolves when exactly one client is Mercury-connected: the old behaviour
+    took the *first* such client, so with more than one on the account a
+    forwarded invoice landed in whichever row the database returned first,
+    with no way for the sender to tell.
+    """
+    if client_id is not None:
+        return db.query(models.Client).filter(models.Client.id == client_id).first()
+
+    candidates = (
         db.query(models.Client)
         .filter(models.Client.mercury_api_key_encrypted.isnot(None))
-        .first()
+        .order_by(models.Client.id)
+        .limit(2)
+        .all()
     )
+    if len(candidates) == 1:
+        return candidates[0]
+    return None                          # none configured, or ambiguous
 
 
 def _create_transaction_and_jes(
@@ -105,6 +139,7 @@ def _create_transaction_and_jes(
 async def inbound_email(
     request: Request,
     token: Optional[str] = None,
+    client_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     _verify_token(token)
@@ -121,7 +156,7 @@ async def inbound_email(
         plain = payload.get("plain", "") or payload.get("html", "")
         invoice_text = plain[:10000] or None
 
-    client = _pick_client(db)
+    client = _pick_client(db, client_id)
     if not client:
         return {"status": "no_client"}
 
@@ -129,6 +164,6 @@ async def inbound_email(
 
 
 @router.get("/address")
-def get_inbound_address():
+def get_inbound_address(current_user: models.User = Depends(get_current_user)):
     address = os.getenv("INBOUND_EMAIL_ADDRESS", "")
     return {"address": address}

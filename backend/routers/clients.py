@@ -65,6 +65,11 @@ def update_client(
 ):
     client = _get_client_or_404(client_id, current_user, db)
     for field, value in payload.model_dump(exclude_unset=True).items():
+        # Reads return SECRET_MASK in place of stored credentials; a form that
+        # round-trips an untouched field would otherwise overwrite the real key
+        # with the mask and silently break the integration.
+        if value == schemas.SECRET_MASK:
+            continue
         setattr(client, field, value)
     db.commit()
     db.refresh(client)
