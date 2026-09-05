@@ -176,7 +176,11 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
 
     id = Column(Integer, primary_key=True, index=True)
-    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False)
+    # Nullable since 2026-09: client-level actions (a credential change, a QBO
+    # export run) touch financial data without belonging to one transaction,
+    # and the NOT NULL made them impossible to record at all.
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
     action = Column(String, nullable=False)
     before_state = Column(Text, nullable=True)
     after_state = Column(Text, nullable=True)

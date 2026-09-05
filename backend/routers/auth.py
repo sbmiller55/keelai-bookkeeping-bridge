@@ -35,7 +35,12 @@ _login_failures: dict[tuple[str, str], list[float]] = {}
 _DUMMY_HASH = hash_password(os.urandom(16).hex())
 
 # How long after a token expires it may still be exchanged for a fresh one.
-_REFRESH_GRACE_SECONDS = 7 * 24 * 60 * 60
+# This is NOT the session length — the token lifetime (auth.SESSION_IDLE_MINUTES)
+# is what times an idle session out. This is only the slack for a request that
+# was already in flight when the token lapsed, plus a little clock skew. It used
+# to be seven days, which meant a token could be renewed a week after it died
+# and the stated expiry meant nothing.
+_REFRESH_GRACE_SECONDS = 120
 
 
 def _throttle_key(request: Request, email: str) -> tuple[str, str]:

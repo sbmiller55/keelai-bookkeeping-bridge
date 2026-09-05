@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -51,7 +51,18 @@ def _load_secret_key() -> str:
 
 SECRET_KEY = _load_secret_key()
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 30
+
+# Sessions time out after 30 minutes of inactivity, not 30 minutes flat: the
+# frontend swaps an expired token for a fresh one whenever a request comes back
+# 401, so anyone actively using the app keeps rolling forward and never sees a
+# login screen. Go quiet for longer than the window and the token can no longer
+# be exchanged, so the next action requires signing in again.
+#
+# The window is the token lifetime, and the refresh grace in routers/auth.py is
+# only the slack needed for a request already in flight when it lapses. Raising
+# one without the other silently lengthens the real timeout.
+SESSION_IDLE_MINUTES = int(os.getenv("SESSION_IDLE_MINUTES", "30"))
+ACCESS_TOKEN_EXPIRE_MINUTES = SESSION_IDLE_MINUTES
 
 # Pin the work factor rather than inheriting passlib's default. The default is
 # currently 12, but it is a library default: a dependency bump could silently
@@ -77,13 +88,17 @@ def verify_password(plain: str, hashed: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + (
-        expires_delta if expires_delta else timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+        expires_delta if expires_delta else timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+REFRESHED_TOKEN_HEADER = "X-Refreshed-Token"
+
+
 def get_current_user(
+    response: Response,
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> models.User:
@@ -104,4 +119,15 @@ def get_current_user(
     user = db.query(models.User).filter(models.User.id == int(user_id)).first()
     if user is None:
         raise credentials_exception
+
+    # Slide the session forward on every authenticated request. Without this the
+    # token would simply die 30 minutes after sign-in regardless of what the
+    # user was doing, which is a fixed session length, not an idle timeout. The
+    # client swaps in this token, so its expiry always sits 30 minutes after the
+    # last thing the user actually did.
+    try:
+        response.headers[REFRESHED_TOKEN_HEADER] = create_access_token({"sub": str(user.id)})
+    except Exception:
+        pass    # never fail a request because the sliding token couldn't be set
+
     return user

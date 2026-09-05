@@ -213,6 +213,20 @@ async function _tryRefreshToken(): Promise<string | null> {
   return _refreshing;
 }
 
+/**
+ * The API returns a freshly minted token on every authenticated response, with
+ * its expiry set 30 minutes ahead. Storing it here is what makes the session
+ * time out on *inactivity* rather than on a fixed clock: keep working and the
+ * expiry keeps moving, stop for half an hour and the stored token lapses and
+ * the next action needs a sign-in.
+ */
+function _storeSlidingToken(res: Response): void {
+  const fresh = res.headers.get("X-Refreshed-Token");
+  if (fresh && fresh !== getToken()) {
+    setToken(fresh);
+  }
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   options: RequestInit & { timeoutMs?: number } = {},
@@ -232,6 +246,8 @@ export async function apiFetch<T = unknown>(
     headers,
   }, timeoutMs);
 
+  _storeSlidingToken(res);
+
   if (!res.ok) {
     if (res.status === 401) {
       const newToken = await _tryRefreshToken();
@@ -241,6 +257,7 @@ export async function apiFetch<T = unknown>(
           ...fetchOptions,
           headers: { ...headers, "Authorization": `Bearer ${newToken}` },
         }, timeoutMs);
+        _storeSlidingToken(retryRes);
         if (retryRes.ok) {
           if (retryRes.status === 204) return undefined as unknown as T;
           return retryRes.json() as Promise<T>;

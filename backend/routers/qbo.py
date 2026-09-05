@@ -22,6 +22,7 @@ from auth import get_current_user
 from database import get_db, SessionLocal
 from models import Client, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
+import audit
 
 router = APIRouter(prefix="/clients/{client_id}/qbo", tags=["qbo"])
 
@@ -497,6 +498,15 @@ def sync_to_qbo(
                 je.qbo_je_id        = qbo_id
                 je.qbo_object_type  = "Purchase" if use_purchase else "JournalEntry"
                 je.qbo_export_error = None
+                audit.record(
+                    db, current_user.id, "je_exported_to_qbo",
+                    transaction_id=tx.id, client_id=client_id,
+                    after={"je_number": je.je_number, "qbo_id": qbo_id,
+                           "qbo_object_type": je.qbo_object_type,
+                           "amount": je.amount,
+                           "debit_account": je.debit_account,
+                           "credit_account": je.credit_account},
+                )
                 if mark_exported:
                     je.exported_at  = datetime.utcnow()
                 synced += 1

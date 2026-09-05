@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from auth import get_current_user
 from database import get_db
 import models
+import audit
 import schemas
 
 router = APIRouter(prefix="/journal-entries", tags=["journal_entries"])
@@ -123,6 +124,12 @@ def create_journal_entry(
     je = models.JournalEntry(**payload.model_dump())
     je.je_number = models.next_je_number(db)
     db.add(je)
+    db.flush()
+    audit.record(
+        db, current_user.id, "je_created",
+        transaction_id=je.transaction_id,
+        after=audit.snapshot(je, ("id", "je_number", "debit_account", "credit_account", "amount")),
+    )
     db.commit()
     db.refresh(je)
     return je
@@ -173,6 +180,7 @@ def update_journal_entry(
         after = {f: getattr(je, f) for f in before}
         db.add(models.AuditLog(
             transaction_id=je.transaction_id,
+            client_id=getattr(je.transaction, "client_id", None),
             action="je_updated",
             before_state=_json.dumps(before, default=str),
             after_state=_json.dumps(after, default=str),
@@ -201,5 +209,11 @@ def delete_journal_entry(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete the only journal entry for a transaction",
         )
+    audit.record(
+        db, current_user.id, "je_deleted",
+        transaction_id=je.transaction_id,
+        client_id=getattr(je.transaction, "client_id", None),
+        before=audit.snapshot(je, ("id", "je_number", "debit_account", "credit_account", "amount")),
+    )
     db.delete(je)
     db.commit()

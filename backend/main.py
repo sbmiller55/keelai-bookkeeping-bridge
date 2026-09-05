@@ -124,6 +124,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the browser hides the sliding-session token from JavaScript,
+    # so every session would expire on a fixed 30-minute clock no matter how
+    # actively it was being used.
+    expose_headers=["X-Refreshed-Token"],
 )
 
 @app.get("/health")
@@ -192,6 +196,7 @@ def _migrate_db():
         ("revenue_contracts",     "payment_je_id",  "INTEGER"),
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
+        ("audit_log",             "client_id",           "INTEGER"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
         # Invoice/payment-matching columns (added 2026-05)
@@ -229,6 +234,23 @@ def _migrate_db():
                 else:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"))
         conn.commit()
+
+    # audit_log.transaction_id was NOT NULL, which made it impossible to record
+    # any action that isn't tied to a single transaction (a credential change, a
+    # QBO export run). Relax it. SQLite can't ALTER a column constraint, but it
+    # never enforced this one for existing rows anyway and the table is
+    # recreated from the model locally, so it only matters on Postgres.
+    if not is_sqlite:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE audit_log ALTER COLUMN transaction_id DROP NOT NULL"
+                ))
+                conn.commit()
+        except Exception as exc:
+            __import__("sys").stderr.write(
+                f"[migrate] audit_log.transaction_id DROP NOT NULL skipped: {exc}\n"
+            )
 
     # Postgres enums need explicit ALTER TYPE to accept new values added on
     # the Python side. SQLite stores enums as plain text, so it's a no-op

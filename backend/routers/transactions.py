@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from auth import get_current_user
 from database import get_db
 import models
+import audit
 import schemas
 from ai_coder import generate_prepaid_jes, _parse_month, _add_months
 
@@ -182,7 +183,15 @@ def bulk_update_status(
     if confirm != "YES":
         return BulkStatusResult(dry_run=True, candidate_count=candidate_count, updated_count=0)
 
+    affected_ids = [t.id for t in q.all()]
     updated = q.update({"status": to_status}, synchronize_session=False)
+    audit.record(
+        db, current_user.id, "transactions_bulk_status_changed",
+        client_id=client_id,
+        before={"status": from_status, "transaction_ids": affected_ids[:500],
+                "count": len(affected_ids)},
+        after={"status": to_status, "count": updated},
+    )
     db.commit()
     return BulkStatusResult(dry_run=False, candidate_count=candidate_count, updated_count=updated)
 
@@ -539,6 +548,16 @@ def update_transaction(
             if not je.exported_at:
                 je.exported_at = _now
 
+    audit.record(
+        db, current_user.id, "transaction_updated",
+        transaction_id=tx.id, client_id=tx.client_id,
+        before={"status": prev_status_str},
+        # transaction_id is also copied into the state: deleting a transaction
+        # nullifies the FK on its audit rows (the entry survives, the link does
+        # not), so the id has to be recorded as data to stay recoverable.
+        after={"transaction_id": tx.id,
+               **audit.snapshot(tx, tuple(fields.keys()) or ("status",))},
+    )
     db.commit()
     db.refresh(tx)
     return tx
@@ -683,6 +702,11 @@ def delete_transaction(
     db: Session = Depends(get_db),
 ):
     tx = _get_transaction_or_404(transaction_id, current_user, db)
+    audit.record(
+        db, current_user.id, "transaction_deleted",
+        client_id=tx.client_id,
+        before=audit.snapshot(tx, ("id", "date", "description", "amount", "status")),
+    )
     db.query(models.JournalEntry).filter(models.JournalEntry.transaction_id == tx.id).delete()
     db.delete(tx)
     db.commit()

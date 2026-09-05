@@ -8,6 +8,7 @@ from database import get_db
 import models
 import schemas
 import storage
+import audit
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -65,7 +66,10 @@ def update_client(
     db: Session = Depends(get_db),
 ):
     client = _get_client_or_404(client_id, current_user, db)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    incoming = payload.model_dump(exclude_unset=True)
+    before_state = audit.snapshot(client, tuple(incoming.keys()))
+    changed_fields: dict[str, bool] = {}
+    for field, value in incoming.items():
         # Reads return SECRET_MASK in place of stored credentials; a form that
         # round-trips an untouched field would otherwise overwrite the real key
         # with the mask and silently break the integration.
@@ -80,7 +84,18 @@ def update_client(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"{field} must reference a file uploaded through this app.",
                 )
+        changed_fields[field] = True
         setattr(client, field, value)
+
+    if changed_fields:
+        # Field names only for credentials — audit.record redacts the values,
+        # so the trail shows that a key was replaced without storing it.
+        audit.record(
+            db, current_user.id, "client_updated",
+            client_id=client.id,
+            before=before_state,
+            after=audit.snapshot(client, tuple(changed_fields)),
+        )
     db.commit()
     db.refresh(client)
     return client

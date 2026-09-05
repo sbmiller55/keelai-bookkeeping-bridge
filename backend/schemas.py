@@ -263,7 +263,11 @@ class AuditLogCreate(BaseModel):
 
 class AuditLogRead(BaseModel):
     id: int
-    transaction_id: int
+    # Optional since client-level actions (a credential change, a QBO export
+    # run) have no single transaction, and deleting a transaction nullifies the
+    # link on its audit rows while keeping the entry itself.
+    transaction_id: Optional[int] = None
+    client_id: Optional[int] = None
     action: str
     before_state: Optional[str] = None
     after_state: Optional[str] = None
