@@ -11,7 +11,45 @@ from sqlalchemy.orm import Session
 from database import get_db
 import models
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production-bookkeeping-bridge")
+def _load_secret_key() -> str:
+    """The JWT signing key, which must never fall back to a published constant.
+
+    This used to default to a literal string committed to the repo — and the
+    repo is public. It is set correctly in production, so nothing was
+    exploitable, but a missing or mistyped env var would have silently signed
+    tokens with a key anyone could read, letting them mint a token for any user.
+
+    Deployed environments now refuse to start without it. Local development
+    without one gets a random per-process key: logins don't survive a restart,
+    which is mildly annoying and infinitely better than a known secret. Set
+    SECRET_KEY in backend/.env for a stable local session.
+    """
+    key = os.getenv("SECRET_KEY", "").strip()
+    if key:
+        return key
+
+    deployed = any(
+        os.getenv(v) for v in ("RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID", "RAILWAY_PROJECT_ID")
+    )
+    if deployed:
+        raise RuntimeError(
+            "SECRET_KEY is not set. Refusing to start: tokens signed with a "
+            "default key would be forgeable by anyone."
+        )
+
+    import secrets as _secrets
+    import sys
+    generated = _secrets.token_urlsafe(48)
+    sys.stderr.write(
+        "[auth] WARNING: SECRET_KEY is not set — using a random key for this "
+        "process. Sessions will not survive a restart. Set SECRET_KEY in "
+        "backend/.env for stable local development.\n"
+    )
+    sys.stderr.flush()
+    return generated
+
+
+SECRET_KEY = _load_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
 

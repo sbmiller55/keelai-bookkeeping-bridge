@@ -1,6 +1,7 @@
 """Mercury REST API client."""
 import io
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -18,7 +19,27 @@ OUTGOING_KINDS = {
 }
 
 
+def _debug_enabled() -> bool:
+    """Whether to write the raw Mercury response log.
+
+    Off by default. Every Mercury API response was previously dumped to
+    sync_debug.log verbatim on every sync — the complete transaction feed, with
+    amounts, counterparties, descriptions and account identifiers sitting in
+    plaintext on the container's disk indefinitely. That is a copy of the
+    client's bank activity outside the database, outside the encryption applied
+    to everything else, and outside the backup/retention story.
+
+    It is genuinely useful when a sync misbehaves, so it is kept — but as an
+    explicit opt-in, switched on for the length of an investigation and off
+    again afterwards. (The API key is not written either way: only the URL and
+    the response body are logged, never the Authorization header.)
+    """
+    return os.getenv("MERCURY_DEBUG_LOG", "").strip().lower() in ("1", "true", "yes")
+
+
 def _debug(section: str, url: str, response: Any) -> None:
+    if not _debug_enabled():
+        return
     with DEBUG_LOG.open("a") as f:
         f.write(f"\n{'='*80}\n")
         f.write(f"[{datetime.utcnow().isoformat()}] {section}\n")
@@ -287,10 +308,11 @@ def get_transaction_rules(api_key: str) -> list[dict]:
 
 
 def sync_for_client(api_key: str, start: Optional[str] = None, end: Optional[str] = None) -> dict:
-    # Reset log for this sync run
-    with DEBUG_LOG.open("w") as f:
-        f.write(f"SYNC STARTED {datetime.utcnow().isoformat()}\n")
-        f.write(f"Date range: start={start} end={end}\n")
+    # Reset the log for this run — only when debug logging is switched on.
+    if _debug_enabled():
+        with DEBUG_LOG.open("w") as f:
+            f.write(f"SYNC STARTED {datetime.utcnow().isoformat()}\n")
+            f.write(f"Date range: start={start} end={end}\n")
 
     accounts = get_accounts(api_key)
     if not accounts:
