@@ -45,6 +45,32 @@ def _resolve_media_type(filename: str, content_type: Optional[str]) -> Optional[
     return _MEDIA_TYPES.get(ext)
 
 
+# Leading bytes that identify each accepted format. The declared Content-Type
+# and the file extension are both supplied by whoever is uploading, so on their
+# own they establish nothing: a request can claim application/pdf and send
+# anything at all. Checking the actual content matters less for safety here
+# (the bytes are forwarded to Claude and never stored or executed) than for
+# cost and clarity — a mislabelled file is rejected immediately instead of
+# being paid for as an API call and failing with a confusing error.
+_MAGIC: dict[str, tuple[bytes, ...]] = {
+    "application/pdf": (b"%PDF",),
+    "image/jpeg":      (b"\xff\xd8\xff",),
+    "image/png":       (b"\x89PNG\r\n\x1a\n",),
+    "image/gif":       (b"GIF87a", b"GIF89a"),
+}
+
+
+def _content_matches(file_bytes: bytes, media_type: str) -> bool:
+    """Whether the bytes really are the format the request claims."""
+    if media_type == "image/webp":
+        # RIFF container: "RIFF" <4-byte length> "WEBP"
+        return file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP"
+    signatures = _MAGIC.get(media_type)
+    if not signatures:
+        return True
+    return any(file_bytes.startswith(sig) for sig in signatures)
+
+
 def _extract_invoice(file_bytes: bytes, media_type: str, chart: Optional[str], policy: Optional[str]) -> dict:
     """Send invoice to Claude and return extracted data + suggested JEs."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -129,9 +155,30 @@ async def upload_invoice(
     if not media_type:
         raise HTTPException(status_code=400, detail="Unsupported file type. Upload a PDF or image (JPG, PNG, WEBP).")
 
-    file_bytes = await file.read()
-    if len(file_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 20 MB)")
+    # Read in chunks, stopping at the cap. Reading the whole body first and
+    # measuring it afterwards meant a multi-gigabyte upload was fully buffered
+    # in memory just to earn a 400.
+    MAX_BYTES = 20 * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File too large (max 20 MB)")
+        chunks.append(chunk)
+    file_bytes = b"".join(chunks)
+
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if not _content_matches(file_bytes, media_type):
+        raise HTTPException(
+            status_code=400,
+            detail=f"File contents don't match the declared type ({media_type}). "
+                   "Upload a real PDF or image.",
+        )
 
     chart = ai_coder._resolve_chart(client_obj)
     policy = ai_coder._read_file_safe(client_obj.policy_path)
@@ -141,7 +188,9 @@ async def upload_invoice(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not read invoice. {errors.safe_detail(exc, 'read the invoice')}")
 
-    vendor = str(data.get("vendor") or file.filename or "Unknown vendor")
+    # Truncated like every other extracted field below: this can fall back to
+    # the uploaded filename, which the client controls and does not bound.
+    vendor = str(data.get("vendor") or file.filename or "Unknown vendor")[:255]
     description = str(data.get("description") or f"Invoice from {vendor}")
     total_amount = float(data.get("total_amount") or 0)
     if total_amount == 0:
