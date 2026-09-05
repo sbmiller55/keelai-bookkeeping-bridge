@@ -25,12 +25,23 @@ async def upload_file(
     file: UploadFile = File(...),
     current_user: models.User = Depends(get_current_user),
 ):
-    contents = await file.read()
-    if len(contents) > MAX_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File too large (max 20 MB).",
-        )
+    # Read in chunks and stop at the limit. `await file.read()` pulled the whole
+    # body into memory *before* checking the size, so a multi-gigabyte upload
+    # could exhaust the container's memory to get a 413 back.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File too large (max 20 MB).",
+            )
+        chunks.append(chunk)
+    contents = b"".join(chunks)
 
     original = Path(file.filename or "upload").name
     safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in original)

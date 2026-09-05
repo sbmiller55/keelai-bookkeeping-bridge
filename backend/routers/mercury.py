@@ -13,6 +13,7 @@ from sqlalchemy import or_
 from auth import get_current_user
 from database import get_db
 import models
+import errors
 import mercury as mercury_client
 import ai_coder
 import rules_engine
@@ -618,7 +619,7 @@ def code_pending(
         traceback.print_exc()
         # Return a real error body so the frontend / network tab can see what
         # blew up instead of a CORS-blocked 500.
-        raise HTTPException(status_code=500, detail=f"AI coding failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=f"AI coding failed. {errors.safe_detail(exc, 'code transactions with AI')}")
 
 
 def _code_pending_inner(client_id: int, client, limit, db, _log):

@@ -2,11 +2,11 @@
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from auth import get_current_user
@@ -19,22 +19,33 @@ _VOWELS = set("aeiou")
 _COMMON_WORDS = {"in", "is", "of", "to", "at", "on", "an", "as", "or", "and", "the", "by", "for"}
 
 
+# Every field here is forwarded to Anthropic, so an unbounded request is an
+# unbounded bill as well as a memory risk. These ceilings sit well above any
+# real conversation: the longest legitimate page_context is a screenful of
+# transactions, and the UI sends at most a couple of screenshots.
+MAX_MESSAGES       = 100
+MAX_MESSAGE_CHARS  = 20_000
+MAX_CONTEXT_CHARS  = 100_000
+MAX_IMAGES         = 5
+MAX_IMAGE_CHARS    = 10 * 1024 * 1024   # base64 of a ~7 MB image
+
+
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=MAX_MESSAGE_CHARS)
 
 
 class ChatImage(BaseModel):
-    data: str        # base64-encoded bytes
-    media_type: str  # e.g. "image/png", "image/jpeg"
+    data: str = Field(max_length=MAX_IMAGE_CHARS)   # base64-encoded bytes
+    media_type: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 
 class ChatRequest(BaseModel):
     client_id: int
-    messages: list[ChatMessage]
-    current_page: Optional[str] = None   # e.g. "review_queue", "transactions"
-    page_context: Optional[str] = None   # JSON string of data currently on screen
-    images: list[ChatImage] = []         # attached to the latest user message
+    messages: list[ChatMessage] = Field(max_length=MAX_MESSAGES)
+    current_page: Optional[str] = Field(default=None, max_length=100)
+    page_context: Optional[str] = Field(default=None, max_length=MAX_CONTEXT_CHARS)
+    images: list[ChatImage] = Field(default=[], max_length=MAX_IMAGES)
 
 
 class ChatResponse(BaseModel):

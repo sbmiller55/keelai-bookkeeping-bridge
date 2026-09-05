@@ -4,6 +4,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from database import get_db
+import ratelimit
 import models
 import schemas
 from auth import (
@@ -25,16 +26,16 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # this slows credential stuffing rather than defeating a determined attacker.
 # It costs nothing and needs no extra infrastructure; move to Redis if the
 # service is ever scaled horizontally.
+_MAX_ATTEMPTS   = 8           # failures allowed inside the window
+_WINDOW_SECONDS = 15 * 60     # rolling window and lockout length
+_login_failures: dict[tuple[str, str], list[float]] = {}
+
 # A real bcrypt hash of a value nobody knows, used only to burn the same CPU
 # time as a genuine check when the email doesn't exist.
 _DUMMY_HASH = hash_password(os.urandom(16).hex())
 
-_MAX_ATTEMPTS   = 8           # failures allowed inside the window
-_WINDOW_SECONDS = 15 * 60     # rolling window and lockout length
-
 # How long after a token expires it may still be exchanged for a fresh one.
 _REFRESH_GRACE_SECONDS = 7 * 24 * 60 * 60
-_login_failures: dict[tuple[str, str], list[float]] = {}
 
 
 def _throttle_key(request: Request, email: str) -> tuple[str, str]:
@@ -180,11 +181,18 @@ def me(current_user: models.User = Depends(get_current_user)):
 @router.post("/change-password")
 def change_password(
     payload: schemas.PasswordChangeRequest,
+    request: Request,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Change your own password. There was previously no way to do this at all,
     so a password believed to be compromised could not be replaced in-app."""
+    # Throttled as well as authenticated: a stolen token shouldn't let someone
+    # guess the current password at speed to lock the real owner out.
+    ratelimit.guard(
+        request, "change_password", max_hits=10, window=900,
+        message="Too many attempts. Try again later.",
+    )
     if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

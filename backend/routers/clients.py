@@ -7,6 +7,7 @@ from auth import get_current_user
 from database import get_db
 import models
 import schemas
+import storage
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -70,6 +71,15 @@ def update_client(
         # with the mask and silently break the integration.
         if value == schemas.SECRET_MASK:
             continue
+        # File references are read back into AI prompts, so they must stay
+        # inside the uploads area. Rejected here as well as at read time, so a
+        # bad value can't sit in the database looking legitimate.
+        if field in ("policy_path", "chart_of_accounts_path") and value:
+            if not storage.is_allowed_ref(value):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"{field} must reference a file uploaded through this app.",
+                )
         setattr(client, field, value)
     db.commit()
     db.refresh(client)

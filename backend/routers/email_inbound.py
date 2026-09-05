@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from auth import get_current_user
+import ratelimit
 import models
 import ai_coder
 import mercury as mercury_client
@@ -142,6 +143,13 @@ async def inbound_email(
     client_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
+    # The shared token is the only thing guarding this write path, so cap how
+    # fast it can be guessed. A real mail provider posts a handful of times a
+    # minute at most.
+    ratelimit.guard(
+        request, "email_inbound", max_hits=20, window=300,
+        message="Too many requests.",
+    )
     _verify_token(token)
 
     payload = await request.json()

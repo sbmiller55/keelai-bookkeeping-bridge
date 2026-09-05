@@ -32,6 +32,36 @@ def _s3_key(filename: str) -> str:
     return f"{S3_PREFIX}{Path(filename).name}"
 
 
+def is_allowed_ref(path_or_key: Optional[str]) -> bool:
+    """Whether a stored reference points inside the uploads area.
+
+    Storage references are held in user-writable columns (a client's
+    policy_path and chart_of_accounts_path are set through the ordinary update
+    endpoint), and their contents are read back into AI prompts. Without this
+    check, setting one to `backups/db/...` would pull a database backup out of
+    the same bucket, and on a local install `/etc/passwd` would be readable.
+    Everything legitimate is written by files.upload(), which always lands
+    under the uploads prefix.
+    """
+    if not path_or_key:
+        return False
+    ref = str(path_or_key)
+    if "\x00" in ref:
+        return False
+    if S3_BUCKET:
+        # Reject traversal before comparing, so "uploads/../backups/x" can't pass.
+        if ".." in ref.split("/"):
+            return False
+        return ref.startswith(S3_PREFIX)
+    try:
+        resolved = Path(ref).resolve()
+        return resolved == LOCAL_UPLOADS_DIR.resolve() or (
+            LOCAL_UPLOADS_DIR.resolve() in resolved.parents
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def upload(filename: str, contents: bytes) -> str:
     """
     Store file contents and return a storage reference to save in the DB.
@@ -50,6 +80,13 @@ def upload(filename: str, contents: bytes) -> str:
 def read_bytes(path_or_key: Optional[str]) -> Optional[bytes]:
     """Read file contents given a DB storage reference. Returns None if not found."""
     if not path_or_key:
+        return None
+    if not is_allowed_ref(path_or_key):
+        # Not "not found" — a reference pointing outside the uploads area is a
+        # sign someone is probing, so say so in the log and read nothing.
+        import sys
+        sys.stderr.write(f"[storage] refused out-of-scope reference: {str(path_or_key)[:120]!r}\n")
+        sys.stderr.flush()
         return None
     if S3_BUCKET:
         try:
@@ -84,7 +121,7 @@ def as_local_path(path_or_key: Optional[str]):
     If using S3, downloads to a temp file first and cleans up after.
     Yields None if the file cannot be found.
     """
-    if not path_or_key:
+    if not path_or_key or not is_allowed_ref(path_or_key):
         yield None
         return
 

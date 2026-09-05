@@ -3,6 +3,8 @@ load_dotenv()
 
 import os
 
+import errors
+
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -17,28 +19,6 @@ def create_tables():
 
 
 app = FastAPI(title="Bookkeeping Bridge", version="1.0.0")
-
-
-def _safe_detail(exc: Exception) -> str:
-    """A message the browser can show without leaking internals.
-
-    Application-level errors (a lapsed QuickBooks connection, a bad value) carry
-    text written for the user, and showing it is the whole point of this
-    middleware. Database and HTTP-client failures do not: their messages embed
-    SQL, table layouts, connection strings and URLs with credentials. Those get
-    a generic line, and the full traceback goes to the logs either way.
-    """
-    opaque = (
-        "sqlalchemy", "psycopg2", "asyncpg", "botocore", "boto3",
-        "urllib3", "httpx", "requests", "http.client", "ssl", "socket",
-    )
-    module = type(exc).__module__ or ""
-    if any(module.startswith(p) for p in opaque):
-        return (
-            f"Internal error ({type(exc).__name__}). The details were written "
-            "to the server log."
-        )
-    return f"{type(exc).__name__}: {exc}"
 
 
 class SecurityHeadersMiddleware:
@@ -109,7 +89,7 @@ class JsonErrorMiddleware:
             # Headers are already on the wire — nothing left to rewrite.
             if response_started:
                 raise
-            await JSONResponse(status_code=500, content={"detail": _safe_detail(exc)})(
+            await JSONResponse(status_code=500, content={"detail": errors.safe_detail(exc)})(
                 scope, receive, send
             )
 

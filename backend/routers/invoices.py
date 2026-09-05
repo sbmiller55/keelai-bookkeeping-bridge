@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 import ai_coder
 from ai_coder import generate_prepaid_jes, generate_asset_jes, _parse_month, _add_months
 import models
+import errors
 from auth import get_current_user
 from database import get_db
 
@@ -138,7 +139,7 @@ async def upload_invoice(
     try:
         data = _extract_invoice(file_bytes, media_type, chart, policy)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Could not read invoice: {exc}")
+        raise HTTPException(status_code=422, detail=f"Could not read invoice. {errors.safe_detail(exc, 'read the invoice')}")
 
     vendor = str(data.get("vendor") or file.filename or "Unknown vendor")
     description = str(data.get("description") or f"Invoice from {vendor}")
