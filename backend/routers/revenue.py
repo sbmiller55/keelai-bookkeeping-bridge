@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
+import errors as errors_mod
 from models import (
     BillingType,
     Client,
@@ -466,6 +467,18 @@ def generate_recognition_jes(
         db.flush()
 
         entry.je_id = je.id
+        # Both of these were left untouched here, so the revenue page's
+        # "Recognized this month" card read $0.00 no matter how much had been
+        # recognized, and the deferred balance only moved when the monthly
+        # auto-release job happened to be the thing that created the entry.
+        # Only a finished service month counts as earned.
+        if je_date < datetime.utcnow():
+            entry.recognized = True
+            contract.amount_recognized = round(
+                (contract.amount_recognized or 0.0) + entry.amount, 2
+            )
+        else:
+            tx.status = TransactionStatus.scheduled
         created.append(entry.period)
 
     # Cash receipt for a paid contract (DR bank / CR AR).
@@ -574,12 +587,20 @@ def generate_all_jes(
 
             memo = f"Revenue Recognition - {contract.customer_name} - {sp_dt.strftime('%b %Y')}"
 
+            # A service month that hasn't finished yet has not been earned, so
+            # its entry must not post. This previously created every remaining
+            # period as `pending` the moment it was clicked, which recognized a
+            # full annual subscription's revenue on day one. Future months are
+            # parked as `scheduled` instead — excluded from the review queue and
+            # promoted to pending automatically once the month-end arrives.
+            is_earned = je_date < datetime.utcnow()
+
             tx = Transaction(
                 client_id=client_id,
                 date=je_date,
                 description=memo,
                 amount=entry.amount,
-                status=TransactionStatus.pending,
+                status=TransactionStatus.pending if is_earned else TransactionStatus.scheduled,
                 source="revenue",
             )
             db.add(tx)
@@ -601,6 +622,14 @@ def generate_all_jes(
             db.flush()
 
             entry.je_id = je.id
+            if is_earned:
+                # Both fields were left unset here, so the revenue page's
+                # "Recognized this month" card read $0.00 however much had been
+                # recognized, and the deferred balance never moved.
+                entry.recognized = True
+                contract.amount_recognized = round(
+                    (contract.amount_recognized or 0.0) + entry.amount, 2
+                )
             total_created += 1
 
         # Cash receipt for paid contracts — even if recognition was already done.
@@ -761,8 +790,74 @@ def sync_revenue_sources(
         except Exception as exc:
             errors.append(f"Bill.com: {exc}")
 
+    # ── Chargebee (subscription billings) ────────────────────────────────────
+    # Unlike the sources above, this one returns its own summary: a subscription
+    # import produces billing, reserve, refund, fee and payout entries, and the
+    # bare contract count wouldn't describe what landed in the review queue.
+    chargebee_result = None
+    if getattr(settings, "chargebee_enabled", False):
+        try:
+            import chargebee_sync
+            chargebee_result = chargebee_sync.run_import(
+                client_id, db, getattr(settings, "chargebee_cursor", None)
+            )
+            if not chargebee_result.get("exhausted"):
+                settings.chargebee_cursor = chargebee_result["cursor"]
+        except Exception as exc:
+            errors.append(f"Chargebee: {errors_mod.safe_detail(exc, 'import Chargebee activity')}")
+
     db.commit()
-    return {"imported": len(imported), "contracts": imported, "errors": errors}
+    return {
+        "imported": len(imported),
+        "contracts": imported,
+        "chargebee": chargebee_result,
+        "errors": errors,
+    }
+
+
+class ChargebeeRewindBody(BaseModel):
+    days: int = 30
+
+
+@router.post("/chargebee/setup")
+def chargebee_setup(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Prepare a client for the Chargebee subscription demo.
+
+    Creates the four plan streams and backfills a stretch of already-posted
+    history so deferred-revenue balances and a part-recognized schedule are on
+    screen from the start. History is marked exported, leaving the review queue
+    empty for the live import to fill. Safe to re-run.
+    """
+    _get_client(client_id, current_user, db)
+    import chargebee_sync
+    settings = _get_or_create_integration_settings(client_id, db)
+    result = chargebee_sync.setup_demo(client_id, db)
+    settings.chargebee_enabled = True
+    settings.chargebee_cursor = result["cursor"]
+    db.commit()
+    return result
+
+
+@router.post("/chargebee/rewind")
+def chargebee_rewind(
+    client_id: int,
+    body: ChargebeeRewindBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Move the demo cursor back so the same activity can be imported again."""
+    _get_client(client_id, current_user, db)
+    import chargebee_sync
+    settings = _get_or_create_integration_settings(client_id, db)
+    settings.chargebee_cursor = chargebee_sync.rewind_cursor(
+        body.days, getattr(settings, "chargebee_cursor", None)
+    )
+    db.commit()
+    return {"cursor": settings.chargebee_cursor, "rewound_days": body.days}
 
 
 # ── Private sync helpers ──────────────────────────────────────────────────────

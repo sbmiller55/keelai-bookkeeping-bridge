@@ -197,6 +197,8 @@ def _migrate_db():
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("audit_log",             "client_id",           "INTEGER"),
+        ("revenue_integration_settings", "chargebee_enabled", "BOOLEAN DEFAULT FALSE"),
+        ("revenue_integration_settings", "chargebee_cursor",  "TEXT"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
         # Invoice/payment-matching columns (added 2026-05)

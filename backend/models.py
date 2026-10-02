@@ -354,6 +354,11 @@ class RevenueIntegrationSettings(Base):
     billcom_password = Column(EncryptedText, nullable=True)
     billcom_org_id = Column(String, nullable=True)
     billcom_dev_key = Column(String, nullable=True)
+    # Chargebee subscription billing. `chargebee_cursor` is the date imported
+    # through ("YYYY-MM-DD"); each import advances it so repeat runs bring new
+    # activity rather than replaying the same screen.
+    chargebee_enabled = Column(Boolean, default=False, nullable=False)
+    chargebee_cursor = Column(String(10), nullable=True)
     last_stripe_sync = Column(DateTime, nullable=True)
     last_billcom_sync = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
