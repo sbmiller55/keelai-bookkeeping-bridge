@@ -11,6 +11,7 @@ import {
   RevenueSummary, RevenueContract, RevenueStream, ArAgingRow,
   RevenueIntegrationSettings,
   BillingType, BILLING_TYPE_LABELS,
+  RevenueRecognitionPolicy, RECOGNITION_POLICY_LABELS,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
 
@@ -589,6 +590,24 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
     billcom_enabled: settings?.billcom_enabled ?? false, billcom_username: settings?.billcom_username ?? "",
     billcom_password: "", billcom_org_id: settings?.billcom_org_id ?? "", billcom_dev_key: "",
   });
+  const [policy, setPolicy] = useState<RevenueRecognitionPolicy>(
+    settings?.revenue_recognition_policy ?? "full_month",
+  );
+  const [savingPolicy, setSavingPolicy] = useState(false);
+
+  async function handleSavePolicy(next: RevenueRecognitionPolicy) {
+    setPolicy(next);
+    setSavingPolicy(true);
+    try {
+      await updateRevenueIntegrationSettings(clientId, { revenue_recognition_policy: next });
+      onSaved(`Revenue recognition policy set to "${RECOGNITION_POLICY_LABELS[next]}".`);
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : "Save failed");
+      setPolicy(settings?.revenue_recognition_policy ?? "full_month");
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
 
   useEffect(() => {
     setLocalStreams(streams);
@@ -759,6 +778,46 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
       </section>
 
       {/* Integrations */}
+      <section>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-white">Revenue Recognition Policy</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            How a monthly subscription is recognized when its service period straddles two calendar months
+          </p>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <select
+            value={policy}
+            disabled={savingPolicy}
+            onChange={(e) => handleSavePolicy(e.target.value as RevenueRecognitionPolicy)}
+            className="bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm w-full max-w-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60"
+          >
+            {(["full_month", "daily_proration"] as RevenueRecognitionPolicy[]).map((p) => (
+              <option key={p} value={p}>{RECOGNITION_POLICY_LABELS[p]}</option>
+            ))}
+          </select>
+          <p className="text-xs text-gray-500 mt-3 leading-relaxed">
+            {policy === "full_month" ? (
+              <>
+                A subscription starting 4 September recognizes its full monthly fee in
+                September, with no proration for the partial month. This is the simplified
+                treatment most SaaS companies use and is acceptable under ASC 606 when
+                applied consistently.
+              </>
+            ) : (
+              <>
+                A subscription starting 4 September splits its fee across September and
+                October by actual days of service delivered in each month.
+              </>
+            )}
+          </p>
+          <p className="text-xs text-gray-600 mt-2">
+            Annual plans are unaffected — they already recognize ratably across the twelve
+            months of their term.
+          </p>
+        </div>
+      </section>
+
       <section>
         <div className="mb-4">
           <h2 className="text-base font-semibold text-white">Data Source Integrations</h2>

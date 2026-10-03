@@ -225,6 +225,10 @@ def _post_recognition(
     """
     if not items:
         return 0
+    from routers.revenue import POLICY_NOTE, POLICY_FULL_MONTH, _recognition_policy
+    policy_note = POLICY_NOTE.get(
+        _recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH]
+    )
     y, m = (int(x) for x in period.split("-"))
     je_date = _last_day(y, m)
     total = round(sum(e.amount for _, e in items), 2)
@@ -244,9 +248,9 @@ def _post_recognition(
             "customer_name": None,
             "ai_confidence": 1.0,
             "ai_reasoning": (
-                f"ASC 606 ratable recognition for {stream.name}, {period}: "
-                f"{len(items)} subscriptions earned a month of access against cash "
-                f"collected up front. Posted as one entry for the period."
+                f"{policy_note} {stream.name}, {period}: {len(items)} subscriptions "
+                f"earned a month of access against cash collected up front. "
+                f"Posted as one entry for the period."
             ),
         }],
         description=memo,

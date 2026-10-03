@@ -199,6 +199,7 @@ def _migrate_db():
         ("audit_log",             "client_id",           "INTEGER"),
         ("revenue_integration_settings", "chargebee_enabled", "BOOLEAN DEFAULT FALSE"),
         ("revenue_integration_settings", "chargebee_cursor",  "TEXT"),
+        ("revenue_integration_settings", "revenue_recognition_policy", "TEXT DEFAULT 'full_month'"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
         # Invoice/payment-matching columns (added 2026-05)
@@ -236,6 +237,17 @@ def _migrate_db():
                 else:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"))
         conn.commit()
+
+    # Existing clients must land on the documented default rather than NULL.
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "UPDATE revenue_integration_settings SET revenue_recognition_policy = 'full_month' "
+                "WHERE revenue_recognition_policy IS NULL"
+            ))
+            conn.commit()
+    except Exception as exc:
+        __import__("sys").stderr.write(f"[migrate] recognition-policy backfill skipped: {exc}\n")
 
     # audit_log.transaction_id was NOT NULL, which made it impossible to record
     # any action that isn't tied to a single transaction (a credential change, a

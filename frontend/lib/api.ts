@@ -1430,7 +1430,15 @@ export interface RevenueIntegrationSettings {
   billcom_dev_key: string | null;
   last_stripe_sync: string | null;
   last_billcom_sync: string | null;
+  revenue_recognition_policy: RevenueRecognitionPolicy | null;
 }
+
+export type RevenueRecognitionPolicy = "full_month" | "daily_proration";
+
+export const RECOGNITION_POLICY_LABELS: Record<RevenueRecognitionPolicy, string> = {
+  full_month: "Full month (default)",
+  daily_proration: "Daily proration",
+};
 
 // Revenue Streams
 export function getRevenueStreams(clientId: number): Promise<RevenueStream[]> {
@@ -1495,6 +1503,7 @@ export function updateRevenueIntegrationSettings(clientId: number, data: Partial
   mercury_revenue_enabled: boolean; stripe_enabled: boolean; stripe_api_key: string;
   billcom_enabled: boolean; billcom_username: string; billcom_password: string;
   billcom_org_id: string; billcom_dev_key: string;
+  revenue_recognition_policy: RevenueRecognitionPolicy;
 }>): Promise<{ ok: boolean }> {
   return apiFetch(`/clients/${clientId}/revenue/integration-settings`, { method: "PUT", body: JSON.stringify(data) });
 }

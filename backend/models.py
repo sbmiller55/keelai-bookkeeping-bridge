@@ -359,6 +359,12 @@ class RevenueIntegrationSettings(Base):
     # activity rather than replaying the same screen.
     chargebee_enabled = Column(Boolean, default=False, nullable=False)
     chargebee_cursor = Column(String(10), nullable=True)
+    # How a subscription whose term is a single month is recognized when that
+    # month straddles two calendar months. "full_month" books all of it in the
+    # month the period starts; "daily_proration" splits it by days of service.
+    # Multi-month contracts (annual plans) are unaffected either way — they
+    # already defer ratably across their term.
+    revenue_recognition_policy = Column(String(20), default="full_month", nullable=True)
     last_stripe_sync = Column(DateTime, nullable=True)
     last_billcom_sync = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

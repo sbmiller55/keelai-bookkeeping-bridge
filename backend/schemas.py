@@ -470,6 +470,7 @@ class RevenueIntegrationSettingsRead(BaseModel):
     billcom_dev_key: Optional[str] = None
     last_stripe_sync: Optional[datetime] = None
     last_billcom_sync: Optional[datetime] = None
+    revenue_recognition_policy: Optional[str] = "full_month"
 
     model_config = {"from_attributes": True}
 
@@ -483,6 +484,7 @@ class RevenueIntegrationSettingsUpdate(BaseModel):
     billcom_password: Optional[str] = None
     billcom_org_id: Optional[str] = None
     billcom_dev_key: Optional[str] = None
+    revenue_recognition_policy: Optional[str] = None
 
 
 class PrepaidScheduleRequest(BaseModel):

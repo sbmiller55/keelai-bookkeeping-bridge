@@ -26,6 +26,13 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
+
+
+def _policy_note(client_id: int, db) -> str:
+    """The client's recognition-policy note, for stamping on recognition JEs."""
+    from routers.revenue import POLICY_NOTE, POLICY_FULL_MONTH, _recognition_policy
+    return POLICY_NOTE.get(_recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH])
+
 from models import (
     AccruedExpense,
     AccruedExpenseStatus,
@@ -816,7 +823,10 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
             je_date=je_date,
             memo=memo[:80],
             ai_confidence=1.0,
-            ai_reasoning=f"Auto-released: ASC 606 recognition for {contract.customer_name}, {target_month}.",
+            ai_reasoning=(
+                f"{_policy_note(contract.client_id, db)} Auto-released for "
+                f"{contract.customer_name}, {target_month}."
+            ),
         )
         db.add(je)
         db.flush()

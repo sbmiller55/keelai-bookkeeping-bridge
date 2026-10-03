@@ -95,29 +95,101 @@ def _get_or_create_integration_settings(client_id: int, db: Session) -> RevenueI
     return settings
 
 
-def _build_schedule(contract: RevenueContract, stream: Optional[RevenueStream]) -> list[dict]:
-    """Generate the month-by-month recognition schedule entries for a contract."""
+POLICY_FULL_MONTH      = "full_month"
+POLICY_DAILY_PRORATION = "daily_proration"
+
+POLICY_NOTE = {
+    POLICY_FULL_MONTH:      "ASC 606 revenue recognition — full month policy applied.",
+    POLICY_DAILY_PRORATION: "ASC 606 revenue recognition — daily proration policy applied.",
+}
+
+
+def _recognition_policy(client_id: int, db: Session) -> str:
+    """The client's recognition policy, defaulting to full month."""
+    settings = db.query(RevenueIntegrationSettings).filter(
+        RevenueIntegrationSettings.client_id == client_id
+    ).first()
+    policy = getattr(settings, "revenue_recognition_policy", None) if settings else None
+    return policy if policy in (POLICY_FULL_MONTH, POLICY_DAILY_PRORATION) else POLICY_FULL_MONTH
+
+
+def _term_months(start: datetime, end: datetime) -> int:
+    """Whole months in a service period.
+
+    Counted as the smallest n where start + n months is past the end, rather
+    than by counting the calendar months the period touches. The difference
+    matters: a 12-month subscription running 4 Sep 2026 to 3 Sep 2027 touches
+    thirteen calendar months, and counting those gives a 13-month schedule for
+    a one-year subscription.
+    """
+    n = 1
+    while _add_months_keep_day(start, n) <= end and n < 600:
+        n += 1
+    return n
+
+
+def _add_months_keep_day(d: datetime, n: int) -> datetime:
+    """Shift by whole months without snapping to the 1st (unlike _add_months)."""
+    month = d.month + n
+    year = d.year + (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return d.replace(year=year, month=month, day=day)
+
+
+def _build_schedule(
+    contract: RevenueContract,
+    stream: Optional[RevenueStream],
+    policy: str = POLICY_FULL_MONTH,
+) -> list[dict]:
+    """Generate the month-by-month recognition schedule entries for a contract.
+
+    `policy` only decides what happens to a **single-month** subscription whose
+    service period straddles two calendar months — a monthly plan starting on
+    the 4th, say, which runs to the 3rd of the next month:
+
+      full_month      100% in the calendar month the period starts. The
+                      simplified treatment most SaaS companies use, acceptable
+                      under ASC 606 when applied consistently.
+      daily_proration split across both months by actual days of service.
+
+    Multi-month contracts (annual plans) are unaffected by the policy: they
+    already defer ratably across their term, and the policy question doesn't
+    arise. They are still split evenly, one period per month of the term.
+    """
     if not stream or not contract.service_period_start or not contract.service_period_end:
         return []
 
-    start = contract.service_period_start.replace(day=1)
-    end = contract.service_period_end.replace(day=1)
-    n_months = (end.year - start.year) * 12 + (end.month - start.month) + 1
-    if n_months < 1:
-        n_months = 1
+    sp_start = contract.service_period_start
+    sp_end = contract.service_period_end
+    value = round(contract.total_contract_value or 0.0, 2)
+    n_months = _term_months(sp_start, sp_end)
 
-    monthly = round(contract.total_contract_value / n_months, 2)
-    # Adjust last month for rounding
+    # ── Single-month subscription: the policy decides ────────────────────────
+    if n_months == 1:
+        if policy == POLICY_DAILY_PRORATION and sp_end.strftime("%Y-%m") != sp_start.strftime("%Y-%m"):
+            total_days = (sp_end.date() - sp_start.date()).days + 1
+            if total_days <= 0:
+                return [{"period": sp_start.strftime("%Y-%m"), "amount": value}]
+            first_month_end = _last_day(sp_start.year, sp_start.month)
+            first_days = (first_month_end.date() - sp_start.date()).days + 1
+            first_amt = round(value * first_days / total_days, 2)
+            return [
+                {"period": sp_start.strftime("%Y-%m"), "amount": first_amt},
+                {"period": sp_end.strftime("%Y-%m"), "amount": round(value - first_amt, 2)},
+            ]
+        # Full month (and any single-month period that doesn't straddle).
+        return [{"period": sp_start.strftime("%Y-%m"), "amount": value}]
+
+    # ── Multi-month: ratable across the term, one period per month ───────────
+    monthly = round(value / n_months, 2)
     periods = []
-    current = start
+    current = sp_start.replace(day=1)
     total = 0.0
     for i in range(n_months):
         is_last = (i == n_months - 1)
-        amt = round(contract.total_contract_value - total, 2) if is_last else monthly
-        periods.append({
-            "period": current.strftime("%Y-%m"),
-            "amount": amt,
-        })
+        amt = round(value - total, 2) if is_last else monthly
+        periods.append({"period": current.strftime("%Y-%m"), "amount": amt})
         total += amt
         current = _add_months(current, 1)
     return periods
@@ -461,7 +533,10 @@ def generate_recognition_jes(
             memo=memo[:80],
             customer_name=contract.customer_name,
             ai_confidence=1.0,
-            ai_reasoning=f"ASC 606 recognition for {contract.customer_name}, {stream.name}, {entry.period}.",
+            ai_reasoning=(
+                f"{POLICY_NOTE.get(_recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH])} "
+                f"{contract.customer_name}, {stream.name}, {entry.period}."
+            ),
         )
         db.add(je)
         db.flush()
@@ -616,7 +691,10 @@ def generate_all_jes(
                 memo=memo[:80],
                 customer_name=contract.customer_name,
                 ai_confidence=1.0,
-                ai_reasoning=f"ASC 606 recognition for {contract.customer_name}, {stream.name}, {entry.period}.",
+                ai_reasoning=(
+                f"{POLICY_NOTE.get(_recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH])} "
+                f"{contract.customer_name}, {stream.name}, {entry.period}."
+            ),
             )
             db.add(je)
             db.flush()
@@ -716,6 +794,10 @@ def get_integration_settings(
         "billcom_dev_key": "***" if settings.billcom_dev_key else None,
         "last_stripe_sync": settings.last_stripe_sync.isoformat() if settings.last_stripe_sync else None,
         "last_billcom_sync": settings.last_billcom_sync.isoformat() if settings.last_billcom_sync else None,
+        # Reported as the effective value, not the raw column: rows created
+        # before this setting existed hold NULL, and the engine treats NULL as
+        # full month, so the UI must show the same thing it will actually do.
+        "revenue_recognition_policy": _recognition_policy(client_id, db),
     }
 
 
@@ -728,7 +810,15 @@ def update_integration_settings(
 ):
     _get_client(client_id, current_user, db)
     settings = _get_or_create_integration_settings(client_id, db)
-    for field, val in body.model_dump(exclude_none=True).items():
+    payload = body.model_dump(exclude_none=True)
+    policy = payload.get("revenue_recognition_policy")
+    if policy is not None and policy not in (POLICY_FULL_MONTH, POLICY_DAILY_PRORATION):
+        raise HTTPException(
+            422,
+            f"revenue_recognition_policy must be one of "
+            f"'{POLICY_FULL_MONTH}' or '{POLICY_DAILY_PRORATION}'.",
+        )
+    for field, val in payload.items():
         setattr(settings, field, val)
     db.commit()
     return {"ok": True}
@@ -943,7 +1033,7 @@ def _create_schedule_entries(contract: RevenueContract, stream: RevenueStream, d
         RevenueScheduleEntry.contract_id == contract.id
     ).delete()
 
-    periods = _build_schedule(contract, stream)
+    periods = _build_schedule(contract, stream, _recognition_policy(contract.client_id, db))
     for p in periods:
         entry = RevenueScheduleEntry(
             contract_id=contract.id,
