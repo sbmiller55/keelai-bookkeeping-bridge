@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAccounts } from "@/lib/useAccounts";
+import { AccountSelect } from "@/components/AccountSelect";
 import { useParams, useRouter } from "next/navigation";
 import {
   uploadInvoice, recalculatePrepaid, updateTransactionStatus,
@@ -42,13 +44,18 @@ type EditableJe = {
 
 function EditableJeTable({
   txId,
+  clientId,
   initialJes,
   onChange,
 }: {
   txId: number;
+  clientId: number;
   initialJes: EditableJe[];
   onChange?: (jes: EditableJe[]) => void;
 }) {
+  // The live QBO chart, so account cells offer the same picker as the Review
+  // Queue instead of a bare text box that accepts anything.
+  const { accounts } = useAccounts(clientId);
   const [jes, setJes] = useState<EditableJe[]>(initialJes);
   const [adding, setAdding] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
@@ -139,6 +146,7 @@ function EditableJeTable({
               onDelete={() => removeLine(je.id)}
               deleting={deletingId === je.id}
               canDelete={jes.length > 1}
+              accounts={accounts}
             />
           ))}
         </tbody>
@@ -170,13 +178,14 @@ function EditableJeTable({
 }
 
 function JeEditRow({
-  je, onPatch, onDelete, deleting, canDelete,
+  je, onPatch, onDelete, deleting, canDelete, accounts,
 }: {
   je: EditableJe;
   onPatch: (p: Partial<EditableJe>) => Promise<void>;
   onDelete: () => void;
   deleting: boolean;
   canDelete: boolean;
+  accounts: string[];
 }) {
   const [debit, setDebit] = useState(je.debit_account);
   const [credit, setCredit] = useState(je.credit_account);
@@ -206,18 +215,18 @@ function JeEditRow({
         />
       </td>
       <td className="py-1.5 pr-2">
-        <input
+        <AccountSelect
           value={debit}
-          onChange={(e) => setDebit(e.target.value)}
-          onBlur={() => debit !== je.debit_account && onPatch({ debit_account: debit })}
+          accounts={accounts}
+          onChange={(v) => { setDebit(v); if (v !== je.debit_account) onPatch({ debit_account: v }); }}
           className={cellInput}
         />
       </td>
       <td className="py-1.5 pr-2">
-        <input
+        <AccountSelect
           value={credit}
-          onChange={(e) => setCredit(e.target.value)}
-          onBlur={() => credit !== je.credit_account && onPatch({ credit_account: credit })}
+          accounts={accounts}
+          onChange={(v) => { setCredit(v); if (v !== je.credit_account) onPatch({ credit_account: v }); }}
           className={cellInput}
         />
       </td>
@@ -359,6 +368,22 @@ export default function InvoiceUploadPage() {
                   )}
                 </div>
               </div>
+
+              {/* Accounts the AI couldn't match to the client's QBO chart. Those
+                  lines came back as "Uncoded" instead of a plausible-looking
+                  guess, so they have to be picked here rather than failing at
+                  export. */}
+              {item.status === "done" && (item.result?.unresolved_accounts?.length ?? 0) > 0 && (
+                <div className="mt-2 bg-amber-950 border border-amber-800 rounded-lg px-3 py-2">
+                  <p className="text-xs font-medium text-amber-300">
+                    {item.result!.unresolved_accounts!.length} account name{item.result!.unresolved_accounts!.length === 1 ? "" : "s"} not in this client&apos;s chart of accounts
+                  </p>
+                  <p className="text-xs text-amber-500 mt-0.5">
+                    The AI suggested {item.result!.unresolved_accounts!.map((a) => `"${a}"`).join(", ")}. Those lines are set to
+                    &ldquo;Uncoded&rdquo; — choose the right account from the dropdown below.
+                  </p>
+                </div>
+              )}
 
               {/* Journal entries */}
               {item.status === "done" && item.result && item.result.journal_entries.length > 0 && (() => {
@@ -513,6 +538,7 @@ export default function InvoiceUploadPage() {
 
                     <EditableJeTable
                       txId={item.result.transaction.id}
+                      clientId={clientId}
                       initialJes={jes}
                       onChange={(nextJes) => {
                         // Merge slim edits back into InvoiceJE[] (preserving ai_confidence/ai_reasoning by id)

@@ -71,8 +71,114 @@ def _content_matches(file_bytes: bytes, media_type: str) -> bool:
     return any(file_bytes.startswith(sig) for sig in signatures)
 
 
-def _extract_invoice(file_bytes: bytes, media_type: str, chart: Optional[str], policy: Optional[str]) -> dict:
-    """Send invoice to Claude and return extracted data + suggested JEs."""
+# Keys in the model's JSON that name a chart-of-accounts account.
+_ACCOUNT_KEYS = (
+    "asset_account", "accumulated_account", "depreciation_account", "bank_account",
+    "expense_account", "prepaid_account", "debit_account", "credit_account",
+)
+
+
+def _coa_index(chart: Optional[str]) -> dict[str, str]:
+    """Lowercased account name -> canonical spelling from the live QBO chart."""
+    if not chart:
+        return {}
+    idx = {}
+    for line in chart.splitlines():
+        name = line.strip()
+        if name:
+            idx[name.lower()] = name
+    return idx
+
+
+def _resolve_account(name: object, coa: dict[str, str]) -> tuple[str, bool]:
+    """Resolve one model-supplied account name against the chart.
+
+    Returns (name_to_use, was_valid). An exact or case-insensitive match is
+    accepted and normalised to QBO's own spelling. Anything else is NOT
+    silently swapped for a guess: "Legal Expenses" and "Legal Fees" are nowhere
+    near each other as strings, so fuzzy matching would be picking an account
+    on the user's behalf and getting it wrong quietly. It comes back invalid so
+    the caller can ask the model again, and failing that hand it to a human.
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        return raw, False
+    if not coa:
+        return raw, True          # no chart to check against — nothing to enforce
+    hit = coa.get(raw.lower())
+    if hit:
+        return hit, True
+    if raw in ai_coder._ALWAYS_VALID_ACCOUNTS:
+        return raw, True
+    return raw, False
+
+
+def _invalid_accounts(data: dict, coa: dict[str, str]) -> list[str]:
+    """Every account name in the model's response that isn't in the chart."""
+    bad = []
+    for key in _ACCOUNT_KEYS:
+        if key in data:
+            name, ok = _resolve_account(data.get(key), coa)
+            if not ok and name:
+                bad.append(name)
+    for je in data.get("journal_entries") or []:
+        if not isinstance(je, dict):
+            continue
+        for key in ("debit_account", "credit_account"):
+            name, ok = _resolve_account(je.get(key), coa)
+            if not ok and name:
+                bad.append(name)
+    return sorted(set(bad))
+
+
+def _apply_coa(data: dict, coa: dict[str, str]) -> list[str]:
+    """Normalise account names in place; return the ones still not in the chart.
+
+    Valid names are rewritten to QBO's exact spelling, which is what the import
+    matches on. Invalid ones are replaced with "Uncoded" and the model's
+    suggestion is preserved in the reasoning, so the reviewer can see what it
+    meant without an unusable name reaching the journal entry.
+    """
+    unresolved = []
+
+    def fix(container: dict, key: str) -> None:
+        if key not in container:
+            return
+        name, ok = _resolve_account(container.get(key), coa)
+        if ok:
+            container[key] = name
+            return
+        unresolved.append(name)
+        container[key] = "Uncoded"
+        note = (
+            f'AI suggested "{name}" for {key.replace("_", " ")}, which is not in this '
+            f"client's QuickBooks chart of accounts. Set to Uncoded — pick the correct "
+            f"account from the dropdown before approving."
+        )
+        existing = str(container.get("reasoning") or "")
+        container["reasoning"] = f"{note} {existing}".strip()
+
+    for key in _ACCOUNT_KEYS:
+        fix(data, key)
+    for je in data.get("journal_entries") or []:
+        if isinstance(je, dict):
+            fix(je, "debit_account")
+            fix(je, "credit_account")
+    return sorted(set(unresolved))
+
+
+def _extract_invoice(
+    file_bytes: bytes, media_type: str, chart: Optional[str], policy: Optional[str]
+) -> tuple[dict, list[str]]:
+    """Send invoice to Claude; return (extracted data, account names still unresolved).
+
+    Account names are checked against the live chart rather than trusted. The
+    prompt asks for verbatim names, but asking is not enforcing — the model
+    returned "Legal Expenses" for a chart containing "Legal Fees", and nothing
+    downstream noticed until QuickBooks rejected the import. On a mismatch the
+    model gets one corrective pass naming exactly what it got wrong, and
+    whatever still doesn't resolve is handed to a human as Uncoded.
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
@@ -109,10 +215,18 @@ def _extract_invoice(file_bytes: bytes, media_type: str, chart: Optional[str], p
         "- service_start/service_end: first and last month of service coverage (e.g. 'January 2025', 'December 2025')",
         "- For regular invoices: DR Expense Account, CR Accrued Expenses",
         "- confidence: 0.0=total guess, 1.0=certain",
-        "- Use EXACT account names from the Chart of Accounts if provided",
+        "- ACCOUNT NAMES: you MUST copy account names verbatim from the Chart of Accounts below.",
+        "  Reproduce the exact spelling, casing, punctuation and any Parent:Child colons.",
+        "  Do NOT invent a name, pluralise, abbreviate, or substitute a synonym — 'Legal Expenses'",
+        "  is a different string from 'Legal Fees' and QuickBooks will reject the import.",
+        "  If nothing in the chart fits, use \"Uncoded\" and say why in reasoning. Never guess.",
+        "- confidence: 0.0=total guess, 1.0=certain",
     ]
     if chart:
-        system_parts.append(f"\n## Chart of Accounts\n{chart[:4000]}")
+        # Previously truncated at 4,000 characters, which silently hid accounts
+        # from the model on any chart beyond roughly 160 entries — it then had
+        # no way to name them correctly.
+        system_parts.append(f"\n## Chart of Accounts — copy these names verbatim\n{chart[:20000]}")
     if policy:
         system_parts.append(f"\n## Accounting Policy\n{policy[:2000]}")
 
@@ -129,10 +243,45 @@ def _extract_invoice(file_bytes: bytes, media_type: str, chart: Optional[str], p
             ],
         }],
     )
-    raw = resp.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(raw)
+    def _parse(resp) -> dict:
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        return json.loads(raw)
+
+    data = _parse(resp)
+    coa = _coa_index(chart)
+    bad = _invalid_accounts(data, coa)
+
+    if bad and coa:
+        # One corrective pass. Naming the specific failures works far better
+        # than restating the rule, and it costs a single extra call only on the
+        # invoices that actually got it wrong.
+        retry = client.messages.create(
+            model=MODEL,
+            max_tokens=2000,
+            system="\n".join(system_parts),
+            messages=[
+                {"role": "user", "content": [file_block, {"type": "text", "text": "Extract the invoice data and create accrual journal entries. Return ONLY the JSON."}]},
+                {"role": "assistant", "content": json.dumps(data)},
+                {"role": "user", "content": (
+                    "These account names are not in the Chart of Accounts: "
+                    + ", ".join(f'"{b}"' for b in bad)
+                    + ". Replace each one with the closest account that appears verbatim in the "
+                      "Chart of Accounts above, or with \"Uncoded\" if none genuinely fits. "
+                      "Return the corrected JSON only."
+                )},
+            ],
+        )
+        try:
+            retried = _parse(retry)
+            if _invalid_accounts(retried, coa) != bad:
+                data = retried          # keep it only if it actually improved
+        except Exception:
+            pass                        # malformed retry — fall through with the original
+
+    unresolved = _apply_coa(data, coa)
+    return data, unresolved
 
 
 @router.post("/upload")
@@ -184,7 +333,7 @@ async def upload_invoice(
     policy = ai_coder._read_file_safe(client_obj.policy_path)
 
     try:
-        data = _extract_invoice(file_bytes, media_type, chart, policy)
+        data, unresolved_accounts = _extract_invoice(file_bytes, media_type, chart, policy)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not read invoice. {errors.safe_detail(exc, 'read the invoice')}")
 
@@ -400,6 +549,10 @@ async def upload_invoice(
             }
             for je in created_jes
         ],
+        # Account names the model proposed that aren't in this client's chart.
+        # They were set to Uncoded rather than guessed at, so the UI can say so
+        # instead of the reviewer discovering it at export time.
+        "unresolved_accounts": unresolved_accounts,
         **extra,
     }
 

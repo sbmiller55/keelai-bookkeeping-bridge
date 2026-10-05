@@ -644,6 +644,9 @@ export interface InvoiceUploadResult {
     status: string;
   };
   journal_entries: InvoiceJE[];
+  /** Accounts the AI proposed that aren't in the client's QBO chart; those
+   *  lines were set to "Uncoded" rather than guessed at. */
+  unresolved_accounts?: string[];
   // Prepaid-only fields
   invoice_type?: string;
   service_start?: string;
