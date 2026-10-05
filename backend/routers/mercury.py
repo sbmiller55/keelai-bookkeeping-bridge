@@ -940,7 +940,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         standard_candidates = [t for t in ai_candidates if t not in invoice_candidates]
 
         if standard_candidates:
-            ai_coded = ai_coder.code_transactions(standard_candidates, client)
+            ai_coded = ai_coder.code_transactions(standard_candidates, client, db)
             for txn_id, je_data_list in ai_coded:
                 for je_data in je_data_list:
                     db.add(models.JournalEntry(
@@ -1571,7 +1571,7 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
         standard_candidates = [t for t in ai_candidates if t not in invoice_candidates]
 
         if standard_candidates:
-            ai_coded = ai_coder.code_transactions(standard_candidates, client)
+            ai_coded = ai_coder.code_transactions(standard_candidates, client, db)
             for txn_id, je_data_list in ai_coded:
                 for je_data in je_data_list:
                     db.add(models.JournalEntry(

@@ -501,7 +501,17 @@ def _seed_contextbridge_rules():
         ("counterparty_contains", "Morrison & Foerster",    "Legal Fees",                        "Accrued Expenses",             True,  "expense"),
         ("counterparty_contains", "c2Design",               "Advisory & Consulting",             "Accrued Expenses",             True,  "expense"),
         ("counterparty_contains", "Relentful",              "Accrued Expenses",                  "Mercury Checking (9882) - 1",  True,  "expense"),
-        ("counterparty_contains", "Donald Flood",           "Bridge Loan from Founder",          "Mercury Checking (9882) - 1",  True,  "expense"),
+        # "Donald Flood" -> Bridge Loan from Founder was removed 2026-10-05. He
+        # submits expense reimbursements, which are travel, legal, meals and so
+        # on depending on what was bought — no single account is right for all
+        # of them, and booking them as borrowings from a founder was nonsense.
+        # Mercury sends kind="expenseReimbursement" with a usable category, so
+        # these are left to the AI coder, which now also sees vendor history.
+        # Mercury categorises Google Workspace as "AI & Data Services"; it is a
+        # software subscription. A counterparty rule now outranks the category
+        # rule regardless of which was created first — see rules_engine.match_rule.
+        ("counterparty_contains", "Google Workspace",       "Software Subscriptions",            "$source_account",              True,  "expense"),
+        ("description_contains",  "GOOGLE *Workspace",      "Software Subscriptions",            "$source_account",              True,  "expense"),
         ("counterparty_contains", "Amazon",                 "Office Supplies & Equipment",       "$source_account",              True,  "expense"),
         ("counterparty_contains", "Home Depot",             "Office Supplies & Equipment",       "$source_account",              True,  "expense"),
         ("counterparty_contains", "Office Depot",           "Office Supplies & Equipment",       "$source_account",              True,  "expense"),

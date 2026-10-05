@@ -3,6 +3,8 @@ import calendar
 import difflib
 import json
 import os
+
+from sqlalchemy import func
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -346,6 +348,19 @@ def _build_system(chart_of_accounts: Optional[str], policy: Optional[str]) -> st
     parts = [
         "You are an expert bookkeeper. Your job is to create accurate journal entries for bank transactions.",
         "Respond with ONLY valid JSON — no markdown fences, no explanation, nothing else.",
+        "",
+        "## CRITICAL: follow this client's own history",
+        "",
+        "Some transactions carry a 'previously_coded_as' field listing the accounts this",
+        "exact vendor was posted to in entries a human already approved, with counts.",
+        "When it is present, use the most-used account unless the transaction is plainly",
+        "something different (a refund, a one-off, an obviously unrelated purchase).",
+        "A recurring vendor's account is a settled decision, not one to re-make monthly.",
+        "",
+        "The 'mercury_category' field is the BANK's guess and is frequently wrong. Where it",
+        "disagrees with 'previously_coded_as', the history wins — a Google Workspace charge",
+        "the bank labels 'AI & Data Services' is still Software Subscriptions if that is",
+        "where it has always been posted.",
         "",
         "## CRITICAL: Credit Card vs. Cash Transaction Rules",
         "",
@@ -696,7 +711,51 @@ def code_outgoing_payment_with_invoice(transaction, invoice_text: str, client_ob
         }]
 
 
-def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[dict]]]:
+def vendor_history(client_id: int, counterparties: list[str], db) -> dict[str, list[tuple[str, int]]]:
+    """How each vendor's expenses have actually been coded before, most-used first.
+
+    This is the app's memory. A vendor that has been coded to the same account
+    every month for a year is not a judgement call, and the model should not be
+    re-deciding it from the description each time — especially when the bank's
+    own category is wrong, which is how a Google Workspace charge categorised by
+    Mercury as "AI & Data Services" kept landing there instead of Software
+    Subscriptions.
+
+    Only approved and exported entries count: pending ones are the model's own
+    unreviewed guesses, and feeding those back would let one mistake harden into
+    a pattern.
+    """
+    import models as _m
+    if not counterparties:
+        return {}
+    rows = (
+        db.query(
+            _m.Transaction.counterparty_name,
+            _m.JournalEntry.debit_account,
+            func.count(_m.JournalEntry.id),
+        )
+        .join(_m.JournalEntry, _m.JournalEntry.transaction_id == _m.Transaction.id)
+        .filter(
+            _m.Transaction.client_id == client_id,
+            _m.Transaction.counterparty_name.in_(counterparties),
+            _m.Transaction.status.in_([
+                _m.TransactionStatus.approved, _m.TransactionStatus.exported,
+            ]),
+            _m.JournalEntry.debit_account.isnot(None),
+            _m.JournalEntry.debit_account != "Uncoded",
+        )
+        .group_by(_m.Transaction.counterparty_name, _m.JournalEntry.debit_account)
+        .all()
+    )
+    out: dict[str, list[tuple[str, int]]] = {}
+    for name, account, n in rows:
+        out.setdefault(name, []).append((account, int(n)))
+    for name in out:
+        out[name].sort(key=lambda p: -p[1])
+    return out
+
+
+def code_transactions(transactions: list, client_obj, db=None) -> list[tuple[int, list[dict]]]:
     """
     Code a batch of transaction model objects in parallel using Sonnet.
     Returns list of (transaction_id, [je_data, ...]) tuples.
@@ -736,6 +795,21 @@ def code_transactions(transactions: list, client_obj) -> list[tuple[int, list[di
         }
         for t in transactions
     ]
+
+    # Attach each vendor's established coding so the model follows the client's
+    # own history instead of re-deriving it from the description every month.
+    if db is not None:
+        try:
+            names = sorted({t.counterparty_name for t in transactions if t.counterparty_name})
+            hist = vendor_history(client_obj.id, names, db)
+            for td, t in zip(txn_dicts, transactions):
+                prior = hist.get(t.counterparty_name or "")
+                if prior:
+                    td["previously_coded_as"] = [
+                        {"account": a, "times": n} for a, n in prior[:4]
+                    ]
+        except Exception:
+            pass        # history is an aid, never a reason to fail the coding
 
     results: list[tuple[int, list[dict]]] = []
     max_workers = min(8, len(txn_dicts))

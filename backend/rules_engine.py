@@ -13,44 +13,80 @@ _MERCURY_INTERNAL = ("mercury checking", "mercury credit", "mercury treasury", "
 _TRANSFER_KINDS = {"treasurytransfer", "creditcardpayment", "intraaccounttransfer", "externaltransfer"}
 
 
+# How specific each match type is. A rule naming one vendor says more about a
+# transaction than one keyed on a bank-supplied category, which in turn says
+# more than the catch-all. Lower sorts first.
+_MATCH_SPECIFICITY = {
+    "description_exact":    0,
+    "counterparty_exact":   0,
+    "description_contains": 1,
+    "counterparty_contains": 1,
+    "kind":                 2,
+    "amount_gt":            3,
+    "amount_lt":            3,
+    "category_equals":      4,
+    "has_category":         5,   # catch-all, always last
+}
+
+
+def _rule_matches(rule: models.Rule, desc: str, counterparty: str, category: str,
+                  txn: models.Transaction) -> bool:
+    v = rule.match_value or ""
+    mt = rule.match_type
+    if mt == "description_contains":
+        return v.lower() in desc
+    if mt == "description_exact":
+        return v.lower() == desc
+    if mt == "counterparty_contains":
+        return v.lower() in counterparty
+    if mt == "counterparty_exact":
+        return v.lower() == counterparty
+    if mt == "category_equals":
+        return v.lower() == category
+    if mt == "has_category":
+        return bool(category)
+    if mt == "kind":
+        return v == (txn.kind or "")
+    if mt in ("amount_gt", "amount_lt"):
+        try:
+            return txn.amount > float(v) if mt == "amount_gt" else txn.amount < float(v)
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
 def match_rule(txn: models.Transaction, rules: list[models.Rule]) -> Optional[models.Rule]:
-    """Return first active rule that matches this transaction, or None."""
+    """Return the most specific active rule matching this transaction.
+
+    Previously this returned whichever matching rule came first in the list,
+    which in practice meant lowest id — insertion order. That made rule quality
+    depend on the order rules happened to be created in: a vendor rule added
+    today lost to a seeded category rule from months ago, so correcting a
+    vendor's coding by adding a rule silently had no effect. It also let a
+    bank-supplied category override a rule naming the vendor outright, which is
+    how "Google Workspace" ended up in AI & Data Services — Mercury categorised
+    it that way, and the category rule outranked everything more specific.
+
+    Ties within a specificity band fall back to the longer match value (a more
+    particular string) and then to the newer rule, so a correction wins over
+    the thing it was written to correct.
+    """
     desc = (txn.description or "").lower()
     counterparty = (txn.counterparty_name or "").lower()
     category = (txn.mercury_category or "").lower()
 
-    for rule in rules:
-        if not rule.active:
-            continue
-        v = rule.match_value
-        mt = rule.match_type
-        if mt == "description_contains" and v.lower() in desc:
-            return rule
-        if mt == "description_exact" and v.lower() == desc:
-            return rule
-        if mt == "counterparty_contains" and v.lower() in counterparty:
-            return rule
-        if mt == "counterparty_exact" and v.lower() == counterparty:
-            return rule
-        if mt == "category_equals" and v.lower() == category:
-            return rule
-        if mt == "has_category" and category:
-            return rule
-        if mt == "kind" and v == (txn.kind or ""):
-            return rule
-        if mt == "amount_gt":
-            try:
-                if txn.amount > float(v):
-                    return rule
-            except ValueError:
-                pass
-        if mt == "amount_lt":
-            try:
-                if txn.amount < float(v):
-                    return rule
-            except ValueError:
-                pass
-    return None
+    matches = [
+        r for r in rules
+        if r.active and _rule_matches(r, desc, counterparty, category, txn)
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda r: (
+        _MATCH_SPECIFICITY.get(r.match_type, 9),
+        -len(r.match_value or ""),
+        -(r.id or 0),
+    ))
+    return matches[0]
 
 
 def apply_rule_jes(rule: models.Rule, txn: models.Transaction) -> list[dict]:
