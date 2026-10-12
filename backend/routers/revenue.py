@@ -244,13 +244,36 @@ def get_summary(
         RevenueContract.client_id == client_id
     ).all()
 
-    # Revenue recognized this month: sum of schedule entries recognized in this_month with a JE
-    recognized_entries = db.query(RevenueScheduleEntry).filter(
-        RevenueScheduleEntry.client_id == client_id,
-        RevenueScheduleEntry.period == this_month,
-        RevenueScheduleEntry.recognized == True,
-    ).all()
-    recognized_this_month = sum(e.amount for e in recognized_entries)
+    # Revenue recognized in the month being reported on. Recognition is monthly
+    # and posts at month end, so for most of any given month the current month
+    # is legitimately zero — which read as "recognition is broken" on screen.
+    # When that is the case, report the last month that does have recognition
+    # and tell the page which month it is showing.
+    def _recognized_for(period: str) -> float:
+        return sum(
+            e.amount for e in db.query(RevenueScheduleEntry).filter(
+                RevenueScheduleEntry.client_id == client_id,
+                RevenueScheduleEntry.period == period,
+                RevenueScheduleEntry.recognized == True,
+            ).all()
+        )
+
+    recognized_period = this_month
+    recognized_this_month = _recognized_for(this_month)
+    if not recognized_this_month:
+        last_closed = (
+            db.query(RevenueScheduleEntry.period)
+            .filter(
+                RevenueScheduleEntry.client_id == client_id,
+                RevenueScheduleEntry.recognized == True,
+                RevenueScheduleEntry.period < this_month,
+            )
+            .order_by(RevenueScheduleEntry.period.desc())
+            .first()
+        )
+        if last_closed:
+            recognized_period = last_closed[0]
+            recognized_this_month = _recognized_for(recognized_period)
 
     # Total deferred: contracts where billing_type has deferred component, payment received but not fully recognized
     total_deferred = sum(
@@ -277,6 +300,7 @@ def get_summary(
 
     return RevenueSummary(
         recognized_this_month=round(recognized_this_month, 2),
+        recognized_period=recognized_period,
         total_deferred=round(total_deferred, 2),
         total_ar_outstanding=round(total_ar, 2),
         invoices_overdue=overdue_count,
@@ -614,110 +638,193 @@ def bulk_match_contracts(
     return {"updated": updated}
 
 
-@router.post("/generate-all-jes")
-def generate_all_jes(
+# How many contracts a deferred stream needs in one month before its recognition
+# posts as a single pooled entry instead of one per customer.
+GROUP_DEFERRED_ABOVE = 5
+
+
+def _book_recognition_for_period(client_id: int, month: str, db: Session) -> dict:
+    """Book revenue recognition for ONE service month across every matched contract.
+
+    One month is the only shape anyone asks for at close — "book September" —
+    which is why this replaced a "generate all" pass. That pass walked every
+    unbooked entry on every contract, so on a subscription client a single press
+    posted a full annual schedule: twelve months of revenue, eleven of them not
+    yet earned.
+
+    Deferred-revenue streams post as one pooled entry per stream for the month.
+    The deferred liability is not customer-specific, and a subscription client
+    has hundreds of $5 slices that would bury the review queue — the Chargebee
+    path already grouped this way, and this brings the rest of the app in line.
+    Below `GROUP_DEFERRED_ABOVE` contracts the entries stay per customer, so a
+    client with a handful of contracts keeps the customer detail on the JE. AR
+    streams are always per contract: there the customer *is* the point of the
+    entry, because the balance it moves is that customer's receivable.
+
+    A month that has not finished yet is not earned. Its entries are still
+    created, dated month end, but parked as `scheduled` — out of the review
+    queue until the daily job promotes them. That is what makes the "this month"
+    button safe to press on the 12th.
+    """
+    period_dt = datetime.strptime(month, "%Y-%m")
+    je_date = _last_day(period_dt.year, period_dt.month)
+    is_earned = je_date < datetime.utcnow()
+    policy_note = POLICY_NOTE.get(
+        _recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH]
+    )
+
+    rows = (
+        db.query(RevenueScheduleEntry, RevenueContract, RevenueStream)
+        .join(RevenueContract, RevenueContract.id == RevenueScheduleEntry.contract_id)
+        .join(RevenueStream, RevenueStream.id == RevenueContract.revenue_stream_id)
+        .filter(
+            RevenueScheduleEntry.client_id == client_id,
+            RevenueScheduleEntry.period == month,
+            RevenueScheduleEntry.je_id == None,          # noqa: E711 — SQL NULL
+            RevenueContract.status == RevenueContractStatus.active,
+        )
+        .all()
+    )
+
+    def _is_ar(stream: RevenueStream) -> bool:
+        bt = BillingType(stream.billing_type) if isinstance(stream.billing_type, str) else stream.billing_type
+        return bt in (BillingType.monthly_arrears, BillingType.invoice_completion)
+
+    # Group the deferred streams that are large enough to pool.
+    by_stream: dict[int, list] = {}
+    for entry, contract, stream in rows:
+        by_stream.setdefault(stream.id, []).append((entry, contract, stream))
+    pooled_streams = {
+        sid for sid, items in by_stream.items()
+        if not _is_ar(items[0][2]) and len(items) > GROUP_DEFERRED_ABOVE
+    }
+
+    created = 0
+    total_amount = 0.0
+
+    def _post(debit: str, credit: str, amount: float, memo: str, description: str,
+              customer: Optional[str], reasoning: str) -> JournalEntry:
+        tx = Transaction(
+            client_id=client_id,
+            date=je_date,
+            description=description,
+            amount=amount,
+            status=TransactionStatus.pending if is_earned else TransactionStatus.scheduled,
+            source="revenue",
+        )
+        db.add(tx)
+        db.flush()
+        je = JournalEntry(
+            transaction_id=tx.id,
+            je_number=next_je_number(db),
+            debit_account=debit,
+            credit_account=credit,
+            amount=amount,
+            je_date=je_date,
+            memo=memo[:80],
+            customer_name=customer,
+            ai_confidence=1.0,
+            ai_reasoning=reasoning,
+        )
+        db.add(je)
+        db.flush()
+        return je
+
+    def _mark(entry: RevenueScheduleEntry, contract: RevenueContract, je: JournalEntry):
+        entry.je_id = je.id
+        # Both of these drive the revenue page: `recognized` is what
+        # "Recognized" sums, and `amount_recognized` is what the deferred
+        # balance is netted against. Leaving either unset — which the
+        # auto-release path used to do — showed $0.00 recognized and a deferred
+        # balance that never moved, however many JEs had posted.
+        if is_earned:
+            entry.recognized = True
+            contract.amount_recognized = round((contract.amount_recognized or 0.0) + entry.amount, 2)
+            if contract.amount_recognized >= round(contract.total_contract_value or 0.0, 2) - 0.01:
+                contract.status = RevenueContractStatus.fully_recognized
+
+    for sid, items in by_stream.items():
+        stream = items[0][2]
+        label = period_dt.strftime("%b %Y")
+
+        if sid in pooled_streams:
+            amount = round(sum(e.amount for e, _, _ in items), 2)
+            if amount <= 0:
+                continue
+            memo = f"Revenue recognition - {stream.name} - {label}"
+            je = _post(
+                stream.deferred_revenue_account, stream.revenue_account, amount, memo,
+                f"{memo} ({len(items)} contracts)", None,
+                f"{policy_note} {stream.name}, {month}: {len(items)} contracts earned a "
+                f"month of service against cash collected up front. Posted as one entry "
+                f"for the period.",
+            )
+            for entry, contract, _ in items:
+                _mark(entry, contract, je)
+            created += 1
+            total_amount += amount
+            continue
+
+        for entry, contract, _ in items:
+            if entry.amount <= 0:
+                continue
+            debit = stream.ar_account if _is_ar(stream) else stream.deferred_revenue_account
+            memo = f"Revenue Recognition - {contract.customer_name} - {label}"
+            je = _post(
+                debit, stream.revenue_account, entry.amount, memo, memo,
+                contract.customer_name,
+                f"{policy_note} {contract.customer_name}, {stream.name}, {month}.",
+            )
+            _mark(entry, contract, je)
+            created += 1
+            total_amount += entry.amount
+
+    return {
+        "month": month,
+        "created": created,
+        "entries": len(rows),
+        "amount": round(total_amount, 2),
+        "earned": is_earned,
+        "status": "pending" if is_earned else "scheduled",
+    }
+
+
+@router.post("/generate-jes")
+def generate_period_jes(
     client_id: int,
+    month: Optional[str] = None,     # "YYYY-MM" — defaults to the current month
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate JEs for all matched contracts with pending schedule entries."""
-    _get_client(client_id, current_user, db)
+    """Book one month's revenue recognition into the review queue.
 
-    contracts = db.query(RevenueContract).filter(
+    `month` defaults to the current month. A month still in progress posts as
+    `scheduled` and lands in the queue on its own at month end.
+    """
+    _get_client(client_id, current_user, db)
+    target = month or _current_month()
+    try:
+        datetime.strptime(target, "%Y-%m")
+    except ValueError:
+        raise HTTPException(400, "month must be in YYYY-MM format")
+    result = _book_recognition_for_period(client_id, target, db)
+    # Cash receipts for paid AR contracts, which are not tied to a service month.
+    payments = 0
+    for contract in db.query(RevenueContract).filter(
         RevenueContract.client_id == client_id,
         RevenueContract.status == RevenueContractStatus.active,
         RevenueContract.revenue_stream_id.isnot(None),
-    ).all()
-
-    total_created = 0
-    errors = []
-
-    for contract in contracts:
+    ).all():
         stream = db.query(RevenueStream).filter(
             RevenueStream.id == contract.revenue_stream_id
         ).first()
-        if not stream:
-            continue
-
-        entries = db.query(RevenueScheduleEntry).filter(
-            RevenueScheduleEntry.contract_id == contract.id,
-            RevenueScheduleEntry.je_id == None,
-        ).all()
-
-        billing_type = BillingType(stream.billing_type) if isinstance(stream.billing_type, str) else stream.billing_type
-
-        for entry in entries:
-            try:
-                sp_dt = datetime.strptime(entry.period, "%Y-%m")
-            except ValueError:
-                continue
-
-            je_date = _last_day(sp_dt.year, sp_dt.month)
-            if billing_type in (BillingType.monthly_arrears, BillingType.invoice_completion):
-                debit_acct = stream.ar_account
-                credit_acct = stream.revenue_account
-            else:
-                debit_acct = stream.deferred_revenue_account
-                credit_acct = stream.revenue_account
-
-            memo = f"Revenue Recognition - {contract.customer_name} - {sp_dt.strftime('%b %Y')}"
-
-            # A service month that hasn't finished yet has not been earned, so
-            # its entry must not post. This previously created every remaining
-            # period as `pending` the moment it was clicked, which recognized a
-            # full annual subscription's revenue on day one. Future months are
-            # parked as `scheduled` instead — excluded from the review queue and
-            # promoted to pending automatically once the month-end arrives.
-            is_earned = je_date < datetime.utcnow()
-
-            tx = Transaction(
-                client_id=client_id,
-                date=je_date,
-                description=memo,
-                amount=entry.amount,
-                status=TransactionStatus.pending if is_earned else TransactionStatus.scheduled,
-                source="revenue",
-            )
-            db.add(tx)
-            db.flush()
-
-            je = JournalEntry(
-                transaction_id=tx.id,
-                je_number=next_je_number(db),
-                debit_account=debit_acct,
-                credit_account=credit_acct,
-                amount=entry.amount,
-                je_date=je_date,
-                memo=memo[:80],
-                customer_name=contract.customer_name,
-                ai_confidence=1.0,
-                ai_reasoning=(
-                f"{POLICY_NOTE.get(_recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH])} "
-                f"{contract.customer_name}, {stream.name}, {entry.period}."
-            ),
-            )
-            db.add(je)
-            db.flush()
-
-            entry.je_id = je.id
-            if is_earned:
-                # Both fields were left unset here, so the revenue page's
-                # "Recognized this month" card read $0.00 however much had been
-                # recognized, and the deferred balance never moved.
-                entry.recognized = True
-                contract.amount_recognized = round(
-                    (contract.amount_recognized or 0.0) + entry.amount, 2
-                )
-            total_created += 1
-
-        # Cash receipt for paid contracts — even if recognition was already done.
         if _generate_payment_je(contract, stream, db):
-            total_created += 1
-        # Ensure the customer is on every JE (backfills existing ones too).
+            payments += 1
         _ensure_customer_on_jes(contract, db)
-
     db.commit()
-    return {"created": total_created, "errors": errors}
+    result["payment_jes"] = payments
+    result["errors"] = []
+    return result
 
 
 # ── AR Aging ──────────────────────────────────────────────────────────────────

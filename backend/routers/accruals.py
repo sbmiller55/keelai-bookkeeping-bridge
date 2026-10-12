@@ -26,23 +26,12 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
-
-
-def _policy_note(client_id: int, db) -> str:
-    """The client's recognition-policy note, for stamping on recognition JEs."""
-    from routers.revenue import POLICY_NOTE, POLICY_FULL_MONTH, _recognition_policy
-    return POLICY_NOTE.get(_recognition_policy(client_id, db), POLICY_NOTE[POLICY_FULL_MONTH])
-
 from models import (
     AccruedExpense,
     AccruedExpenseStatus,
-    BillingType,
     Client,
     FixedAsset,
     JournalEntry,
-    RevenueContract,
-    RevenueScheduleEntry,
-    RevenueStream,
     StandingAccrualRule,
     Transaction,
     TransactionStatus,
@@ -771,71 +760,13 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
         released_depreciation += 1
 
     # ── 3. Revenue schedule entries ──────────────────────────────────────────
-    pending_entries = db.query(RevenueScheduleEntry).filter(
-        RevenueScheduleEntry.client_id == client_id,
-        RevenueScheduleEntry.period == target_month,
-        RevenueScheduleEntry.je_id == None,
-    ).all()
-
-    for entry in pending_entries:
-        contract = db.query(RevenueContract).filter(
-            RevenueContract.id == entry.contract_id
-        ).first()
-        if not contract or not contract.revenue_stream_id:
-            continue
-
-        stream = db.query(RevenueStream).filter(
-            RevenueStream.id == contract.revenue_stream_id
-        ).first()
-        if not stream:
-            continue
-
-        billing_type = (
-            BillingType(stream.billing_type)
-            if isinstance(stream.billing_type, str)
-            else stream.billing_type
-        )
-
-        if billing_type in (BillingType.monthly_arrears, BillingType.invoice_completion):
-            debit_acct = stream.ar_account
-        else:
-            debit_acct = stream.deferred_revenue_account
-        credit_acct = stream.revenue_account
-        memo = f"Revenue Recognition - {contract.customer_name} - {period_dt.strftime('%b %Y')}"
-
-        tx = Transaction(
-            client_id=client_id,
-            date=je_date,
-            description=memo,
-            amount=entry.amount,
-            status=TransactionStatus.pending,
-            source="revenue",
-        )
-        db.add(tx)
-        db.flush()
-
-        je = JournalEntry(
-            transaction_id=tx.id,
-            je_number=next_je_number(db),
-            debit_account=debit_acct,
-            credit_account=credit_acct,
-            amount=entry.amount,
-            je_date=je_date,
-            memo=memo[:80],
-            ai_confidence=1.0,
-            ai_reasoning=(
-                f"{_policy_note(contract.client_id, db)} Auto-released for "
-                f"{contract.customer_name}, {target_month}."
-            ),
-        )
-        db.add(je)
-        db.flush()
-
-        entry.je_id = je.id
-        contract.amount_recognized = round(
-            (contract.amount_recognized or 0.0) + entry.amount, 2
-        )
-        released_revenue += 1
+    # Shared with the revenue page's month button, so a close and a manual
+    # generate post identical entries. Doing it here by hand had drifted: it
+    # never set `recognized` on the entry, so "Recognized" on the revenue page
+    # read $0.00 however much had posted, and it booked one JE per contract,
+    # which on a subscription client meant hundreds of $5 entries in the queue.
+    from routers.revenue import _book_recognition_for_period
+    released_revenue = _book_recognition_for_period(client_id, target_month, db)["created"]
 
     db.commit()
     return {

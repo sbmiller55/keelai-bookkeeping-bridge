@@ -7,7 +7,7 @@ import {
   syncRevenueSources, generateRevenueJEs, updateRevenueContract, deleteRevenueContract,
   getRevenueIntegrationSettings, updateRevenueIntegrationSettings,
   createRevenueStream, updateRevenueStream, deleteRevenueStream,
-  bulkMatchContracts, generateAllJEs,
+  bulkMatchContracts, generatePeriodJEs,
   RevenueSummary, RevenueContract, RevenueStream, ArAgingRow,
   RevenueIntegrationSettings,
   BillingType, BILLING_TYPE_LABELS,
@@ -20,6 +20,16 @@ type Tab = "schedule" | "ar-aging" | "settings";
 const BILLING_TYPES: BillingType[] = [
   "annual_upfront", "quarterly_upfront", "monthly_advance", "monthly_arrears", "invoice_completion",
 ];
+
+// Recognition is booked a month at a time, so the page works in "YYYY-MM" keys.
+function monthKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+}
 
 const STATUS_BADGE: Record<string, string> = {
   active:           "bg-indigo-900 text-indigo-300 border border-indigo-700",
@@ -64,7 +74,7 @@ export default function RevenuePage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [generatingJe, setGeneratingJe] = useState<number | null>(null);
-  const [generatingAll, setGeneratingAll] = useState(false);
+  const [generatingMonth, setGeneratingMonth] = useState<string | null>(null);
   const [bulkMatching, setBulkMatching] = useState(false);
   const [selectedStreamForMatch, setSelectedStreamForMatch] = useState<number | "">("");
 
@@ -140,17 +150,27 @@ export default function RevenuePage() {
     }
   }
 
-  async function handleGenerateAll() {
-    setGeneratingAll(true);
+  async function handleGeneratePeriod(month: string) {
+    setGeneratingMonth(month);
     setMsg(null);
     try {
-      const r = await generateAllJEs(clientId);
-      setMsg(`Generated ${r.created} journal entr${r.created !== 1 ? "ies" : "y"} — available in Review queue.${r.errors.length ? " Errors: " + r.errors.join("; ") : ""}`);
+      const r = await generatePeriodJEs(clientId, month);
+      const label = monthLabel(month);
+      const n = `${r.created} journal entr${r.created !== 1 ? "ies" : "y"}`;
+      if (r.created === 0) {
+        setMsg(`Nothing left to recognize for ${label}.`);
+      } else if (r.status === "scheduled") {
+        // The month has not finished, so nothing is earned yet. The entries are
+        // parked and the daily job moves them into the queue at month end.
+        setMsg(`${label} isn't over yet — booked ${n} ($${r.amount.toLocaleString()}) as scheduled. They move into the Review queue at month end.`);
+      } else {
+        setMsg(`Booked ${n} for ${label} ($${r.amount.toLocaleString()}) — in the Review queue now.`);
+      }
       load();
     } catch (e: unknown) {
       setMsg(e instanceof Error ? e.message : "JE generation failed");
     } finally {
-      setGeneratingAll(false);
+      setGeneratingMonth(null);
     }
   }
 
@@ -166,6 +186,13 @@ export default function RevenuePage() {
   }
 
   const streamMap = Object.fromEntries(streams.map((s) => [s.id, s]));
+
+  const now = new Date();
+  const thisMonthKey = monthKey(now);
+  const lastMonthKey = monthKey(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  // Schedule entries for a month that have no JE yet — what each button books.
+  const unbookedFor = (month: string) =>
+    contracts.reduce((n, c) => n + c.schedule.filter(e => !e.je_id && e.period === month).length, 0);
 
   if (loading) return (
     <div className="flex justify-center h-60 items-center">
@@ -200,7 +227,13 @@ export default function RevenuePage() {
       {/* Summary Cards — shown on schedule + ar-aging tabs */}
       {summary && tab !== "settings" && (
         <div className="grid grid-cols-4 gap-4 mb-6">
-          <SummaryCard label="Recognized This Month" value={fmt(summary.recognized_this_month)} color="text-green-400" />
+          <SummaryCard
+            label={
+              !summary.recognized_period || summary.recognized_period === thisMonthKey
+                ? "Recognized This Month"
+                : `Recognized — ${monthLabel(summary.recognized_period)}`
+            }
+            value={fmt(summary.recognized_this_month)} color="text-green-400" />
           <SummaryCard label="Deferred Revenue" value={fmt(summary.total_deferred)} color="text-yellow-400" />
           <SummaryCard label="AR Outstanding" value={fmt(summary.total_ar_outstanding)} color="text-blue-400" />
           <SummaryCard label="Invoices Overdue" value={String(summary.invoices_overdue)}
@@ -258,18 +291,29 @@ export default function RevenuePage() {
                 </button>
               </div>
             </div>
-          ) : contracts.some(c => c.schedule.some(e => !e.je_id)) ? (
-            <div className="mb-4 bg-gray-900 border border-green-800/50 rounded-xl px-5 py-4 flex items-center justify-between">
+          ) : unbookedFor(lastMonthKey) + unbookedFor(thisMonthKey) > 0 ? (
+            <div className="mb-4 bg-gray-900 border border-green-800/50 rounded-xl px-5 py-4 flex items-center justify-between gap-4">
               <div>
-                <p className="text-sm font-medium text-green-300">Ready to generate journal entries</p>
+                <p className="text-sm font-medium text-green-300">Recognize revenue for a month</p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  {contracts.reduce((n, c) => n + c.schedule.filter(e => !e.je_id).length, 0)} pending entr{contracts.reduce((n, c) => n + c.schedule.filter(e => !e.je_id).length, 0) !== 1 ? "ies" : "y"} across {contracts.filter(c => c.schedule.some(e => !e.je_id)).length} contracts
+                  {unbookedFor(lastMonthKey)} entr{unbookedFor(lastMonthKey) !== 1 ? "ies" : "y"} waiting for {monthLabel(lastMonthKey)},{" "}
+                  {unbookedFor(thisMonthKey)} for {monthLabel(thisMonthKey)}. A month still in progress is booked as scheduled
+                  and enters the queue at month end.
                 </p>
               </div>
-              <button onClick={handleGenerateAll} disabled={generatingAll}
-                className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors">
-                {generatingAll ? "Generating…" : "Generate All JEs"}
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Last month first: at close, that is the month being booked. */}
+                <button onClick={() => handleGeneratePeriod(lastMonthKey)}
+                  disabled={generatingMonth !== null || unbookedFor(lastMonthKey) === 0}
+                  className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors">
+                  {generatingMonth === lastMonthKey ? "Generating…" : `Generate JEs — ${monthLabel(lastMonthKey)}`}
+                </button>
+                <button onClick={() => handleGeneratePeriod(thisMonthKey)}
+                  disabled={generatingMonth !== null || unbookedFor(thisMonthKey) === 0}
+                  className="px-4 py-2 bg-gray-800 border border-gray-700 hover:bg-gray-700 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors">
+                  {generatingMonth === thisMonthKey ? "Generating…" : monthLabel(thisMonthKey)}
+                </button>
+              </div>
             </div>
           ) : null}
           <ScheduleTab

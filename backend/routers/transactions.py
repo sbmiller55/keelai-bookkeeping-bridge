@@ -844,6 +844,63 @@ def delete_transactions_by_ids(
         return {"deleted": 0, "skipped": skipped, "message": "None of the given ids belong to this client."}
 
     owned_list = list(owned)
+
+    # Clear every pointer onto these rows before deleting them. Postgres
+    # enforces the foreign keys, so deleting a recognition JE that a revenue
+    # schedule entry still references failed the whole request with a 500 —
+    # which is what a wipe of a subscription client runs into first.
+    je_ids = [
+        row[0]
+        for row in db.query(models.JournalEntry.id)
+        .filter(models.JournalEntry.transaction_id.in_(owned_list))
+        .all()
+    ]
+    if je_ids:
+        # A schedule entry whose JE is being deleted is unbooked again, so the
+        # contract's recognized total has to give the amount back — otherwise
+        # deferred revenue stays understated by whatever was deleted.
+        for entry in (
+            db.query(models.RevenueScheduleEntry)
+            .filter(models.RevenueScheduleEntry.je_id.in_(je_ids))
+            .all()
+        ):
+            if entry.recognized:
+                contract = (
+                    db.query(models.RevenueContract)
+                    .filter(models.RevenueContract.id == entry.contract_id)
+                    .first()
+                )
+                if contract:
+                    contract.amount_recognized = max(
+                        0.0, round((contract.amount_recognized or 0.0) - entry.amount, 2)
+                    )
+                    if contract.status == models.RevenueContractStatus.fully_recognized:
+                        contract.status = models.RevenueContractStatus.active
+            entry.je_id = None
+            entry.recognized = False
+        db.query(models.AccruedExpense).filter(
+            models.AccruedExpense.accrual_je_id.in_(je_ids)
+        ).update({"accrual_je_id": None}, synchronize_session=False)
+        db.query(models.AccruedExpense).filter(
+            models.AccruedExpense.payment_je_id.in_(je_ids)
+        ).update({"payment_je_id": None}, synchronize_session=False)
+        db.query(models.JournalEntry).filter(
+            models.JournalEntry.parent_je_id.in_(je_ids)
+        ).update({"parent_je_id": None}, synchronize_session=False)
+
+    # Pointers onto the transactions themselves.
+    for model, column in (
+        (models.Transaction, "matched_payment_id"),
+        (models.JournalEntry, "matched_invoice_id"),
+        (models.Rule, "created_from_transaction_id"),
+        (models.AccruedExpense, "source_transaction_id"),
+        (models.FixedAsset, "transaction_id"),
+    ):
+        db.query(model).filter(
+            getattr(model, column).in_(owned_list)
+        ).update({column: None}, synchronize_session=False)
+    db.flush()
+
     db.query(models.JournalEntry).filter(
         models.JournalEntry.transaction_id.in_(owned_list)
     ).delete(synchronize_session=False)

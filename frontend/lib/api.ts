@@ -1404,6 +1404,9 @@ export interface RevenueContract {
 
 export interface RevenueSummary {
   recognized_this_month: number;
+  // The month the figure is for: the current month, or the last closed month
+  // when the current one has nothing recognized yet.
+  recognized_period?: string | null;
   total_deferred: number;
   total_ar_outstanding: number;
   invoices_overdue: number;
@@ -1516,8 +1519,17 @@ export function syncRevenueSources(clientId: number): Promise<{ imported: number
 export function bulkMatchContracts(clientId: number, streamId: number): Promise<{ updated: number }> {
   return apiFetch(`/clients/${clientId}/revenue/contracts/bulk-match`, { method: "POST", body: JSON.stringify({ stream_id: streamId }) });
 }
-export function generateAllJEs(clientId: number): Promise<{ created: number; errors: string[] }> {
-  return apiFetch(`/clients/${clientId}/revenue/generate-all-jes`, { method: "POST" });
+export function generatePeriodJEs(clientId: number, month: string): Promise<{
+  month: string;
+  created: number;
+  entries: number;
+  amount: number;
+  earned: boolean;
+  status: "pending" | "scheduled";
+  payment_jes: number;
+  errors: string[];
+}> {
+  return apiFetch(`/clients/${clientId}/revenue/generate-jes?month=${month}`, { method: "POST" });
 }
 
 // Bill.com

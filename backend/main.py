@@ -335,24 +335,76 @@ def _run_daily_scheduled_to_pending():
     arrived to 'pending' so they show up in the Review Queue.
 
     Used for prepaid-amortization rows that were pre-created with future
-    month-end dates by the standing-rule generator."""
+    month-end dates by the standing-rule generator, and for revenue recognition
+    booked before its service month had finished."""
     from datetime import datetime
     from database import SessionLocal
-    from models import Transaction, TransactionStatus
+    from models import (
+        JournalEntry,
+        RevenueContract,
+        RevenueContractStatus,
+        RevenueScheduleEntry,
+        Transaction,
+        TransactionStatus,
+    )
 
     db = SessionLocal()
     try:
-        promoted = (
+        due = (
             db.query(Transaction)
             .filter(
                 Transaction.status == TransactionStatus.scheduled,
                 Transaction.date <= datetime.utcnow(),
             )
-            .update({"status": TransactionStatus.pending}, synchronize_session=False)
+            .all()
         )
+        due_ids = [t.id for t in due]
+        for tx in due:
+            tx.status = TransactionStatus.pending
+
+        # A revenue entry booked ahead of its month end was deliberately left
+        # unrecognized — the month had not been earned. The month has now
+        # finished, so this is the point where it becomes revenue. Without this
+        # the entry sat in the queue while the revenue page went on reporting it
+        # as deferred and left it out of "Recognized".
+        recognized = 0
+        if due_ids:
+            je_ids = [
+                row[0]
+                for row in db.query(JournalEntry.id)
+                .filter(JournalEntry.transaction_id.in_(due_ids))
+                .all()
+            ]
+            if je_ids:
+                for entry in (
+                    db.query(RevenueScheduleEntry)
+                    .filter(
+                        RevenueScheduleEntry.je_id.in_(je_ids),
+                        RevenueScheduleEntry.recognized == False,  # noqa: E712
+                    )
+                    .all()
+                ):
+                    contract = (
+                        db.query(RevenueContract)
+                        .filter(RevenueContract.id == entry.contract_id)
+                        .first()
+                    )
+                    entry.recognized = True
+                    recognized += 1
+                    if contract:
+                        contract.amount_recognized = round(
+                            (contract.amount_recognized or 0.0) + entry.amount, 2
+                        )
+                        if contract.amount_recognized >= round(
+                            contract.total_contract_value or 0.0, 2
+                        ) - 0.01:
+                            contract.status = RevenueContractStatus.fully_recognized
         db.commit()
-        if promoted:
-            print(f"[scheduled->pending] promoted {promoted} transactions")
+        if due_ids:
+            print(
+                f"[scheduled->pending] promoted {len(due_ids)} transactions"
+                f"{f', recognized {recognized} revenue entries' if recognized else ''}"
+            )
     finally:
         db.close()
 

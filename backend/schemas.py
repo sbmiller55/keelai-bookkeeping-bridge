@@ -454,6 +454,9 @@ class RevenueContractRead(BaseModel):
 
 class RevenueSummary(BaseModel):
     recognized_this_month: float
+    # Which month `recognized_this_month` is actually for: the current month,
+    # or the last closed month when the current one has nothing recognized yet.
+    recognized_period: Optional[str] = None
     total_deferred: float
     total_ar_outstanding: float
     invoices_overdue: int
