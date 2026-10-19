@@ -1217,6 +1217,115 @@ def approve_revenue_queue(
     return {"approved": approved, "blocked": blocked}
 
 
+class BackfillLinksBody(BaseModel):
+    dry_run: bool = True
+
+
+@router.post("/backfill-contract-links")
+def backfill_contract_links(
+    client_id: int,
+    body: BackfillLinksBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Link cash-collection transactions imported before the link existed.
+
+    Matching is on customer name + billing date + amount rather than the
+    invoice id, because the id was only ever stored on the contract: the
+    transaction did not record it until this was added. Those three together
+    identify a billing, with one wrinkle — the subscriber names repeat, so the
+    same name can bill the same amount on the same day twice. Candidates are
+    therefore consumed as they are used, which pairs duplicates off one-to-one
+    instead of pointing both transactions at the first contract.
+
+    Defaults to a dry run: it reports what it would link and changes nothing.
+    """
+    _get_client(client_id, current_user, db)
+
+    unlinked = [
+        t for t in db.query(Transaction).filter(
+            Transaction.client_id == client_id,
+            Transaction.source == "chargebee",
+            Transaction.revenue_contract_id == None,          # noqa: E711 — SQL NULL
+        ).order_by(Transaction.date, Transaction.id).all()
+        # Only the billings are cash collections. Fees, payouts and the
+        # guarantee-release entry are not a customer's payment and have no
+        # contract to belong to.
+        if "billing" in (t.description or "").lower()
+    ]
+
+    # Contracts not already claimed by a transaction, bucketed by the match key.
+    claimed = {
+        row[0] for row in db.query(Transaction.revenue_contract_id)
+        .filter(
+            Transaction.client_id == client_id,
+            Transaction.revenue_contract_id.isnot(None),
+        ).all()
+    }
+    buckets: dict[tuple, list[RevenueContract]] = {}
+    for c in db.query(RevenueContract).filter(
+        RevenueContract.client_id == client_id
+    ).order_by(RevenueContract.id).all():
+        if c.id in claimed or not c.billing_date:
+            continue
+        key = (
+            (c.customer_name or "").strip().lower(),
+            c.billing_date.date(),
+            round(c.total_contract_value or 0.0, 2),
+        )
+        buckets.setdefault(key, []).append(c)
+
+    linked, ambiguous, unmatched = 0, 0, 0
+    examples: list[dict] = []
+    for tx in unlinked:
+        if not tx.date:
+            unmatched += 1
+            continue
+        key = (
+            (tx.counterparty_name or "").strip().lower(),
+            tx.date.date(),
+            round(abs(tx.amount or 0.0), 2),
+        )
+        candidates = buckets.get(key) or []
+        if not candidates:
+            unmatched += 1
+            if len(examples) < 10:
+                examples.append({
+                    "transaction_id": tx.id, "result": "unmatched",
+                    "customer": tx.counterparty_name,
+                    "date": tx.date.strftime("%Y-%m-%d"),
+                    "amount": round(abs(tx.amount or 0.0), 2),
+                })
+            continue
+        if len(candidates) > 1:
+            ambiguous += 1          # still linked, to the oldest unclaimed one
+        contract = candidates.pop(0)
+        if not body.dry_run:
+            tx.revenue_contract_id = contract.id
+            # Backfill the invoice id too, so the queue shows it and a future
+            # pass can match on it directly.
+            if not tx.invoice_number:
+                tx.invoice_number = contract.invoice_number or contract.external_id
+        linked += 1
+        if len(examples) < 10:
+            examples.append({
+                "transaction_id": tx.id, "result": "linked",
+                "contract_id": contract.id, "customer": tx.counterparty_name,
+                "invoice_number": contract.invoice_number or contract.external_id,
+            })
+
+    if not body.dry_run:
+        db.commit()
+    return {
+        "dry_run": body.dry_run,
+        "candidates": len(unlinked),
+        "linked": linked,
+        "duplicate_name_matches": ambiguous,
+        "unmatched": unmatched,
+        "examples": examples,
+    }
+
+
 # ── AR Aging ──────────────────────────────────────────────────────────────────
 
 @router.get("/ar-aging")

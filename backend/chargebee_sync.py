@@ -112,6 +112,7 @@ def _add_jes(
     source: str = "chargebee",
     counterparty: Optional[str] = None,
     contract_id: Optional[int] = None,
+    invoice_number: Optional[str] = None,
 ) -> Optional[Transaction]:
     """Attach a group of JE lines to one reviewable transaction.
 
@@ -136,6 +137,11 @@ def _add_jes(
         # revenue is tracked per contract and the revenue queue can flag a
         # payment that matched nothing.
         revenue_contract_id=contract_id,
+        # The Chargebee invoice id. Recorded because it was not before: the
+        # contract carried it and the transaction did not, so re-linking an old
+        # collection to its contract has to be inferred from customer, date and
+        # amount instead of just read off.
+        invoice_number=invoice_number,
     )
     db.add(tx)
     db.flush()
@@ -308,6 +314,7 @@ def _process_window(
             posted=posted,
             counterparty=sub["customer_name"],
             contract_id=contract.id,
+            invoice_number=sub["invoice_id"],
         )
         billing_jes += len(lines)
 
@@ -393,6 +400,7 @@ def _process_window(
             posted=posted,
             counterparty=refund["customer_name"],
             contract_id=contract.id if contract is not None else None,
+            invoice_number=refund["invoice_id"],
         )
         refund_total += round(float(refund["amount"]), 2)
         refund_count += 1
