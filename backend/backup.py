@@ -43,6 +43,7 @@ TABLES = [
     "revenue_contracts",
     "revenue_schedule_entries",
     "revenue_integration_settings",
+    "stripe_config",
     "audit_log",
     "client_chat_messages",
     "model_updates",
@@ -177,21 +178,39 @@ def run_restore(key: str, truncate: bool = False) -> dict:
     ciphertext through the EncryptedText type would encrypt it a second time.
     Reading them afterwards needs the same ENCRYPTION_KEY the dump was taken
     under.
+
+    Every statement runs inside its own SAVEPOINT. Postgres aborts the entire
+    transaction on any error, so without this one bad row turned into
+    "current transaction is aborted" on all 9,000 rows after it, and the real
+    cause was buried under thousands of identical follow-on failures. Errors
+    are collected and returned, not just logged, because the server log only
+    retains the last few hundred lines — by the time a failure is noticed the
+    first error has scrolled away.
     """
     dump = fetch_backup(key)
     tables = dump.get("tables", {})
     restored: dict[str, int] = {}
     skipped: dict[str, str] = {}
+    errors: list[str] = []
     deferred: list[tuple] = []
+
+    def attempt(conn, sql: str, params: dict, what: str) -> bool:
+        try:
+            with conn.begin_nested():
+                conn.execute(text(sql), params)
+            return True
+        except Exception as exc:
+            msg = f"{what}: {str(exc).splitlines()[0][:300]}"
+            if len(errors) < 50:
+                errors.append(msg)
+            _log(f"  {msg}")
+            return False
 
     with engine.begin() as conn:
         if truncate:
             # Reverse order: children before parents.
             for table in reversed(TABLES):
-                try:
-                    conn.execute(text(f"DELETE FROM {table}"))
-                except Exception as exc:
-                    _log(f"  clear table={table} error: {exc}")
+                attempt(conn, f"DELETE FROM {table}", {}, f"clear {table}")
 
         for table in TABLES:
             rows = tables.get(table) or []
@@ -199,7 +218,12 @@ def run_restore(key: str, truncate: bool = False) -> dict:
                 restored[table] = 0
                 continue
 
-            existing = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0
+            try:
+                existing = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0
+            except Exception as exc:
+                errors.append(f"count {table}: {str(exc).splitlines()[0][:200]}")
+                restored[table] = 0
+                continue
             if existing and not truncate:
                 skipped[table] = f"{existing} rows already present"
                 restored[table] = 0
@@ -216,38 +240,37 @@ def run_restore(key: str, truncate: bool = False) -> dict:
                         values[col] = None
                 collist = ", ".join(f'"{c}"' for c in cols)
                 params = ", ".join(f":{c}" for c in cols)
-                try:
-                    conn.execute(
-                        text(f'INSERT INTO {table} ({collist}) VALUES ({params})'), values
-                    )
+                if attempt(
+                    conn,
+                    f"INSERT INTO {table} ({collist}) VALUES ({params})",
+                    values,
+                    f"{table} id={row.get('id')}",
+                ):
                     inserted += 1
-                except Exception as exc:
-                    _log(f"  table={table} id={row.get('id')} error: {exc}")
             restored[table] = inserted
             _log(f"  table={table} restored {inserted}/{len(rows)}")
 
         # Now that every row exists, point the self-references back.
+        relinked = 0
         for table, row_id, col, target in deferred:
-            try:
-                conn.execute(
-                    text(f'UPDATE {table} SET "{col}" = :target WHERE id = :id'),
-                    {"target": target, "id": row_id},
-                )
-            except Exception as exc:
-                _log(f"  self-ref {table}.{col} id={row_id} error: {exc}")
+            if attempt(
+                conn,
+                f'UPDATE {table} SET "{col}" = :target WHERE id = :id',
+                {"target": target, "id": row_id},
+                f"self-ref {table}.{col} id={row_id}",
+            ):
+                relinked += 1
 
         # Explicit ids were inserted, so the identity sequences still sit at 1
         # and the next insert through the app would collide with restored rows.
         for table in TABLES:
-            try:
-                conn.execute(
-                    text(
-                        f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-                        f"GREATEST(COALESCE((SELECT MAX(id) FROM {table}), 1), 1))"
-                    )
-                )
-            except Exception as exc:
-                _log(f"  sequence table={table} error: {exc}")
+            attempt(
+                conn,
+                f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                f"GREATEST(COALESCE((SELECT MAX(id) FROM {table}), 1), 1))",
+                {},
+                f"sequence {table}",
+            )
 
     total = sum(restored.values())
     _log(f"restored {total} rows from s3://{os.getenv('AWS_S3_BUCKET', 'keelai-bookkeeping')}/{key}")
@@ -256,7 +279,10 @@ def run_restore(key: str, truncate: bool = False) -> dict:
         "taken_at": dump.get("timestamp"),
         "label": dump.get("label"),
         "restored_rows": total,
+        "expected_rows": sum(len(v or []) for v in tables.values()),
         "by_table": restored,
         "skipped": skipped,
-        "self_refs_relinked": len(deferred),
+        "self_refs_relinked": relinked,
+        "error_count": len(errors),
+        "errors": errors[:20],
     }
