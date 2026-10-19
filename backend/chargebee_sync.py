@@ -111,6 +111,7 @@ def _add_jes(
     posted: bool,
     source: str = "chargebee",
     counterparty: Optional[str] = None,
+    contract_id: Optional[int] = None,
 ) -> Optional[Transaction]:
     """Attach a group of JE lines to one reviewable transaction.
 
@@ -131,6 +132,10 @@ def _add_jes(
         status=TransactionStatus.exported if posted else TransactionStatus.pending,
         source=source,
         imported_at=datetime.utcnow(),
+        # Ties the cash collection to the contract it paid for, so deferred
+        # revenue is tracked per contract and the revenue queue can flag a
+        # payment that matched nothing.
+        revenue_contract_id=contract_id,
     )
     db.add(tx)
     db.flush()
@@ -302,6 +307,7 @@ def _process_window(
             when=sub["billing_date"],
             posted=posted,
             counterparty=sub["customer_name"],
+            contract_id=contract.id,
         )
         billing_jes += len(lines)
 
@@ -386,6 +392,7 @@ def _process_window(
             when=refund["refund_date"],
             posted=posted,
             counterparty=refund["customer_name"],
+            contract_id=contract.id if contract is not None else None,
         )
         refund_total += round(float(refund["amount"]), 2)
         refund_count += 1

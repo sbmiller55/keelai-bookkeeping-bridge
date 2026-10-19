@@ -478,9 +478,18 @@ export interface TransactionWithEntries extends Transaction {
   journal_entries: JournalEntry[];
 }
 
-export function getTransactionsWithEntries(clientId: number, status?: string): Promise<TransactionWithEntries[]> {
+export function getTransactionsWithEntries(
+  clientId: number,
+  status?: string,
+  // Subscription clients review revenue entries in the Revenue tab's own
+  // queue, so the main Review Queue asks for them to be left out. The backend
+  // honours this only for clients in subscription mode — everyone else's
+  // revenue entries keep showing up in the main queue as before.
+  excludeRevenue = false,
+): Promise<TransactionWithEntries[]> {
   const qs = status ? `&status=${status}` : "";
-  return apiFetch<TransactionWithEntries[]>(`/transactions/with-entries?client_id=${clientId}${qs}`);
+  const ex = excludeRevenue ? "&exclude_revenue=true" : "";
+  return apiFetch<TransactionWithEntries[]>(`/transactions/with-entries?client_id=${clientId}${qs}${ex}`);
 }
 
 export function updateJournalEntry(id: number, data: Partial<JournalEntryCreate>): Promise<JournalEntry> {
@@ -1400,6 +1409,11 @@ export interface RevenueContract {
   ai_reasoning: string | null;
   created_at: string;
   schedule: RevenueScheduleEntry[];
+  // Subscription view: the schedule's monthly rate, its length, and whether it
+  // bills annually or monthly. An annual $60 plan is $5 of MRR, not $60.
+  mrr?: number;
+  term_months?: number;
+  billing_cadence?: "annual" | "monthly";
 }
 
 export interface RevenueSummary {
@@ -1437,6 +1451,7 @@ export interface RevenueIntegrationSettings {
   last_stripe_sync: string | null;
   last_billcom_sync: string | null;
   revenue_recognition_policy: RevenueRecognitionPolicy | null;
+  subscription_mode?: boolean;
 }
 
 export type RevenueRecognitionPolicy = "full_month" | "daily_proration";
@@ -1510,6 +1525,7 @@ export function updateRevenueIntegrationSettings(clientId: number, data: Partial
   billcom_enabled: boolean; billcom_username: string; billcom_password: string;
   billcom_org_id: string; billcom_dev_key: string;
   revenue_recognition_policy: RevenueRecognitionPolicy;
+  subscription_mode: boolean;
 }>): Promise<{ ok: boolean }> {
   return apiFetch(`/clients/${clientId}/revenue/integration-settings`, { method: "PUT", body: JSON.stringify(data) });
 }
@@ -1530,6 +1546,83 @@ export function generatePeriodJEs(clientId: number, month: string): Promise<{
   errors: string[];
 }> {
   return apiFetch(`/clients/${clientId}/revenue/generate-jes?month=${month}`, { method: "POST" });
+}
+
+// ── Subscription-mode Revenue tab ───────────────────────────────────────────
+
+export interface RecognitionGridRow {
+  contract_id: number;
+  customer_name: string;
+  plan: string;
+  service_period_end: string | null;
+  // null = this month is outside the contract's term; the grid shows a dash.
+  cells: (number | null)[];
+  total: number;
+}
+
+export interface RecognitionOpenPeriod {
+  period: string;        // "YYYY-MM"
+  entries: number;
+  amount: number;
+}
+
+export interface RecognitionGrid {
+  periods: string[];
+  rows: RecognitionGridRow[];
+  totals: number[];
+  grand_total: number;
+  open_periods: RecognitionOpenPeriod[];
+}
+
+export function getRecognitionGrid(clientId: number, months = 12): Promise<RecognitionGrid> {
+  return apiFetch(`/clients/${clientId}/revenue/recognition-grid?months=${months}`);
+}
+
+export function exportRecognitionGrid(clientId: number, months = 12): Promise<Blob> {
+  const token = getToken();
+  return fetch(`${BASE_URL}/clients/${clientId}/revenue/recognition-grid.xlsx?months=${months}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  }).then(async (r) => {
+    if (!r.ok) throw new Error("Export failed");
+    return r.blob();
+  });
+}
+
+export type RevenueJeType =
+  | "cash_collection" | "recognition" | "refund" | "fees" | "payout" | "reserve_release" | "other";
+
+export interface RevenueQueueRow {
+  transaction_id: number;
+  date: string | null;
+  customer_name: string | null;
+  invoice_number: string | null;
+  period: string | null;
+  je_type: RevenueJeType;
+  je_type_label: string;
+  description: string;
+  amount: number;
+  contract_id: number | null;
+  unmatched: boolean;
+  warning: string | null;
+  journal_entries: {
+    id: number; je_number: number | null; debit_account: string; credit_account: string;
+    amount: number; memo: string | null; customer_name: string | null;
+  }[];
+}
+
+export function getRevenueReviewQueue(clientId: number): Promise<{
+  count: number; unmatched_count: number; rows: RevenueQueueRow[];
+}> {
+  return apiFetch(`/clients/${clientId}/revenue/review-queue`);
+}
+
+export function approveRevenueQueue(
+  clientId: number,
+  body: { transaction_ids?: number[]; approve_all?: boolean },
+): Promise<{ approved: number; blocked: { transaction_id: number; bad_account_names: string[] }[] }> {
+  return apiFetch(`/clients/${clientId}/revenue/review-queue/approve`, {
+    method: "POST", body: JSON.stringify(body),
+  });
 }
 
 // Bill.com

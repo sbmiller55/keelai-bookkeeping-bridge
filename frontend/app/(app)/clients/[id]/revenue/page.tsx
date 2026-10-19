@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   getRevenueSummary, getRevenueContracts, getRevenueStreams, getArAging,
@@ -8,14 +8,22 @@ import {
   getRevenueIntegrationSettings, updateRevenueIntegrationSettings,
   createRevenueStream, updateRevenueStream, deleteRevenueStream,
   bulkMatchContracts, generatePeriodJEs,
+  getRecognitionGrid, exportRecognitionGrid, getRevenueReviewQueue, approveRevenueQueue,
+  RecognitionGrid, RevenueQueueRow,
   RevenueSummary, RevenueContract, RevenueStream, ArAgingRow,
   RevenueIntegrationSettings,
   BillingType, BILLING_TYPE_LABELS,
   RevenueRecognitionPolicy, RECOGNITION_POLICY_LABELS,
+  updateJournalEntry,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
+import { useAccounts } from "@/lib/useAccounts";
+import { AccountSelect } from "@/components/AccountSelect";
 
-type Tab = "schedule" | "ar-aging" | "settings";
+// Subscription clients get contracts / recognition / review-queue tabs in place
+// of the single recognition-schedule view. Every other billing model keeps the
+// schedule tab exactly as it was.
+type Tab = "schedule" | "contracts" | "recognition" | "review" | "ar-aging" | "settings";
 
 const BILLING_TYPES: BillingType[] = [
   "annual_upfront", "quarterly_upfront", "monthly_advance", "monthly_arrears", "invoice_completion",
@@ -77,6 +85,11 @@ export default function RevenuePage() {
   const [generatingMonth, setGeneratingMonth] = useState<string | null>(null);
   const [bulkMatching, setBulkMatching] = useState(false);
   const [selectedStreamForMatch, setSelectedStreamForMatch] = useState<number | "">("");
+  const [grid, setGrid] = useState<RecognitionGrid | null>(null);
+  const [queue, setQueue] = useState<{ count: number; unmatched_count: number; rows: RevenueQueueRow[] } | null>(null);
+  const [genMonth, setGenMonth] = useState("");
+  const [approving, setApproving] = useState(false);
+  const [exportingGrid, setExportingGrid] = useState(false);
 
   useEffect(() => {
     setCurrentPage("revenue");
@@ -98,6 +111,21 @@ export default function RevenuePage() {
       ]);
       setSummary(s);
       setContracts(c);
+      if (int_?.subscription_mode) {
+        const [g, q] = await Promise.all([
+          getRecognitionGrid(clientId),
+          getRevenueReviewQueue(clientId),
+        ]);
+        setGrid(g);
+        setQueue(q);
+        // Default the month selector to the oldest month still waiting, which
+        // is the one a close actually needs booked.
+        setGenMonth((m) => m || (g.open_periods[0]?.period ?? ""));
+        setTab((t) => (t === "schedule" ? "contracts" : t));
+      } else {
+        setGrid(null);
+        setQueue(null);
+      }
       setStreams(st);
       setArAging(ar);
       setSettings(int_);
@@ -174,6 +202,64 @@ export default function RevenuePage() {
     }
   }
 
+  async function handleGenerateSelectedMonth() {
+    if (!genMonth) return;
+    setGeneratingMonth(genMonth);
+    setMsg(null);
+    try {
+      const r = await generatePeriodJEs(clientId, genMonth);
+      const label = monthLabel(genMonth);
+      setMsg(
+        r.created === 0
+          ? `Nothing left to recognize for ${label}.`
+          : `Booked ${r.created} journal entr${r.created !== 1 ? "ies" : "y"} for ${label} ` +
+            `($${r.amount.toLocaleString()}) — in the Review queue.`,
+      );
+      setGenMonth("");
+      load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "JE generation failed");
+    } finally {
+      setGeneratingMonth(null);
+    }
+  }
+
+  async function handleExportGrid() {
+    setExportingGrid(true);
+    try {
+      const blob = await exportRecognitionGrid(clientId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `revenue-recognition-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExportingGrid(false);
+    }
+  }
+
+  async function handleApproveRevenue(ids?: number[]) {
+    setApproving(true);
+    setMsg(null);
+    try {
+      const r = await approveRevenueQueue(clientId, ids ? { transaction_ids: ids } : { approve_all: true });
+      const blocked = r.blocked.length
+        ? ` ${r.blocked.length} held back — account name not in the QBO chart of accounts.`
+        : "";
+      setMsg(`Approved ${r.approved} entr${r.approved !== 1 ? "ies" : "y"} — now on the Export tab.${blocked}`);
+      load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Approve failed");
+    } finally {
+      setApproving(false);
+    }
+  }
+
   async function handleStatusChange(contract: RevenueContract, status: string) {
     await updateRevenueContract(clientId, contract.id, { status });
     load();
@@ -186,6 +272,20 @@ export default function RevenuePage() {
   }
 
   const streamMap = Object.fromEntries(streams.map((s) => [s.id, s]));
+  const subscriptionMode = !!settings?.subscription_mode;
+  const tabs: [Tab, string][] = subscriptionMode
+    ? [
+        ["contracts",   "Contracts"],
+        ["recognition", "Revenue recognition"],
+        ["review",      "Review queue"],
+        ["ar-aging",    "AR Aging"],
+        ["settings",    "Settings"],
+      ]
+    : [
+        ["schedule",  "Recognition Schedule"],
+        ["ar-aging",  "AR Aging"],
+        ["settings",  "Settings"],
+      ];
 
   const now = new Date();
   const thisMonthKey = monthKey(now);
@@ -244,18 +344,19 @@ export default function RevenuePage() {
       {/* Tabs */}
       <div className="mb-4 border-b border-gray-800">
         <nav className="flex gap-1">
-          {([
-            ["schedule",  "Recognition Schedule"],
-            ["ar-aging",  "AR Aging"],
-            ["settings",  "Settings"],
-          ] as [Tab, string][]).map(([t, label]) => (
+          {tabs.map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)}
-              className={`px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors ${
+              className={`px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors flex items-center gap-2 ${
                 tab === t
                   ? "bg-gray-900 border border-b-gray-900 border-gray-700 text-white -mb-px"
                   : "text-gray-400 hover:text-gray-200"
               }`}>
               {label}
+              {t === "review" && (queue?.count ?? 0) > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-900 text-indigo-300 border border-indigo-700">
+                  {queue?.count}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -330,6 +431,38 @@ export default function RevenuePage() {
           />
         </>
       )}
+      {tab === "contracts" && (
+        <ContractsTab
+          contracts={contracts}
+          streamMap={streamMap}
+          expanded={expanded}
+          setExpanded={setExpanded}
+        />
+      )}
+
+      {tab === "recognition" && (
+        <RecognitionTab
+          grid={grid}
+          genMonth={genMonth}
+          setGenMonth={setGenMonth}
+          generating={generatingMonth}
+          onGenerate={handleGenerateSelectedMonth}
+          onExport={handleExportGrid}
+          exporting={exportingGrid}
+        />
+      )}
+
+      {tab === "review" && (
+        <RevenueQueueTab
+          queue={queue}
+          approving={approving}
+          onApprove={handleApproveRevenue}
+          clientId={clientId}
+          onReload={load}
+          onError={(e) => setError(e)}
+        />
+      )}
+
       {tab === "ar-aging" && <ArAgingTab rows={arAging} />}
       {tab === "settings" && (
         <SettingsTab
@@ -349,6 +482,477 @@ function SummaryCard({ label, value, color }: { label: string; value: string; co
     <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
       <p className="text-xs text-gray-500 mb-1">{label}</p>
       <p className={`text-2xl font-bold ${color}`}>{value}</p>
+    </div>
+  );
+}
+
+// ── Contracts Tab (subscription mode) ─────────────────────────────────────────
+// Same contracts and the same schedule underneath — only the columns differ:
+// one row per subscription, read left to right as who / what / since when /
+// what it earns a month / how they pay / whether it is live.
+
+function ContractsTab({ contracts, streamMap, expanded, setExpanded }: {
+  contracts: RevenueContract[];
+  streamMap: Record<number, RevenueStream>;
+  expanded: number | null;
+  setExpanded: (id: number | null) => void;
+}) {
+  if (contracts.length === 0) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
+        <p className="text-sm text-gray-400">No contracts yet.</p>
+        <p className="text-xs text-gray-500 mt-1">Import subscriptions to populate this tab.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-950/60 text-gray-400">
+            <tr>
+              <th className="text-left font-medium px-4 py-3">Customer</th>
+              <th className="text-left font-medium px-4 py-3">Plan</th>
+              <th className="text-left font-medium px-4 py-3">Start date</th>
+              <th className="text-right font-medium px-4 py-3">MRR</th>
+              <th className="text-left font-medium px-4 py-3">Billing</th>
+              <th className="text-left font-medium px-4 py-3">Status</th>
+              <th className="text-right font-medium px-4 py-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {contracts.map((c) => {
+              const stream = c.revenue_stream_id ? streamMap[c.revenue_stream_id] : undefined;
+              const isOpen = expanded === c.id;
+              const annual = c.billing_cadence === "annual";
+              return (
+                <React.Fragment key={c.id}>
+                  <tr className="border-t border-gray-800 hover:bg-gray-950/40">
+                    <td className="px-4 py-3 text-gray-200">{c.customer_name}</td>
+                    <td className="px-4 py-3 text-gray-400">{stream?.name ?? "—"}</td>
+                    <td className="px-4 py-3 text-gray-400">
+                      {c.service_period_start ? c.service_period_start.slice(0, 10) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-200 tabular-nums">
+                      {fmt(c.mrr ?? 0)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        annual
+                          ? "bg-green-900/60 text-green-300 border-green-700"
+                          : "bg-amber-900/60 text-amber-300 border-amber-700"
+                      }`}>
+                        {annual ? "Annual" : "Monthly"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                        STATUS_BADGE[c.status] ?? STATUS_BADGE.active
+                      }`}>
+                        {c.status === "fully_recognized"
+                          ? "Fully recognized"
+                          : c.status === "cancelled" ? "Cancelled" : "Active"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => setExpanded(isOpen ? null : c.id)}
+                        className="text-indigo-400 hover:text-indigo-300 text-xs font-medium"
+                      >
+                        {isOpen ? "Hide schedule" : "View schedule"}
+                      </button>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="bg-gray-950/60 border-t border-gray-800">
+                      <td colSpan={7} className="px-4 py-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="text-xs text-gray-400">
+                            {c.service_period_start?.slice(0, 10)} → {c.service_period_end?.slice(0, 10)}
+                            {" · "}{fmt(c.total_contract_value)} over {c.term_months ?? c.schedule.length} months
+                            {" · "}{fmt(c.amount_recognized)} recognized, {fmt(c.amount_deferred)} deferred
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {c.schedule.map((e) => (
+                            <span key={e.id}
+                              title={`${e.period}: ${fmt(e.amount)}${e.recognized ? " — recognized" : e.je_id ? " — JE created" : " — not booked"}`}
+                              className={`px-2 py-1 rounded text-[11px] tabular-nums border ${
+                                e.recognized
+                                  ? "bg-green-950 text-green-300 border-green-800"
+                                  : e.je_id
+                                    ? "bg-indigo-950 text-indigo-300 border-indigo-800"
+                                    : "bg-gray-900 text-gray-400 border-gray-700"
+                              }`}>
+                              {e.period} {fmt(e.amount)}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Revenue Recognition Tab (subscription mode) ──────────────────────────────
+// Twelve months forward, one row per contract. The month selector offers only
+// months that have started and have nothing booked yet, so it is impossible to
+// generate a future month's revenue from here.
+
+function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, onExport, exporting }: {
+  grid: RecognitionGrid | null;
+  genMonth: string;
+  setGenMonth: (m: string) => void;
+  generating: string | null;
+  onGenerate: () => void;
+  onExport: () => void;
+  exporting: boolean;
+}) {
+  if (!grid) {
+    return (
+      <div className="flex justify-center h-40 items-center">
+        <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="mb-4 flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 className="text-base font-semibold text-white">Next 12 months</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            What each subscription will recognize, month by month. A dash means the month falls
+            outside that contract&apos;s term.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {grid.open_periods.length > 0 ? (
+            <>
+              <select
+                value={genMonth}
+                onChange={(e) => setGenMonth(e.target.value)}
+                disabled={generating !== null}
+                className="bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60"
+              >
+                {grid.open_periods.map((p) => (
+                  <option key={p.period} value={p.period}>
+                    {monthLabel(p.period)} — {p.entries} entr{p.entries !== 1 ? "ies" : "y"}, {fmt(p.amount)}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={onGenerate}
+                disabled={generating !== null || !genMonth}
+                className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {generating ? "Generating…" : "Generate"}
+              </button>
+            </>
+          ) : (
+            <span className="text-xs text-gray-500">Every month that has started is already booked.</span>
+          )}
+          <button
+            onClick={onExport}
+            disabled={exporting}
+            className="px-4 py-2 bg-gray-800 border border-gray-700 hover:bg-gray-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            {exporting ? "Exporting…" : "Export to Excel"}
+          </button>
+        </div>
+      </div>
+
+      {grid.rows.length === 0 ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
+          <p className="text-sm text-gray-400">No revenue scheduled in the next 12 months.</p>
+        </div>
+      ) : (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-950/60 text-gray-400">
+                <tr>
+                  <th className="text-left font-medium px-4 py-3 sticky left-0 bg-gray-950/95">Customer</th>
+                  <th className="text-left font-medium px-4 py-3">Plan</th>
+                  {grid.periods.map((p) => (
+                    <th key={p} className="text-right font-medium px-3 py-3 whitespace-nowrap">
+                      {monthLabel(p)}
+                    </th>
+                  ))}
+                  <th className="text-right font-medium px-4 py-3">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grid.rows.map((r) => (
+                  <tr key={r.contract_id} className="border-t border-gray-800 hover:bg-gray-950/40">
+                    <td className="px-4 py-2.5 text-gray-200 sticky left-0 bg-gray-900">{r.customer_name}</td>
+                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">{r.plan}</td>
+                    {r.cells.map((amt, i) => (
+                      <td key={i} className={`px-3 py-2.5 text-right tabular-nums ${
+                        amt === null ? "text-gray-700" : "text-gray-300"
+                      }`}>
+                        {amt === null ? "—" : fmt(amt)}
+                      </td>
+                    ))}
+                    <td className="px-4 py-2.5 text-right tabular-nums text-gray-200 font-medium">{fmt(r.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-gray-700 bg-gray-950/60 font-semibold">
+                  <td className="px-4 py-3 text-gray-200 sticky left-0 bg-gray-950/95">Total</td>
+                  <td />
+                  {grid.totals.map((t, i) => (
+                    <td key={i} className="px-3 py-3 text-right tabular-nums text-gray-100">{fmt(t)}</td>
+                  ))}
+                  <td className="px-4 py-3 text-right tabular-nums text-white">{fmt(grid.grand_total)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Revenue Review Queue Tab (subscription mode) ─────────────────────────────
+// Cash collected from Chargebee and the monthly recognition entries. Revenue
+// entries for a subscription client appear here and not in the main Review
+// Queue, so this is the only place they can be approved.
+
+const JE_TYPE_BADGE: Record<string, string> = {
+  cash_collection: "bg-blue-900/60 text-blue-300 border-blue-700",
+  recognition:     "bg-green-900/60 text-green-300 border-green-700",
+  refund:          "bg-red-900/60 text-red-300 border-red-700",
+  fees:            "bg-gray-800 text-gray-300 border-gray-600",
+  payout:          "bg-indigo-900/60 text-indigo-300 border-indigo-700",
+  reserve_release: "bg-amber-900/60 text-amber-300 border-amber-700",
+  other:           "bg-gray-800 text-gray-300 border-gray-600",
+};
+
+function RevenueQueueTab({ queue, approving, onApprove, clientId, onReload, onError }: {
+  queue: { count: number; unmatched_count: number; rows: RevenueQueueRow[] } | null;
+  approving: boolean;
+  onApprove: (ids?: number[]) => void;
+  clientId: number;
+  onReload: () => void;
+  onError: (e: string) => void;
+}) {
+  const [editing, setEditing] = useState<number | null>(null);
+  // Empty for a client with no QBO connection (the chart is what fills this),
+  // and JeEditor falls back to free text in that case.
+  const { accounts } = useAccounts(clientId);
+
+  if (!queue) {
+    return (
+      <div className="flex justify-center h-40 items-center">
+        <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (queue.count === 0) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
+        <p className="text-sm text-gray-400">Nothing waiting for review.</p>
+        <p className="text-xs text-gray-500 mt-1">
+          Cash collections arrive on import; recognition entries from the Generate button.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {queue.unmatched_count > 0 && (
+        <div className="mb-4 bg-amber-950/60 border border-amber-800 rounded-xl px-5 py-3">
+          <p className="text-sm text-amber-300">
+            {queue.unmatched_count} payment{queue.unmatched_count !== 1 ? "s" : ""} could not be
+            matched to a contract. Review those rows before approving.
+          </p>
+        </div>
+      )}
+
+      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-950/60 text-gray-400">
+              <tr>
+                <th className="text-left font-medium px-4 py-3">Customer</th>
+                <th className="text-left font-medium px-4 py-3">Invoice #</th>
+                <th className="text-left font-medium px-4 py-3">Period</th>
+                <th className="text-left font-medium px-4 py-3">JE type</th>
+                <th className="text-left font-medium px-4 py-3">JE description</th>
+                <th className="text-right font-medium px-4 py-3">Amount</th>
+                <th className="text-right font-medium px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {queue.rows.map((r) => (
+                <React.Fragment key={r.transaction_id}>
+                <tr className="border-t border-gray-800 hover:bg-gray-950/40">
+                  <td className="px-4 py-3 text-gray-200">
+                    {r.customer_name ?? "—"}
+                    {r.warning && (
+                      <span className="block text-[11px] text-amber-400 mt-0.5">⚠ {r.warning}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 font-mono text-xs">{r.invoice_number ?? "—"}</td>
+                  <td className="px-4 py-3 text-gray-400 whitespace-nowrap">
+                    {r.period ? monthLabel(r.period) : "—"}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium border whitespace-nowrap ${
+                      JE_TYPE_BADGE[r.je_type] ?? JE_TYPE_BADGE.other
+                    }`}>
+                      {r.je_type_label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-gray-400">
+                    <span className="block max-w-md truncate" title={r.description}>{r.description}</span>
+                    {r.journal_entries.map((je) => (
+                      <span key={je.id} className="block text-[11px] text-gray-600 mt-0.5">
+                        DR {je.debit_account} · CR {je.credit_account} · {fmt(je.amount)}
+                      </span>
+                    ))}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-200">{fmt(r.amount)}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button
+                      onClick={() => onApprove([r.transaction_id])}
+                      disabled={approving}
+                      className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                    >
+                      Approve
+                    </button>
+                    {/* Edited here rather than linking to the main Review
+                        Queue: a subscription client's revenue entries are
+                        filtered out of that queue, so the link would land on a
+                        page that cannot show this row. */}
+                    <button
+                      onClick={() => setEditing(editing === r.transaction_id ? null : r.transaction_id)}
+                      className="ml-2 text-indigo-400 hover:text-indigo-300 text-xs font-medium"
+                    >
+                      {editing === r.transaction_id ? "Close" : "Edit"}
+                    </button>
+                  </td>
+                </tr>
+                  {editing === r.transaction_id && (
+                    <tr className="bg-gray-950/60 border-t border-gray-800">
+                      <td colSpan={7} className="px-4 py-4">
+                        {r.journal_entries.map((je) => (
+                          <JeEditor
+                            key={je.id}
+                            je={je}
+                            accounts={accounts}
+                            onSaved={() => { setEditing(null); onReload(); }}
+                            onError={onError}
+                          />
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-4 flex-wrap">
+        <p className="text-xs text-gray-500">Approved JEs push to the Export tab.</p>
+        <button
+          onClick={() => onApprove()}
+          disabled={approving}
+          className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+        >
+          {approving ? "Approving…" : `Approve all (${queue.count})`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One DR/CR line of a revenue JE, editable in place. Uses the shared account
+// typeahead when the client has a live QBO chart, and plain text when it does
+// not — a locked dropdown with no options would make the entry uneditable.
+function JeEditor({ je, accounts, onSaved, onError }: {
+  je: { id: number; debit_account: string; credit_account: string; amount: number; memo: string | null };
+  accounts: string[];
+  onSaved: () => void;
+  onError: (e: string) => void;
+}) {
+  const [debit, setDebit] = useState(je.debit_account);
+  const [credit, setCredit] = useState(je.credit_account);
+  const [amount, setAmount] = useState(String(je.amount));
+  const [memo, setMemo] = useState(je.memo ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const dirty =
+    debit !== je.debit_account ||
+    credit !== je.credit_account ||
+    memo !== (je.memo ?? "") ||
+    Number(amount) !== je.amount;
+
+  async function save() {
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      onError("Amount must be a positive number.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateJournalEntry(je.id, {
+        debit_account: debit, credit_account: credit, amount: amt, memo,
+      });
+      onSaved();
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const field = "bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-indigo-500";
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Debit</label>
+        {accounts.length > 0
+          ? <AccountSelect value={debit} onChange={setDebit} accounts={accounts} />
+          : <input value={debit} onChange={(e) => setDebit(e.target.value)} className={field} />}
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Credit</label>
+        {accounts.length > 0
+          ? <AccountSelect value={credit} onChange={setCredit} accounts={accounts} />
+          : <input value={credit} onChange={(e) => setCredit(e.target.value)} className={field} />}
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Amount</label>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" className={field} />
+      </div>
+      <div>
+        <label className="block text-[11px] text-gray-500 mb-1">Memo</label>
+        <input value={memo} onChange={(e) => setMemo(e.target.value)} className={field} />
+      </div>
+      <button
+        onClick={save}
+        disabled={saving || !dirty}
+        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium rounded-lg transition-colors"
+      >
+        {saving ? "Saving…" : "Save"}
+      </button>
     </div>
   );
 }
@@ -638,6 +1242,26 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
     settings?.revenue_recognition_policy ?? "full_month",
   );
   const [savingPolicy, setSavingPolicy] = useState(false);
+  const [subMode, setSubMode] = useState<boolean>(settings?.subscription_mode ?? false);
+  const [savingSubMode, setSavingSubMode] = useState(false);
+
+  async function handleToggleSubscriptionMode(next: boolean) {
+    setSubMode(next);
+    setSavingSubMode(true);
+    try {
+      await updateRevenueIntegrationSettings(clientId, { subscription_mode: next });
+      onSaved(
+        next
+          ? "Subscription billing on — Revenue now shows Contracts, Revenue recognition and its own Review queue."
+          : "Subscription billing off — Revenue is back to the recognition schedule view.",
+      );
+    } catch (e: unknown) {
+      onError(e instanceof Error ? e.message : "Save failed");
+      setSubMode(settings?.subscription_mode ?? false);
+    } finally {
+      setSavingSubMode(false);
+    }
+  }
 
   async function handleSavePolicy(next: RevenueRecognitionPolicy) {
     setPolicy(next);
@@ -659,6 +1283,7 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
 
   useEffect(() => {
     if (settings) {
+      setSubMode(settings.subscription_mode ?? false);
       setIntForm((f) => ({
         ...f,
         mercury_revenue_enabled: settings.mercury_revenue_enabled,
@@ -819,6 +1444,44 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
             </table>
           </div>
         )}
+      </section>
+
+      {/* Billing model */}
+      <section>
+        <div className="mb-4">
+          <h2 className="text-base font-semibold text-white">Billing model</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            How this client bills, which decides what the Revenue tab shows
+          </p>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-start justify-between gap-6">
+            <div>
+              <p className="text-sm font-medium text-gray-200">Subscription billing</p>
+              <p className="text-xs text-gray-500 mt-1 leading-relaxed max-w-xl">
+                Recurring plans billed annually or monthly in advance. Revenue shows a
+                Contracts list, a 12-month forward recognition grid, and its own review
+                queue for cash collections and monthly recognition entries — those entries
+                stop appearing in the main Review Queue. Leave this off and the Revenue tab
+                keeps the recognition-schedule view.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={subMode}
+              onClick={() => handleToggleSubscriptionMode(!subMode)}
+              disabled={savingSubMode}
+              className={`relative shrink-0 w-12 h-6 rounded-full transition-colors disabled:opacity-60 ${
+                subMode ? "bg-indigo-600" : "bg-gray-700"
+              }`}
+            >
+              <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                subMode ? "translate-x-6" : "translate-x-0.5"
+              }`} />
+            </button>
+          </div>
+        </div>
       </section>
 
       {/* Integrations */}

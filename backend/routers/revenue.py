@@ -19,11 +19,13 @@ Routes:
 """
 
 import calendar
+import io
 import json
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -102,6 +104,23 @@ POLICY_NOTE = {
     POLICY_FULL_MONTH:      "ASC 606 revenue recognition — full month policy applied.",
     POLICY_DAILY_PRORATION: "ASC 606 revenue recognition — daily proration policy applied.",
 }
+
+
+def _month_label(period: str) -> str:
+    """"2026-10" -> "Oct 2026", for column headers."""
+    return datetime.strptime(period, "%Y-%m").strftime("%b %Y")
+
+
+def _subscription_mode(client_id: int, db: Session) -> bool:
+    """Whether this client uses the subscription Revenue tab.
+
+    Gates the contracts / recognition-grid / revenue-queue behaviour so that
+    clients billing on the other models keep the schedule view unchanged.
+    """
+    settings = db.query(RevenueIntegrationSettings).filter(
+        RevenueIntegrationSettings.client_id == client_id
+    ).first()
+    return bool(getattr(settings, "subscription_mode", False)) if settings else False
 
 
 def _recognition_policy(client_id: int, db: Session) -> str:
@@ -225,6 +244,14 @@ def _enrich_contract(contract: RevenueContract, db: Session) -> dict:
             for e in entries
         ],
     }
+    # The Contracts table reports MRR, which is the schedule's monthly rate —
+    # an annual plan's $60 is $5 of MRR, not $60. Taken from the schedule the
+    # contract actually has rather than recomputed from the term, so a contract
+    # whose schedule was edited reports what it will really recognize.
+    months = len(entries)
+    d["term_months"] = months
+    d["mrr"] = round(contract.total_contract_value / months, 2) if months else 0.0
+    d["billing_cadence"] = "annual" if months > 1 else "monthly"
     return d
 
 
@@ -476,6 +503,13 @@ def delete_contract(
     if not contract:
         raise HTTPException(404, "Contract not found")
     db.query(RevenueScheduleEntry).filter(RevenueScheduleEntry.contract_id == contract_id).delete()
+    # Cash-collection transactions point at this contract, and the foreign key
+    # would block the delete. The transaction is still real money collected, so
+    # it is unlinked rather than removed — it reappears in the revenue queue as
+    # an unmatched payment, which is the honest state once the contract is gone.
+    db.query(Transaction).filter(Transaction.revenue_contract_id == contract_id).update(
+        {"revenue_contract_id": None}, synchronize_session=False
+    )
     db.delete(contract)
     db.commit()
     return {"ok": True}
@@ -825,6 +859,362 @@ def generate_period_jes(
     result["payment_jes"] = payments
     result["errors"] = []
     return result
+
+
+# ── Subscription mode: contracts, forward recognition grid, revenue queue ────
+# These three endpoints back the subscription Revenue tab. They are readable by
+# any client, but the UI only shows them when subscription_mode is on.
+
+def _forward_periods(count: int, start: Optional[datetime] = None) -> list[str]:
+    """`count` calendar months as "YYYY-MM", starting with the current month."""
+    base = (start or datetime.utcnow()).replace(day=1)
+    out = []
+    for i in range(count):
+        d = _add_months(base, i)
+        out.append(d.strftime("%Y-%m"))
+    return out
+
+
+def _open_recognition_periods(client_id: int, db: Session) -> list[dict]:
+    """Months that have begun and still have recognition left to book.
+
+    Deliberately not limited to the grid's 12-month window: a month that was
+    never generated stays bookable however far back it is, and that is exactly
+    the month someone needs to catch up on.
+    """
+    this_month = _current_month()
+    rows = (
+        db.query(RevenueScheduleEntry.period, RevenueScheduleEntry.amount)
+        .join(RevenueContract, RevenueContract.id == RevenueScheduleEntry.contract_id)
+        .filter(
+            RevenueScheduleEntry.client_id == client_id,
+            RevenueScheduleEntry.je_id == None,            # noqa: E711 — SQL NULL
+            RevenueScheduleEntry.period <= this_month,     # string compare is safe on YYYY-MM
+            RevenueContract.status == RevenueContractStatus.active,
+            RevenueContract.revenue_stream_id.isnot(None),
+        )
+        .all()
+    )
+    totals: dict[str, dict] = {}
+    for period, amount in rows:
+        agg = totals.setdefault(period, {"period": period, "entries": 0, "amount": 0.0})
+        agg["entries"] += 1
+        agg["amount"] = round(agg["amount"] + (amount or 0.0), 2)
+    return sorted(totals.values(), key=lambda r: r["period"])
+
+
+def _grid_data(client_id: int, months: int, db: Session) -> dict:
+    periods = _forward_periods(months)
+    contracts = (
+        db.query(RevenueContract)
+        .filter(
+            RevenueContract.client_id == client_id,
+            RevenueContract.status != RevenueContractStatus.cancelled,
+            RevenueContract.revenue_stream_id.isnot(None),
+        )
+        .order_by(RevenueContract.customer_name)
+        .all()
+    )
+    streams = {
+        s.id: s for s in db.query(RevenueStream).filter(RevenueStream.client_id == client_id).all()
+    }
+    by_contract: dict[int, dict[str, float]] = {}
+    for entry in (
+        db.query(RevenueScheduleEntry)
+        .filter(
+            RevenueScheduleEntry.client_id == client_id,
+            RevenueScheduleEntry.period.in_(periods),
+        )
+        .all()
+    ):
+        by_contract.setdefault(entry.contract_id, {})[entry.period] = entry.amount
+
+    rows = []
+    for c in contracts:
+        cells = by_contract.get(c.id, {})
+        # A contract with nothing in the window is not forward-looking revenue,
+        # so it is left out rather than shown as a row of dashes.
+        if not cells:
+            continue
+        stream = streams.get(c.revenue_stream_id)
+        rows.append({
+            "contract_id": c.id,
+            "customer_name": c.customer_name,
+            "plan": stream.name if stream else "",
+            "service_period_end": c.service_period_end.isoformat() if c.service_period_end else None,
+            # None, not 0.0 — the grid shows a dash for a month this contract
+            # does not cover, which is different from a month worth nothing.
+            "cells": [cells.get(p) for p in periods],
+            "total": round(sum(cells.get(p) or 0.0 for p in periods), 2),
+        })
+
+    totals = [
+        round(sum(r["cells"][i] or 0.0 for r in rows), 2) for i in range(len(periods))
+    ]
+    return {
+        "periods": periods,
+        "rows": rows,
+        "totals": totals,
+        "grand_total": round(sum(totals), 2),
+        "open_periods": _open_recognition_periods(client_id, db),
+    }
+
+
+@router.get("/recognition-grid")
+def recognition_grid(
+    client_id: int,
+    months: int = 12,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Forward-looking recognition: one row per contract, one column per month."""
+    _get_client(client_id, current_user, db)
+    months = max(1, min(months, 36))
+    return _grid_data(client_id, months, db)
+
+
+@router.get("/recognition-grid.xlsx")
+def export_recognition_grid(
+    client_id: int,
+    months: int = 12,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The same grid as an xlsx, matching the prepaid-schedule export's shape."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    _get_client(client_id, current_user, db)
+    data = _grid_data(client_id, max(1, min(months, 36)), db)
+    periods = data["periods"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Revenue Recognition"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="334155")
+    headers = ["Customer", "Plan"] + [_month_label(p) for p in periods] + ["Total"]
+    for col_idx, h in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=col_idx, value=h)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = Alignment(horizontal="center")
+
+    for row_idx, row in enumerate(data["rows"], start=2):
+        ws.cell(row=row_idx, column=1, value=row["customer_name"])
+        ws.cell(row=row_idx, column=2, value=row["plan"])
+        for i, amt in enumerate(row["cells"], start=3):
+            # Dash, not blank: a month outside the contract's term is a
+            # deliberate "nothing here", and a reader cannot tell that from an
+            # empty cell.
+            cell = ws.cell(row=row_idx, column=i, value=round(amt, 2) if amt is not None else "—")
+            if amt is not None:
+                cell.number_format = "$#,##0.00"
+            else:
+                cell.alignment = Alignment(horizontal="center")
+        t = ws.cell(row=row_idx, column=len(headers), value=row["total"])
+        t.number_format = "$#,##0.00"
+        t.font = Font(bold=True)
+
+    total_row = len(data["rows"]) + 2
+    tl = ws.cell(row=total_row, column=1, value="Total")
+    tl.font = Font(bold=True)
+    for i, amt in enumerate(data["totals"], start=3):
+        c = ws.cell(row=total_row, column=i, value=amt)
+        c.number_format = "$#,##0.00"
+        c.font = Font(bold=True)
+    g = ws.cell(row=total_row, column=len(headers), value=data["grand_total"])
+    g.number_format = "$#,##0.00"
+    g.font = Font(bold=True)
+
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 22
+    for col_idx in range(3, len(headers) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = 13
+    ws.freeze_panes = "C2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"revenue-recognition-{datetime.utcnow().strftime('%Y-%m-%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# What kind of revenue entry a pending transaction holds. Chargebee's import
+# brings in more than the two headline types — fees, payouts, refunds and
+# guarantee releases all arrive as pending entries too, and they are surfaced
+# here rather than dropped, because the revenue queue is now the only place a
+# subscription client's revenue entries appear.
+def _classify_revenue_je(tx: Transaction, jes: list, stream_deferred: set[str]) -> str:
+    desc = (tx.description or "").lower()
+    if tx.source == "revenue":
+        return "recognition"
+    # Checked before the refund test on purpose: the reserve-release entry is
+    # described "Refund reserve released - N subscriptions", so a refund test
+    # that ran first would claim it.
+    if "guarantee lapsed" in desc or "reserve released" in desc:
+        return "reserve_release"
+    if "refund" in desc:
+        return "refund"
+    if "processing fee" in desc or "fees" in desc:
+        return "fees"
+    if "payout" in desc:
+        return "payout"
+    for je in jes:
+        if je.credit_account in stream_deferred:
+            return "cash_collection"
+    return "other"
+
+
+JE_TYPE_LABELS = {
+    "cash_collection": "Cash collected",
+    "recognition":     "Revenue recognition",
+    "refund":          "Refund",
+    "fees":            "Processor fees",
+    "payout":          "Bank payout",
+    "reserve_release": "Guarantee lapsed",
+    "other":           "Other",
+}
+
+
+@router.get("/review-queue")
+def revenue_review_queue(
+    client_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Pending revenue entries for this client, for the Revenue tab's own queue.
+
+    Cash collections come from Chargebee, recognition entries from the monthly
+    Generate button. Scheduled (future-month) entries are excluded — they are
+    not reviewable until the month they belong to has finished.
+    """
+    _get_client(client_id, current_user, db)
+    txs = (
+        db.query(Transaction)
+        .filter(
+            Transaction.client_id == client_id,
+            Transaction.status == TransactionStatus.pending,
+            Transaction.source.in_(("revenue", "chargebee")),
+        )
+        .order_by(Transaction.date.desc(), Transaction.id.desc())
+        .all()
+    )
+    tx_ids = [t.id for t in txs]
+    je_map: dict[int, list] = {}
+    if tx_ids:
+        for je in db.query(JournalEntry).filter(JournalEntry.transaction_id.in_(tx_ids)).all():
+            je_map.setdefault(je.transaction_id, []).append(je)
+
+    streams = db.query(RevenueStream).filter(RevenueStream.client_id == client_id).all()
+    deferred_accounts = {s.deferred_revenue_account for s in streams if s.deferred_revenue_account}
+    contract_ids = {t.revenue_contract_id for t in txs if t.revenue_contract_id}
+    contracts = {
+        c.id: c
+        for c in db.query(RevenueContract).filter(RevenueContract.id.in_(contract_ids)).all()
+    } if contract_ids else {}
+
+    rows = []
+    for tx in txs:
+        jes = je_map.get(tx.id, [])
+        je_type = _classify_revenue_je(tx, jes, deferred_accounts)
+        contract = contracts.get(tx.revenue_contract_id) if tx.revenue_contract_id else None
+        # Only a cash collection can be "unmatched" — a recognition entry is
+        # built from a contract's own schedule, so it always has one.
+        unmatched = je_type == "cash_collection" and contract is None
+        rows.append({
+            "transaction_id": tx.id,
+            "date": tx.date.isoformat() if tx.date else None,
+            "customer_name": (
+                (jes[0].customer_name if jes and jes[0].customer_name else None)
+                or tx.counterparty_name
+                or (contract.customer_name if contract else None)
+            ),
+            "invoice_number": (
+                tx.invoice_number
+                or (contract.invoice_number or contract.external_id if contract else None)
+            ),
+            "period": tx.date.strftime("%Y-%m") if tx.date else None,
+            "je_type": je_type,
+            "je_type_label": JE_TYPE_LABELS.get(je_type, "Other"),
+            "description": tx.description,
+            "amount": round(tx.amount or 0.0, 2),
+            "contract_id": contract.id if contract else None,
+            "unmatched": unmatched,
+            "warning": (
+                "No matching contract found — please review before approving."
+                if unmatched else None
+            ),
+            "journal_entries": [
+                {
+                    "id": je.id,
+                    "je_number": je.je_number,
+                    "debit_account": je.debit_account,
+                    "credit_account": je.credit_account,
+                    "amount": round(je.amount or 0.0, 2),
+                    "memo": je.memo,
+                    "customer_name": je.customer_name,
+                }
+                for je in jes
+            ],
+        })
+
+    return {
+        "count": len(rows),
+        "unmatched_count": sum(1 for r in rows if r["unmatched"]),
+        "rows": rows,
+    }
+
+
+class RevenueApproveBody(BaseModel):
+    transaction_ids: Optional[list[int]] = None
+    approve_all: bool = False
+
+
+@router.post("/review-queue/approve")
+def approve_revenue_queue(
+    client_id: int,
+    body: RevenueApproveBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Approve revenue entries so they move on to the Export tab."""
+    client = _get_client(client_id, current_user, db)
+    q = db.query(Transaction).filter(
+        Transaction.client_id == client_id,
+        Transaction.status == TransactionStatus.pending,
+        Transaction.source.in_(("revenue", "chargebee")),
+    )
+    if not body.approve_all:
+        ids = [int(i) for i in (body.transaction_ids or [])]
+        if not ids:
+            raise HTTPException(400, "Pass transaction_ids, or approve_all=true.")
+        q = q.filter(Transaction.id.in_(ids))
+    txs = q.all()
+
+    # Same chart-of-accounts gate the main queue applies on approval, so a bad
+    # account name is caught here instead of at QBO export.
+    from routers.transactions import _coa_violations_for_transaction
+
+    approved, blocked = 0, []
+    now = datetime.utcnow()
+    for tx in txs:
+        bad = _coa_violations_for_transaction(tx, client, db)
+        if bad:
+            blocked.append({"transaction_id": tx.id, "bad_account_names": bad})
+            continue
+        tx.status = TransactionStatus.approved
+        for je in db.query(JournalEntry).filter(JournalEntry.transaction_id == tx.id).all():
+            je.approved_by = current_user.id
+            je.approved_at = now
+        approved += 1
+    db.commit()
+    return {"approved": approved, "blocked": blocked}
 
 
 # ── AR Aging ──────────────────────────────────────────────────────────────────

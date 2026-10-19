@@ -74,10 +74,18 @@ def create_transaction(
 def list_with_entries(
     client_id: int = Query(...),
     status_filter: Optional[str] = Query(None, alias="status"),
+    exclude_revenue: bool = Query(False),
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Returns transactions with their journal entries embedded, newest first."""
+    """Returns transactions with their journal entries embedded, newest first.
+
+    `exclude_revenue` leaves out revenue and Chargebee entries, which a
+    subscription client reviews in the Revenue tab's own queue instead. It is
+    honoured **only** for clients in subscription mode: clients on the other
+    billing models also have source="revenue" entries (Bill.com, Stripe) and
+    those must keep appearing in the main Review Queue where they do today.
+    """
     _assert_client_owned(client_id, current_user, db)
     query = (
         db.query(models.Transaction)
@@ -85,6 +93,13 @@ def list_with_entries(
     )
     if status_filter:
         query = query.filter(models.Transaction.status == status_filter)
+    if exclude_revenue:
+        from routers.revenue import _subscription_mode
+
+        if _subscription_mode(client_id, db):
+            query = query.filter(
+                models.Transaction.source.notin_(("revenue", "chargebee"))
+            )
     txns = query.order_by(models.Transaction.date.desc()).all()
 
     # Attach journal entries

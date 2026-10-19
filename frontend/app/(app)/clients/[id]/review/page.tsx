@@ -1133,7 +1133,7 @@ export default function ReviewQueuePage() {
 
   const reload = useCallback(() => {
     setLoading(true);
-    getTransactionsWithEntries(clientId, "pending")
+    getTransactionsWithEntries(clientId, "pending", true)
       .then(setItems)
       .catch(console.error)
       .finally(() => setLoading(false));
