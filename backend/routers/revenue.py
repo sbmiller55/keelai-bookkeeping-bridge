@@ -1001,7 +1001,18 @@ def export_recognition_grid(
         c.fill = header_fill
         c.alignment = Alignment(horizontal="center")
 
-    for row_idx, row in enumerate(data["rows"], start=2):
+    # Totals on row 2, directly under the headers, matching the on-screen grid.
+    tl = ws.cell(row=2, column=1, value="Total")
+    tl.font = Font(bold=True)
+    for i, amt in enumerate(data["totals"], start=3):
+        c = ws.cell(row=2, column=i, value=amt)
+        c.number_format = "$#,##0.00"
+        c.font = Font(bold=True)
+    g = ws.cell(row=2, column=len(headers), value=data["grand_total"])
+    g.number_format = "$#,##0.00"
+    g.font = Font(bold=True)
+
+    for row_idx, row in enumerate(data["rows"], start=3):
         ws.cell(row=row_idx, column=1, value=row["customer_name"])
         ws.cell(row=row_idx, column=2, value=row["plan"])
         for i, amt in enumerate(row["cells"], start=3):
@@ -1017,22 +1028,11 @@ def export_recognition_grid(
         t.number_format = "$#,##0.00"
         t.font = Font(bold=True)
 
-    total_row = len(data["rows"]) + 2
-    tl = ws.cell(row=total_row, column=1, value="Total")
-    tl.font = Font(bold=True)
-    for i, amt in enumerate(data["totals"], start=3):
-        c = ws.cell(row=total_row, column=i, value=amt)
-        c.number_format = "$#,##0.00"
-        c.font = Font(bold=True)
-    g = ws.cell(row=total_row, column=len(headers), value=data["grand_total"])
-    g.number_format = "$#,##0.00"
-    g.font = Font(bold=True)
-
     ws.column_dimensions["A"].width = 30
     ws.column_dimensions["B"].width = 22
     for col_idx in range(3, len(headers) + 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = 13
-    ws.freeze_panes = "C2"
+    ws.freeze_panes = "C3"
 
     buf = io.BytesIO()
     wb.save(buf)

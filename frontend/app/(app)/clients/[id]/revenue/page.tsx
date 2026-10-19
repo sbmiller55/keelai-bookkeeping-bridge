@@ -691,6 +691,17 @@ function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, o
                 </tr>
               </thead>
               <tbody>
+                {/* Totals lead the grid rather than close it: with hundreds of
+                    subscribers the month columns are what you read first, and a
+                    footer row sits a long scroll away from the headers. */}
+                <tr className="border-b-2 border-gray-700 bg-gray-950/60 font-semibold">
+                  <td className="px-4 py-3 text-gray-200 sticky left-0 bg-gray-950/95">Total</td>
+                  <td />
+                  {grid.totals.map((t, i) => (
+                    <td key={i} className="px-3 py-3 text-right tabular-nums text-gray-100">{fmt(t)}</td>
+                  ))}
+                  <td className="px-4 py-3 text-right tabular-nums text-white">{fmt(grid.grand_total)}</td>
+                </tr>
                 {grid.rows.map((r) => (
                   <tr key={r.contract_id} className="border-t border-gray-800 hover:bg-gray-950/40">
                     <td className="px-4 py-2.5 text-gray-200 sticky left-0 bg-gray-900">{r.customer_name}</td>
@@ -706,16 +717,6 @@ function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, o
                   </tr>
                 ))}
               </tbody>
-              <tfoot>
-                <tr className="border-t-2 border-gray-700 bg-gray-950/60 font-semibold">
-                  <td className="px-4 py-3 text-gray-200 sticky left-0 bg-gray-950/95">Total</td>
-                  <td />
-                  {grid.totals.map((t, i) => (
-                    <td key={i} className="px-3 py-3 text-right tabular-nums text-gray-100">{fmt(t)}</td>
-                  ))}
-                  <td className="px-4 py-3 text-right tabular-nums text-white">{fmt(grid.grand_total)}</td>
-                </tr>
-              </tfoot>
             </table>
           </div>
         </div>
