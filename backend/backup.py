@@ -155,12 +155,24 @@ def list_backups() -> list[dict]:
 # primary keys, which every foreign key in the dump depends on. This restores
 # the dump as it was taken: same tables, same ids, same values.
 
-# Columns that point at a row in their own table. Their target may not be
-# inserted yet, so they go in as NULL and are filled in once every row exists.
-_SELF_REFS = {
-    "transactions": ["matched_payment_id"],
-    "journal_entries": ["parent_je_id"],
-}
+def _deferred_fk_columns(table: str) -> list[str]:
+    """Nullable foreign-key columns on `table`, which go in as NULL and are
+    filled in once every row exists.
+
+    No table order can satisfy every link: `transactions.fixed_asset_id` points
+    at fixed_assets and `fixed_assets.transaction_id` points back, so whichever
+    goes first violates the other. Self-references inside one table have the
+    same problem. Deferring every *nullable* link removes the question — rows
+    go in with their required parents only, and the optional links are restored
+    afterwards. Required (non-nullable) links still depend on TABLES order, and
+    every one of those points at a table listed before it.
+    """
+    from models import Base
+
+    t = Base.metadata.tables.get(table)
+    if t is None:
+        return []
+    return [c.name for c in t.columns if c.foreign_keys and c.nullable]
 
 
 def fetch_backup(key: str) -> dict:
@@ -229,7 +241,7 @@ def run_restore(key: str, truncate: bool = False) -> dict:
                 restored[table] = 0
                 continue
 
-            self_refs = _SELF_REFS.get(table, [])
+            self_refs = _deferred_fk_columns(table)
             inserted = 0
             for row in rows:
                 cols = list(row.keys())
@@ -250,7 +262,7 @@ def run_restore(key: str, truncate: bool = False) -> dict:
             restored[table] = inserted
             _log(f"  table={table} restored {inserted}/{len(rows)}")
 
-        # Now that every row exists, point the self-references back.
+        # Now that every row exists, put the optional links back.
         relinked = 0
         for table, row_id, col, target in deferred:
             if attempt(
