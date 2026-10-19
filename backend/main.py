@@ -5,9 +5,10 @@ import os
 
 import errors
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from database import Base, engine
 from auth import get_current_user
@@ -809,6 +810,31 @@ def trigger_backup(current_user=Depends(get_current_user)):
     """Manually trigger a database backup to S3."""
     from backup import run_backup
     return run_backup(label="manual")
+
+
+class RestoreRequest(BaseModel):
+    key: str                      # S3 key from /admin/backups
+    truncate: bool = False        # clear existing rows first
+    confirm: str = ""
+
+
+@app.post("/admin/restore")
+def trigger_restore(payload: RestoreRequest, current_user=Depends(get_current_user)):
+    """Restore the database from one of the S3 backups.
+
+    Takes a backup of the current state first, so a restore onto the wrong
+    snapshot is itself recoverable.
+    """
+    if payload.confirm != "YES":
+        raise HTTPException(status_code=400, detail="Pass confirm='YES' to restore.")
+    from backup import run_backup, run_restore
+    try:
+        pre = run_backup(label="pre-restore")["key"]
+    except Exception as exc:
+        pre = f"failed: {exc}"
+    result = run_restore(payload.key, truncate=payload.truncate)
+    result["pre_restore_backup"] = pre
+    return result
 
 
 @app.get("/admin/backups")
