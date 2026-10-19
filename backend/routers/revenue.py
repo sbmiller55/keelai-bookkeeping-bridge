@@ -1295,6 +1295,9 @@ def get_integration_settings(
         # before this setting existed hold NULL, and the engine treats NULL as
         # full month, so the UI must show the same thing it will actually do.
         "revenue_recognition_policy": _recognition_policy(client_id, db),
+        # Same NULL-is-the-default reasoning as the policy above: rows created
+        # before this column existed hold NULL, which means off.
+        "subscription_mode": _subscription_mode(client_id, db),
     }
 
 
