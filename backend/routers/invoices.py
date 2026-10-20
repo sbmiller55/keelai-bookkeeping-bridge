@@ -171,15 +171,22 @@ def _apply_coa(data: dict, coa: dict[str, str]) -> list[str]:
     # against QBO's exact spelling.
     chart_text = "\n".join(coa.values()) if coa else None
     if chart_text:
-        from ai_coder import remap_cash_parent
+        from ai_coder import _parse_coa_names, prefer_qualified_bank_names, remap_cash_parent
+
+        chart_names = _parse_coa_names(chart_text) or []
+
+        def canonical(value):
+            return prefer_qualified_bank_names(
+                remap_cash_parent(value, chart_text), chart_names
+            )
 
         for key in _ACCOUNT_KEYS:
             if key in data:
-                data[key] = remap_cash_parent(data.get(key), chart_text)
+                data[key] = canonical(data.get(key))
         for je in data.get("journal_entries") or []:
             if isinstance(je, dict):
                 for key in ("debit_account", "credit_account"):
-                    je[key] = remap_cash_parent(je.get(key), chart_text)
+                    je[key] = canonical(je.get(key))
     return sorted(set(unresolved))
 
 

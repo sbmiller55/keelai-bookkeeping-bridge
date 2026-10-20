@@ -140,6 +140,30 @@ def _primary_bank_account(names: list) -> Optional[str]:
 _BANK_WORDS = ("checking", "savings", "treasury", "money market", "bank")
 
 
+def prefer_qualified_bank_names(name: Optional[str], names: Optional[list]) -> Optional[str]:
+    """Use a bank account's "Parent:Child" spelling when the chart has one.
+
+    QBO exposes most accounts under both their short name and their fully
+    qualified name, so a model picking from the chart can land on either —
+    "Mercury Checking (9882) - 1" one time and "Cash:Mercury Checking (9882) - 1"
+    the next, for the same account. Both import, but the books should name the
+    account one way.
+
+    Restricted to bank-like accounts on purpose. Preferring the qualified form
+    everywhere would rename expense coding across the whole chart, which is a
+    much larger change than naming the cash account consistently.
+    """
+    if not name or ":" in name or not names:
+        return name
+    if not any(w in name.lower() for w in _BANK_WORDS + ("mercury",)):
+        return name
+    suffix = ":" + name.lower()
+    qualified = [n for n in names if n.lower().endswith(suffix)]
+    if not qualified:
+        return name
+    return sorted(qualified, key=len)[0]
+
+
 def remap_cash_parent_names(name: Optional[str], names: Optional[list]) -> Optional[str]:
     """remap_cash_parent against an already-parsed list of account names."""
     if not name or not names:
@@ -277,6 +301,9 @@ def _validate_account(name: str, coa_names: Optional[list]) -> str:
     remapped = remap_cash_parent_names(name, coa_names)
     if remapped != name:
         return remapped
+    qualified = prefer_qualified_bank_names(name, coa_names)
+    if qualified != name:
+        return qualified
 
     by_lower = {c.lower(): c for c in coa_names}
     if name.lower() in by_lower:
