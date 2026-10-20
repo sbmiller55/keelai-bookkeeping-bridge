@@ -47,15 +47,23 @@ _PLAN_WEIGHTS = [
 ]
 
 # Demo sizing. A real day at this price point is hundreds of subscriptions; that
-# would bury the review queue, which is the thing being demonstrated. These keep
-# an import to a batch a human can actually read down.
-# Volume is set so the refund count below reconciles with the reserve rate used
-# in chargebee_revenue_je: one refund a day against ~30 billings is ~3.3%, just
-# under the 4% reserved, which keeps the refund liability slightly positive
-# rather than overdrawn. Changing one without the other breaks that.
-SUBS_PER_DAY        = 30
-IMPORT_WINDOW_DAYS  = 1
-HISTORY_DAYS        = 21     # posted backfill, so schedules open mid-flight
+# would bury the review queue, which is the thing being demonstrated, and six
+# months of it would be thousands of contracts to render. Volume instead starts
+# small and compounds, so a six-month history reads as a business that has been
+# growing rather than one that signs the same number of customers every day.
+#
+# Growth is anchored to a fixed epoch, not to "today": the contract this module
+# makes is that a given calendar day always generates the same subscribers, and
+# a volume that depended on the current date would quietly break that — the same
+# day would grow a longer subscriber list tomorrow, and those extra rows would
+# import as brand-new contracts.
+SUBS_EPOCH          = datetime(2026, 1, 1)
+SUBS_PER_DAY_BASE   = 3          # daily signups at the epoch
+SUBS_GROWTH_MONTHLY = 0.15       # compounding, so ~2x every five months
+SUBS_PER_DAY_CAP    = 40         # keeps a far-future demo readable
+
+IMPORT_WINDOW_DAYS  = 7          # a sync brings a week, not a single day
+HISTORY_DAYS        = 182        # six months of posted backfill
 
 GUARANTEE_DAYS      = 7      # SuperSummary's published money-back window
 
@@ -75,9 +83,30 @@ _LAST_NAMES = [
 ]
 
 
-def _rng(day: datetime, salt: str = "") -> random.Random:
-    """A generator seeded from the calendar day, so a day's data never changes."""
-    seed = hashlib.sha256(f"{day:%Y-%m-%d}|{salt}".encode()).hexdigest()
+def subs_per_day(day: datetime) -> int:
+    """How many subscriptions `day` bills, compounding from the epoch.
+
+    Weekends are thinner, which is what a consumer subscription actually looks
+    like and keeps the recognition grid from reading as a synthetic flat line.
+    """
+    months = (day.year - SUBS_EPOCH.year) * 12 + (day.month - SUBS_EPOCH.month)
+    months += (day.day - 1) / 30.0
+    count = SUBS_PER_DAY_BASE * ((1.0 + SUBS_GROWTH_MONTHLY) ** max(0.0, months))
+    if day.weekday() >= 5:
+        count *= 0.65
+    return max(1, min(SUBS_PER_DAY_CAP, round(count)))
+
+
+def _rng(day: datetime, salt: str = "", generation: int = 0) -> random.Random:
+    """A generator seeded from the calendar day, so a day's data never changes.
+
+    `generation` is the escape hatch for a demo that has caught up to today:
+    bumping it yields a different set of subscribers for the same date, which is
+    how a sync keeps bringing new activity once there are no unimported days
+    left. Generation 0 is the historical feed and never changes.
+    """
+    gen = f"|g{generation}" if generation else ""
+    seed = hashlib.sha256(f"{day:%Y-%m-%d}|{salt}{gen}".encode()).hexdigest()
     return random.Random(int(seed[:16], 16))
 
 
@@ -92,10 +121,11 @@ def _pick_plan(rng: random.Random) -> str:
     return _PLAN_WEIGHTS[-1][0]
 
 
-def _subscriber(rng: random.Random, day: datetime, index: int) -> dict:
+def _subscriber(rng: random.Random, day: datetime, index: int, generation: int = 0) -> dict:
     first = rng.choice(_FIRST_NAMES)
     last = rng.choice(_LAST_NAMES)
-    digest = hashlib.sha256(f"{day:%Y-%m-%d}|{index}".encode()).hexdigest()[:10]
+    gen = f"|g{generation}" if generation else ""
+    digest = hashlib.sha256(f"{day:%Y-%m-%d}|{index}{gen}".encode()).hexdigest()[:10]
     return {
         "name": f"{first} {last}",
         "email": f"{first.lower()}.{last.lower()}{digest[:3]}@example.com",
@@ -119,7 +149,7 @@ def _add_months(d: datetime, n: int) -> datetime:
 REFUND_RATE = 0.04
 
 
-def subscriptions_for_day(day: datetime) -> list[dict]:
+def subscriptions_for_day(day: datetime, generation: int = 0) -> list[dict]:
     """Every new or renewed subscription billed on `day`.
 
     Each subscription carries its own refund fate (`will_be_refunded` and
@@ -128,18 +158,18 @@ def subscriptions_for_day(day: datetime) -> list[dict]:
     refunded — otherwise it releases the refund reserve at day 7 *and* refunds
     it later, draining the liability twice for one subscriber.
     """
-    rng = _rng(day, "subs")
+    rng = _rng(day, "subs", generation)
     out = []
-    for i in range(SUBS_PER_DAY):
+    for i in range(subs_per_day(day)):
         plan_code = _pick_plan(rng)
         plan = PLANS[plan_code]
-        who = _subscriber(rng, day, i)
+        who = _subscriber(rng, day, i, generation)
         period_start = day
         period_end = _add_months(day, plan["months"]) - timedelta(days=1)
         # A renewal is not a first-time purchase, so it carries no money-back
         # right — which changes the accounting, not just the label.
         is_renewal = rng.random() < 0.22
-        own = _rng(day, f"refund|{who['subscription_id']}")
+        own = _rng(day, f"refund|{who['subscription_id']}", generation)
         out.append({
             "subscription_id": who["subscription_id"],
             "invoice_id": who["invoice_id"],
@@ -162,19 +192,20 @@ def subscriptions_for_day(day: datetime) -> list[dict]:
             "_refund_score": own.random(),
         })
 
-    # Mark the day's refunds by rank rather than by an independent coin flip per
-    # subscription: a flip at REFUND_RATE leaves a single-day import showing no
-    # refund roughly a third of the time, and the guarantee handling is one of
-    # the things being demonstrated. Ranking keeps the rate at REFUND_RATE while
-    # guaranteeing the path is exercised.
-    eligible = [x for x in out if x["guarantee_eligible"]]
-    n_refund = max(1, round(len(eligible) * REFUND_RATE)) if eligible else 0
-    for sub in sorted(eligible, key=lambda x: x["_refund_score"])[:n_refund]:
-        sub["will_be_refunded"] = True
+    # A plain per-subscriber chance at REFUND_RATE. This used to force at least
+    # one refund every day so a single-day import always showed the guarantee
+    # being exercised — which was safe only while a day billed ~30 times. On a
+    # growing feed that starts at a handful of signups a day, a forced refund is
+    # ~17% of billings against the 4% reserved, and the refund liability goes
+    # overdrawn. A sync now covers a week, so the guarantee path still shows up
+    # in every batch without having to be forced into every day.
+    for sub in out:
+        if sub["guarantee_eligible"] and sub["_refund_score"] < REFUND_RATE:
+            sub["will_be_refunded"] = True
     return out
 
 
-def refunds_for_day(day: datetime) -> list[dict]:
+def refunds_for_day(day: datetime, generation: int = 0) -> list[dict]:
     """Money-back-guarantee refunds processed on `day`.
 
     Reads the fate already recorded on each subscription, so a subscription is
@@ -182,7 +213,7 @@ def refunds_for_day(day: datetime) -> list[dict]:
     """
     out: list[dict] = []
     for back in range(2, GUARANTEE_DAYS):
-        for sub in subscriptions_for_day(day - timedelta(days=back)):
+        for sub in subscriptions_for_day(day - timedelta(days=back), generation):
             if not (sub["will_be_refunded"] and sub["_refund_after_days"] == back):
                 continue
             out.append({
@@ -202,7 +233,11 @@ def refunds_for_day(day: datetime) -> list[dict]:
     return out
 
 
-def fetch_window(cursor: Optional[str], today: Optional[datetime] = None) -> dict:
+def fetch_window(
+    cursor: Optional[str],
+    today: Optional[datetime] = None,
+    generation: int = 0,
+) -> dict:
     """Pull the next slice of Chargebee activity.
 
     `cursor` is the date already imported through ("YYYY-MM-DD"), or None for a
@@ -233,8 +268,8 @@ def fetch_window(cursor: Optional[str], today: Optional[datetime] = None) -> dic
     refunds: list[dict] = []
     day = start
     while day <= end:
-        subs.extend(subscriptions_for_day(day))
-        refunds.extend(refunds_for_day(day))
+        subs.extend(subscriptions_for_day(day, generation))
+        refunds.extend(refunds_for_day(day, generation))
         day += timedelta(days=1)
 
     return {
@@ -244,6 +279,69 @@ def fetch_window(cursor: Optional[str], today: Optional[datetime] = None) -> dic
         "window_start": start,
         "window_end": end,
         "exhausted": False,
+    }
+
+
+def catch_up_window(today: Optional[datetime] = None, generation: int = 1) -> dict:
+    """A fresh batch dated today, for a demo that has imported every past day.
+
+    A sales demo cannot be allowed to answer "nothing new" — that is the one
+    screen the story does not survive. Once the cursor reaches today there are
+    no unimported dates left, so a new `generation` of subscribers is minted for
+    today instead: different ids, so nothing dedups against what is already
+    imported, and dated today, so the activity reads as current.
+
+    Refunds here are same-day rather than drawn from the previous week: those
+    earlier days belong to generation 0 and were already imported, so refunding
+    them would credit a contract that this batch never billed. Same-day
+    buyer's remorse is both real and self-contained — the billing and the refund
+    land in one window, and the reserve is never released for a subscription
+    that is about to be refunded.
+    """
+    now = (today or datetime.utcnow()).replace(hour=0, minute=0, second=0, microsecond=0)
+    subs = subscriptions_for_day(now, generation)
+
+    # Guarantee at least one refund in a live batch. A batch is one day's
+    # signups — a dozen or so — and at a true 4% most of them would contain no
+    # refund at all, which hides the money-back handling that half this
+    # client's accounting exists to show.
+    #
+    # Safe to force, because a refund only ever reverses its own subscription's
+    # reserve: refund_jes debits that subscription's reserved slice and the rest
+    # against its own deferred balance. Nothing else is drawn, so a higher
+    # refund rate here cannot overdraw the liability. It is only unsafe when a
+    # reserve is released *and* refunded, and the release is skipped for any
+    # subscription already marked for refund.
+    eligible = [s for s in subs if s["guarantee_eligible"]]
+    if eligible and not any(s["will_be_refunded"] for s in eligible):
+        min(eligible, key=lambda s: s["_refund_score"])["will_be_refunded"] = True
+
+    refunds = [
+        {
+            "refund_id": f"cb_cn_{sub['subscription_id'][-10:]}",
+            "subscription_id": sub["subscription_id"],
+            "invoice_id": sub["invoice_id"],
+            "customer_name": sub["customer_name"],
+            "plan_code": sub["plan_code"],
+            "plan_label": sub["plan_label"],
+            "tier": sub["tier"],
+            "amount": sub["amount"],
+            "original_billing_date": sub["billing_date"],
+            "refund_date": now,
+            "reason": "Money-back guarantee (same day)",
+            "days_after_purchase": 0,
+        }
+        for sub in subs
+        if sub["will_be_refunded"]
+    ]
+    return {
+        "subscriptions": subs,
+        "refunds": refunds,
+        "cursor": now.strftime("%Y-%m-%d"),
+        "window_start": now,
+        "window_end": now,
+        "exhausted": False,
+        "generation": generation,
     }
 
 

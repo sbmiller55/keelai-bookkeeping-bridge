@@ -204,6 +204,7 @@ def _migrate_db():
         # Subscription-mode Revenue tab (added 2026-10)
         ("revenue_integration_settings", "subscription_mode", "BOOLEAN DEFAULT FALSE"),
         ("transactions",                 "revenue_contract_id", "INTEGER"),
+        ("revenue_integration_settings", "chargebee_generation", "INTEGER DEFAULT 0"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
         # Invoice/payment-matching columns (added 2026-05)

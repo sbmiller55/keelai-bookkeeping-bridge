@@ -214,10 +214,21 @@ def _build_schedule(
     return periods
 
 
-def _enrich_contract(contract: RevenueContract, db: Session) -> dict:
-    entries = db.query(RevenueScheduleEntry).filter(
-        RevenueScheduleEntry.contract_id == contract.id
-    ).order_by(RevenueScheduleEntry.period).all()
+def _enrich_contract(
+    contract: RevenueContract,
+    db: Session,
+    entries: Optional[list] = None,
+) -> dict:
+    """`entries` lets a caller pass this contract's schedule in.
+
+    Without it this queries once per contract, which is a query per row of the
+    contracts list — fine at a few dozen contracts, a thousand round trips at
+    six months of subscription history.
+    """
+    if entries is None:
+        entries = db.query(RevenueScheduleEntry).filter(
+            RevenueScheduleEntry.contract_id == contract.id
+        ).order_by(RevenueScheduleEntry.period).all()
     d = {
         "id": contract.id,
         "client_id": contract.client_id,
@@ -419,7 +430,16 @@ def list_contracts(
     if status:
         q = q.filter(RevenueContract.status == status)
     contracts = q.order_by(RevenueContract.billing_date.desc().nullslast()).all()
-    return [_enrich_contract(c, db) for c in contracts]
+    by_contract: dict[int, list] = {}
+    if contracts:
+        for entry in (
+            db.query(RevenueScheduleEntry)
+            .filter(RevenueScheduleEntry.contract_id.in_([c.id for c in contracts]))
+            .order_by(RevenueScheduleEntry.period)
+            .all()
+        ):
+            by_contract.setdefault(entry.contract_id, []).append(entry)
+    return [_enrich_contract(c, db, by_contract.get(c.id, [])) for c in contracts]
 
 
 @router.post("/contracts")
@@ -1498,10 +1518,16 @@ def sync_revenue_sources(
         try:
             import chargebee_sync
             chargebee_result = chargebee_sync.run_import(
-                client_id, db, getattr(settings, "chargebee_cursor", None)
+                client_id, db,
+                getattr(settings, "chargebee_cursor", None),
+                generation=getattr(settings, "chargebee_generation", 0) or 0,
             )
             if not chargebee_result.get("exhausted"):
                 settings.chargebee_cursor = chargebee_result["cursor"]
+                # Persisted together: the generation is what makes the next
+                # caught-up sync produce new subscribers instead of regenerating
+                # the batch that was just imported and dedupping to nothing.
+                settings.chargebee_generation = chargebee_result.get("generation", 0) or 0
         except Exception as exc:
             errors.append(f"Chargebee: {errors_mod.safe_detail(exc, 'import Chargebee activity')}")
 
@@ -1537,6 +1563,7 @@ def chargebee_setup(
     result = chargebee_sync.setup_demo(client_id, db)
     settings.chargebee_enabled = True
     settings.chargebee_cursor = result["cursor"]
+    settings.chargebee_generation = 0
     db.commit()
     return result
 

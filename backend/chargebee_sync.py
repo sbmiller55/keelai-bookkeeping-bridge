@@ -53,8 +53,11 @@ STREAM_SPECS = [
 ]
 
 # How far back the posted history runs, and where it stops relative to today.
-HISTORY_DAYS = 21
-RUNWAY_DAYS  = 30     # unimported days left for demos
+# Six months of posted history is what makes the client read as an established
+# business: deferred balances built up over half a year, recognition entries for
+# every closed month, and a growing revenue line in the forward grid.
+HISTORY_DAYS = 182
+RUNWAY_DAYS  = 7      # unimported days left before syncs switch to live batches
 
 
 def _last_day(year: int, month: int) -> datetime:
@@ -478,27 +481,46 @@ def setup_demo(client_id: int, db, today: Optional[datetime] = None) -> dict:
     result = _process_window(client_id, window, streams, db, posted=True, as_of=now)
     db.commit()
     result["cursor"] = history_end.strftime("%Y-%m-%d")
+    result["generation"] = 0
     result["posted_as"] = "exported (history — not in the review queue)"
+    result["history_start"] = history_start.strftime("%Y-%m-%d")
     return result
 
 
-def run_import(client_id: int, db, cursor: Optional[str], today: Optional[datetime] = None) -> dict:
-    """Pull the next slice and leave it pending for review."""
+def run_import(
+    client_id: int,
+    db,
+    cursor: Optional[str],
+    today: Optional[datetime] = None,
+    generation: int = 0,
+) -> dict:
+    """Pull the next slice and leave it pending for review.
+
+    A sync always brings something. While unimported days remain it walks
+    forward a week at a time; once it reaches today it mints a new generation of
+    subscribers dated today, because "no new activity" is not an acceptable
+    answer in front of a prospect. The returned `generation` must be persisted
+    alongside the cursor, or the next catch-up batch regenerates the same
+    subscribers and dedups to nothing.
+    """
     now = (today or datetime.utcnow()).replace(hour=0, minute=0, second=0, microsecond=0)
-    window = feed.fetch_window(cursor, today=now)
+    window = feed.fetch_window(cursor, today=now, generation=0)
+    next_generation = generation
+    live = False
     if window.get("exhausted"):
-        return {
-            "subscriptions": 0, "refunds": 0, "exhausted": True, "cursor": cursor,
-            "message": (
-                "No unimported Chargebee activity left. Rewind the demo cursor to "
-                "run through it again."
-            ),
-        }
+        next_generation = (generation or 0) + 1
+        window = feed.catch_up_window(today=now, generation=next_generation)
+        live = True
+
     streams = ensure_streams(client_id, db)
     result = _process_window(client_id, window, streams, db, posted=False, as_of=now)
     db.commit()
     result["cursor"] = window["cursor"]
     result["exhausted"] = False
+    result["generation"] = next_generation
+    # Tells the caller which of the two modes ran, so the UI can say "caught up
+    # — this is today's activity" rather than implying a historical backfill.
+    result["live_batch"] = live
     return result
 
 

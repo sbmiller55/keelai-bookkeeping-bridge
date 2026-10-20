@@ -1529,7 +1529,27 @@ export function updateRevenueIntegrationSettings(clientId: number, data: Partial
 }>): Promise<{ ok: boolean }> {
   return apiFetch(`/clients/${clientId}/revenue/integration-settings`, { method: "PUT", body: JSON.stringify(data) });
 }
-export function syncRevenueSources(clientId: number): Promise<{ imported: number; contracts: string[]; errors: string[] }> {
+export interface ChargebeeSyncResult {
+  subscriptions: number;
+  refunds: number;
+  gross_billings: number;
+  processor_fees: number;
+  refund_total: number;
+  net_payout: number;
+  reserve_releases: number;
+  recognition_jes: number;
+  window_start: string | null;
+  window_end: string | null;
+  // true when the sync has caught up with history and is bringing today's
+  // activity rather than backfilling an unimported date.
+  live_batch?: boolean;
+  generation?: number;
+}
+
+export function syncRevenueSources(clientId: number): Promise<{
+  imported: number; contracts: string[]; errors: string[];
+  chargebee?: ChargebeeSyncResult | null;
+}> {
   return apiFetch(`/clients/${clientId}/revenue/sync`, { method: "POST" });
 }
 export function bulkMatchContracts(clientId: number, streamId: number): Promise<{ updated: number }> {

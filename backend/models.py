@@ -367,6 +367,9 @@ class RevenueIntegrationSettings(Base):
     # forward recognition grid, and their own review queue. Off by default, so
     # every existing client keeps the schedule view it has today.
     subscription_mode = Column(Boolean, default=False, nullable=False)
+    # Bumped each time a sync runs past the end of the historical feed. Without
+    # it a caught-up demo regenerates the same subscribers and imports nothing.
+    chargebee_generation = Column(Integer, default=0, nullable=False)
     # How a subscription whose term is a single month is recognized when that
     # month straddles two calendar months. "full_month" books all of it in the
     # month the period starts; "daily_proration" splits it by days of service.

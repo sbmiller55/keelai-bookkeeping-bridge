@@ -141,7 +141,26 @@ export default function RevenuePage() {
     setMsg(null);
     try {
       const r = await syncRevenueSources(clientId);
-      setMsg(`Synced: ${r.imported} new contract${r.imported !== 1 ? "s" : ""} imported.${r.errors.length ? " Errors: " + r.errors.join("; ") : ""}`);
+      const errs = r.errors.length ? " Errors: " + r.errors.join("; ") : "";
+      // A subscription sync reports its own summary. Falling back to
+      // `imported` here said "0 new contracts" on a sync that had just brought
+      // in a dozen subscriptions, because that count only covers the
+      // invoice-based sources.
+      if (r.chargebee && r.chargebee.subscriptions > 0) {
+        const cb = r.chargebee;
+        const when = cb.live_batch
+          ? "today"
+          : cb.window_start === cb.window_end
+            ? cb.window_start
+            : `${cb.window_start} – ${cb.window_end}`;
+        setMsg(
+          `${cb.subscriptions} new subscription${cb.subscriptions !== 1 ? "s" : ""} ` +
+          `(${when}) — ${fmt(cb.gross_billings)} billed, ${cb.refunds} refund${cb.refunds !== 1 ? "s" : ""}, ` +
+          `${fmt(cb.net_payout)} paid out. In the Review queue.${errs}`,
+        );
+      } else {
+        setMsg(`Synced: ${r.imported} new contract${r.imported !== 1 ? "s" : ""} imported.${errs}`);
+      }
       load();
     } catch (e: unknown) {
       setMsg(e instanceof Error ? e.message : "Sync failed");
