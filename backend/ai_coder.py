@@ -277,7 +277,7 @@ def _norm_acct(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-def _validate_account(name: str, coa_names: Optional[list]) -> str:
+def _validate_account_raw(name: str, coa_names: Optional[list]) -> str:
     """Map an AI-produced account name to a real QBO account.
 
     Tries progressively looser (but still safe) matches so near-misses become the
@@ -333,6 +333,21 @@ def _validate_account(name: str, coa_names: Optional[list]) -> str:
         return by_norm[close[0]]
 
     return f"Uncoded [{name}]"
+
+
+
+def _validate_account(name: str, coa_names: Optional[list]) -> str:
+    """`_validate_account_raw`, then settle on one spelling for bank accounts.
+
+    The preference has to apply to the *resolved* name, not the one that came
+    in: "Mercury Treasury" matches the chart only through the fuzzy pass, which
+    returns the short "Mercury Treasury - 1" — so checking the input alone left
+    the cash account spelled two different ways depending on which pass matched.
+    """
+    resolved = _validate_account_raw(name, coa_names)
+    if not coa_names or resolved.startswith("Uncoded ["):
+        return resolved
+    return prefer_qualified_bank_names(resolved, coa_names) or resolved
 
 
 # (Parent-account blocklist removed — QBO permits journal entries posted to

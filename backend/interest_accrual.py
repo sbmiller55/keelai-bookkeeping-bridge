@@ -221,7 +221,16 @@ def is_treasury_fee(txn) -> bool:
         return False                      # closed period — leave it alone
     if (getattr(txn, "kind", "") or "").lower() in _FEE_EXCLUDED_KINDS:
         return False                      # cash sweep, not a fee
-    if "treasury" not in (txn.description or "").lower():
+    # Mercury names the Treasury account, not the fee. The description it sends
+    # is "Fee posted: Mercury Fee" — the word "treasury" appears only in the
+    # account the charge was taken from, so requiring it in the description
+    # missed every fee and left them to be coded as Banking & Finance Fees.
+    where = " ".join((
+        txn.description or "",
+        getattr(txn, "mercury_account_name", "") or "",
+        getattr(txn, "counterparty_name", "") or "",
+    )).lower()
+    if "treasury" not in where:
         return False
     haystacks = (
         txn.description or "",
