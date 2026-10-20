@@ -178,6 +178,19 @@ def apply_rule_jes(
     if debit == "Uncoded" or credit == "Uncoded":
         return []
 
+    # Same for an account the chart has never heard of. "$category" expands to
+    # the bank feed's own category — "Payroll", "Other Software Subscriptions" —
+    # and those are Mercury's words, not QuickBooks account names. A rule that
+    # fires with one produces an entry that cannot be approved and is queued for
+    # recoding for ever, where recoding reproduces it. Standing aside hands the
+    # transaction to the AI, which picks from the live chart.
+    if chart:
+        known = {n.lower() for n in (ai_coder._parse_coa_names(chart) or [])}
+        if known:
+            allowed = known | {a.lower() for a in ai_coder._ALWAYS_VALID_ACCOUNTS}
+            if debit.lower() not in allowed or credit.lower() not in allowed:
+                return []
+
     # Default: simple expense JE
     return [{
         "debit_account": debit,
