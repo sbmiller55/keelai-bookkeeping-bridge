@@ -34,6 +34,12 @@ function monthKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function shiftMonth(key: string, delta: number): string {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return monthKey(d);
+}
+
 function monthLabel(key: string): string {
   const [y, m] = key.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-US", { month: "short", year: "numeric" });
@@ -90,13 +96,16 @@ export default function RevenuePage() {
   const [genMonth, setGenMonth] = useState("");
   const [approving, setApproving] = useState(false);
   const [exportingGrid, setExportingGrid] = useState(false);
+  // First month of the recognition window. null lets the backend pick its
+  // default (six months back), so the page doesn't have to duplicate that rule.
+  const [gridStart, setGridStart] = useState<string | null>(null);
 
   useEffect(() => {
     setCurrentPage("revenue");
     return () => setPageContext(null);
   }, [setCurrentPage, setPageContext]);
 
-  useEffect(() => { load(); }, [clientId]);
+  useEffect(() => { load(); }, [clientId, gridStart]);
 
   async function load() {
     setLoading(true);
@@ -113,7 +122,7 @@ export default function RevenuePage() {
       setContracts(c);
       if (int_?.subscription_mode) {
         const [g, q] = await Promise.all([
-          getRecognitionGrid(clientId),
+          getRecognitionGrid(clientId, 12, gridStart ?? undefined),
           getRevenueReviewQueue(clientId),
         ]);
         setGrid(g);
@@ -246,7 +255,7 @@ export default function RevenuePage() {
   async function handleExportGrid() {
     setExportingGrid(true);
     try {
-      const blob = await exportRecognitionGrid(clientId);
+      const blob = await exportRecognitionGrid(clientId, 12, gridStart ?? undefined);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -462,6 +471,11 @@ export default function RevenuePage() {
       {tab === "recognition" && (
         <RecognitionTab
           grid={grid}
+          onShiftWindow={(delta) => {
+            if (!grid) return;
+            setGridStart(shiftMonth(grid.periods[0], delta));
+          }}
+          onResetWindow={() => setGridStart(null)}
           genMonth={genMonth}
           setGenMonth={setGenMonth}
           generating={generatingMonth}
@@ -626,8 +640,11 @@ function ContractsTab({ contracts, streamMap, expanded, setExpanded }: {
 // months that have started and have nothing booked yet, so it is impossible to
 // generate a future month's revenue from here.
 
-function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, onExport, exporting }: {
+function RecognitionTab({ grid, onShiftWindow, onResetWindow, genMonth, setGenMonth,
+                         generating, onGenerate, onExport, exporting }: {
   grid: RecognitionGrid | null;
+  onShiftWindow: (delta: number) => void;
+  onResetWindow: () => void;
   genMonth: string;
   setGenMonth: (m: string) => void;
   generating: string | null;
@@ -647,10 +664,37 @@ function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, o
     <div>
       <div className="mb-4 flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h2 className="text-base font-semibold text-white">Next 12 months</h2>
-          <p className="text-xs text-gray-500 mt-0.5">
-            What each subscription will recognize, month by month. A dash means the month falls
-            outside that contract&apos;s term.
+          <div className="flex items-center gap-2">
+            {/* Six-month steps, so a move still overlaps what was on screen. */}
+            <button
+              onClick={() => onShiftWindow(-6)}
+              title="Earlier months"
+              className="px-2 py-1 bg-gray-800 border border-gray-700 hover:bg-gray-700 text-gray-300 text-sm rounded-lg transition-colors"
+            >
+              ←
+            </button>
+            <h2 className="text-base font-semibold text-white whitespace-nowrap">
+              {monthLabel(grid.periods[0])} – {monthLabel(grid.periods[grid.periods.length - 1])}
+            </h2>
+            <button
+              onClick={() => onShiftWindow(6)}
+              title="Later months"
+              className="px-2 py-1 bg-gray-800 border border-gray-700 hover:bg-gray-700 text-gray-300 text-sm rounded-lg transition-colors"
+            >
+              →
+            </button>
+            {!grid.periods.includes(grid.current_month) && (
+              <button
+                onClick={onResetWindow}
+                className="ml-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+              >
+                Back to today
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-1">
+            Recognized revenue by month — past months as booked, future months as scheduled.
+            A dash means the month falls outside that contract&apos;s term.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -691,7 +735,10 @@ function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, o
 
       {grid.rows.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
-          <p className="text-sm text-gray-400">No revenue scheduled in the next 12 months.</p>
+          <p className="text-sm text-gray-400">
+            No revenue recognized or scheduled between {monthLabel(grid.periods[0])} and{" "}
+            {monthLabel(grid.periods[grid.periods.length - 1])}.
+          </p>
         </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -702,8 +749,13 @@ function RecognitionTab({ grid, genMonth, setGenMonth, generating, onGenerate, o
                   <th className="text-left font-medium px-4 py-3 sticky left-0 bg-gray-950/95">Customer</th>
                   <th className="text-left font-medium px-4 py-3">Plan</th>
                   {grid.periods.map((p) => (
-                    <th key={p} className="text-right font-medium px-3 py-3 whitespace-nowrap">
+                    <th key={p} className={`text-right font-medium px-3 py-3 whitespace-nowrap ${
+                      p === grid.current_month ? "text-indigo-300" : ""
+                    }`}>
                       {monthLabel(p)}
+                      {p === grid.current_month && (
+                        <span className="block text-[10px] font-normal text-indigo-400">this month</span>
+                      )}
                     </th>
                   ))}
                   <th className="text-right font-medium px-4 py-3">Total</th>

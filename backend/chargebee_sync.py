@@ -57,7 +57,12 @@ STREAM_SPECS = [
 # business: deferred balances built up over half a year, recognition entries for
 # every closed month, and a growing revenue line in the forward grid.
 HISTORY_DAYS = 182
-RUNWAY_DAYS  = 7      # unimported days left before syncs switch to live batches
+# History runs right up to yesterday. The gap used to be a week so that a demo
+# had unimported days to walk through, which also meant the current month
+# opened missing its last week of monthly subscriptions and read as a slump
+# against the month before. Live batches removed the need for a runway: a sync
+# past the end of history mints today's activity instead of reporting nothing.
+RUNWAY_DAYS  = 1
 
 
 def _last_day(year: int, month: int) -> datetime:

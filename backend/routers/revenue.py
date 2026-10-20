@@ -885,14 +885,25 @@ def generate_period_jes(
 # These three endpoints back the subscription Revenue tab. They are readable by
 # any client, but the UI only shows them when subscription_mode is on.
 
-def _forward_periods(count: int, start: Optional[datetime] = None) -> list[str]:
-    """`count` calendar months as "YYYY-MM", starting with the current month."""
-    base = (start or datetime.utcnow()).replace(day=1)
-    out = []
-    for i in range(count):
-        d = _add_months(base, i)
-        out.append(d.strftime("%Y-%m"))
-    return out
+# How many months of history the grid opens on, so the ramp that led to the
+# current book is on screen without having to page back for it.
+GRID_DEFAULT_LOOKBACK = 6
+
+
+def _grid_periods(count: int, start_month: Optional[str] = None) -> list[str]:
+    """`count` calendar months as "YYYY-MM" beginning at `start_month`.
+
+    Defaults to GRID_DEFAULT_LOOKBACK months back, so the window spans the
+    history that produced today's deferred balance as well as what is still to
+    come. A purely forward window could not show a monthly subscription at all:
+    a one-month plan's only schedule entry sits in the month it was billed, so
+    every monthly sub from a past month was missing from the grid entirely.
+    """
+    if start_month:
+        base = datetime.strptime(start_month, "%Y-%m")
+    else:
+        base = _add_months(datetime.utcnow().replace(day=1), -GRID_DEFAULT_LOOKBACK)
+    return [_add_months(base, i).strftime("%Y-%m") for i in range(count)]
 
 
 def _open_recognition_periods(client_id: int, db: Session) -> list[dict]:
@@ -923,13 +934,19 @@ def _open_recognition_periods(client_id: int, db: Session) -> list[dict]:
     return sorted(totals.values(), key=lambda r: r["period"])
 
 
-def _grid_data(client_id: int, months: int, db: Session) -> dict:
-    periods = _forward_periods(months)
+def _grid_data(
+    client_id: int, months: int, db: Session, start_month: Optional[str] = None
+) -> dict:
+    periods = _grid_periods(months, start_month)
+    # Every status, not just the live ones. A fully-recognized monthly sub is
+    # exactly what a past month consists of, and a cancelled contract that
+    # recognized revenue before it was refunded still belongs to the month it
+    # earned in — filtering either one out made historical columns understate
+    # what was actually recognized.
     contracts = (
         db.query(RevenueContract)
         .filter(
             RevenueContract.client_id == client_id,
-            RevenueContract.status != RevenueContractStatus.cancelled,
             RevenueContract.revenue_stream_id.isnot(None),
         )
         .order_by(RevenueContract.customer_name)
@@ -977,6 +994,7 @@ def _grid_data(client_id: int, months: int, db: Session) -> dict:
         "totals": totals,
         "grand_total": round(sum(totals), 2),
         "open_periods": _open_recognition_periods(client_id, db),
+        "current_month": _current_month(),
     }
 
 
@@ -984,19 +1002,26 @@ def _grid_data(client_id: int, months: int, db: Session) -> dict:
 def recognition_grid(
     client_id: int,
     months: int = 12,
+    start: Optional[str] = None,     # "YYYY-MM" — defaults to 6 months back
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Forward-looking recognition: one row per contract, one column per month."""
+    """Recognition by month: one row per contract, one column per month."""
     _get_client(client_id, current_user, db)
     months = max(1, min(months, 36))
-    return _grid_data(client_id, months, db)
+    if start:
+        try:
+            datetime.strptime(start, "%Y-%m")
+        except ValueError:
+            raise HTTPException(400, "start must be in YYYY-MM format")
+    return _grid_data(client_id, months, db, start)
 
 
 @router.get("/recognition-grid.xlsx")
 def export_recognition_grid(
     client_id: int,
     months: int = 12,
+    start: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1005,7 +1030,12 @@ def export_recognition_grid(
     from openpyxl.styles import Alignment, Font, PatternFill
 
     _get_client(client_id, current_user, db)
-    data = _grid_data(client_id, max(1, min(months, 36)), db)
+    if start:
+        try:
+            datetime.strptime(start, "%Y-%m")
+        except ValueError:
+            raise HTTPException(400, "start must be in YYYY-MM format")
+    data = _grid_data(client_id, max(1, min(months, 36)), db, start)
     periods = data["periods"]
 
     wb = Workbook()

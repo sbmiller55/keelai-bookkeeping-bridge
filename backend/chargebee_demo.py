@@ -22,6 +22,7 @@ $9.95/mo or $36/yr, Plus $16.65/mo or $60/yr, refund within 7 days of purchase).
 Emails use example.com, which is reserved and cannot route anywhere real.
 """
 import hashlib
+import math
 import random
 from datetime import datetime, timedelta
 from typing import Optional
@@ -58,7 +59,11 @@ _PLAN_WEIGHTS = [
 # day would grow a longer subscriber list tomorrow, and those extra rows would
 # import as brand-new contracts.
 SUBS_EPOCH          = datetime(2026, 1, 1)
-SUBS_PER_DAY_BASE   = 3          # daily signups at the epoch
+# Daily *new* signups at the epoch. Deliberately small: once monthly plans
+# recur, most of a day's billings are renewals off the retained base, and the
+# month totals compound without needing a large signup number. Raising this
+# multiplies the whole contract count by roughly the mean subscriber life.
+SUBS_PER_DAY_BASE   = 1.5
 SUBS_GROWTH_MONTHLY = 0.15       # compounding, so ~2x every five months
 SUBS_PER_DAY_CAP    = 40         # keeps a far-future demo readable
 
@@ -67,20 +72,44 @@ HISTORY_DAYS        = 182        # six months of posted backfill
 
 GUARANTEE_DAYS      = 7      # SuperSummary's published money-back window
 
+# Monthly plans recur. Each monthly subscriber keeps billing on the same day of
+# the month until they churn, which is what makes revenue compound: a month's
+# total is last month's retained base plus that month's new signups, not just
+# the new signups. Without it every "subscriber" was a different person who
+# bought once and vanished, and monthly revenue could only ever track signups.
+#
+# 0.85 a month is ordinary for a consumer subscription at this price, and gives
+# a mean life of roughly seven months.
+MONTHLY_RETENTION   = 0.85
+MAX_RENEWAL_MONTHS  = 24     # bounds the lookback when a day's renewals are built
+
 # Chargebee's processing cut, applied to gross billings to produce the fee entry.
 PROCESSOR_RATE      = 0.029
 PROCESSOR_FIXED     = 0.30
 
+# The pools have to be large enough that two subscribers almost never share a
+# display name. They used to multiply out to 520 combinations against ~800
+# subscribers, so collisions were the norm — and once monthly plans recur, a
+# collision reads as one customer being billed four times in a month on
+# different days at different prices, which is exactly the thing a prospect
+# would query. A middle initial takes the space to ~45,000.
 _FIRST_NAMES = [
     "Ava", "Noah", "Maya", "Elijah", "Sofia", "Liam", "Isabel", "Mateo", "Chloe",
     "Owen", "Priya", "Jonah", "Leila", "Caleb", "Nora", "Idris", "Hana", "Felix",
     "Rosa", "Theo", "Amara", "Dmitri", "Keiko", "Omar", "Sadie", "Emeka",
+    "Lena", "Arjun", "Mira", "Tobias", "Yuki", "Santiago", "Freya", "Hassan",
+    "Iris", "Mateusz", "Zara", "Ezra", "Nadia", "Cormac", "Ingrid", "Rafael",
+    "Simone", "Bastien", "Anika", "Lucas", "Greta", "Kofi", "Elena", "Niko",
 ]
 _LAST_NAMES = [
     "Whitfield", "Okafor", "Lindqvist", "Marchetti", "Delgado", "Novak", "Abiodun",
     "Castellanos", "Thornbury", "Varga", "Nakamura", "Oyelaran", "Fairbanks",
     "Petrosyan", "Kowalski", "Mbeki", "Sandoval", "Ellsworth", "Haddad", "Quintero",
+    "Brennan", "Sorensen", "Achebe", "Yamamoto", "Moreau", "Bergstrom", "Ferraro",
+    "Donnelly", "Vasquez", "Kaminski", "Oduya", "Rinaldi", "Halvorsen", "Boateng",
+    "Szabo", "Lindgren", "Cavanagh", "Mahfouz", "Takahashi", "Olsen",
 ]
+_MIDDLE_INITIALS = list("ABCDEFGHJKLMNPRSTVW")
 
 
 def subs_per_day(day: datetime) -> int:
@@ -124,10 +153,11 @@ def _pick_plan(rng: random.Random) -> str:
 def _subscriber(rng: random.Random, day: datetime, index: int, generation: int = 0) -> dict:
     first = rng.choice(_FIRST_NAMES)
     last = rng.choice(_LAST_NAMES)
+    middle = rng.choice(_MIDDLE_INITIALS)
     gen = f"|g{generation}" if generation else ""
     digest = hashlib.sha256(f"{day:%Y-%m-%d}|{index}{gen}".encode()).hexdigest()[:10]
     return {
-        "name": f"{first} {last}",
+        "name": f"{first} {middle}. {last}",
         "email": f"{first.lower()}.{last.lower()}{digest[:3]}@example.com",
         "subscription_id": f"cb_sub_{digest}",
         "invoice_id": f"cb_inv_{digest}",
@@ -149,8 +179,65 @@ def _add_months(d: datetime, n: int) -> datetime:
 REFUND_RATE = 0.04
 
 
+def _monthly_lifetime(subscription_id: str, generation: int = 0) -> int:
+    """How many times a monthly subscriber renews before churning.
+
+    Drawn once per subscriber rather than flipped each month, so a subscriber's
+    run of invoices is decided at signup and never changes — the same calendar
+    day always produces the same billings however often it is regenerated.
+    """
+    rng = _rng(SUBS_EPOCH, f"life|{subscription_id}", generation)
+    u = max(1e-9, rng.random())
+    return min(MAX_RENEWAL_MONTHS, int(math.log(u) / math.log(MONTHLY_RETENTION)))
+
+
+def _renewals_for_day(day: datetime, generation: int = 0) -> list[dict]:
+    """Monthly subscribers from earlier months billing again on `day`.
+
+    Built from *new signups* only, never from renewals, which is what keeps this
+    from recursing: a renewal is always derived from the original purchase.
+    """
+    out: list[dict] = []
+    for k in range(1, MAX_RENEWAL_MONTHS + 1):
+        origin = _add_months(day, -k)
+        # _add_months clamps, so 31 Jan - 1 month is 28 Feb and adding the month
+        # back does not return to 31 Jan. Skipping those keeps a subscriber from
+        # being billed twice in one month.
+        if _add_months(origin, k) != day:
+            continue
+        for sub in _new_signups_for_day(origin, generation):
+            if sub["term_months"] != 1:
+                continue          # an annual term renews after a year, not a month
+            if k > _monthly_lifetime(sub["subscription_id"], generation):
+                continue          # churned before this renewal
+            digest = hashlib.sha256(
+                f"{sub['subscription_id']}|renew{k}".encode()
+            ).hexdigest()[:10]
+            out.append({
+                **sub,
+                "invoice_id": f"cb_inv_{digest}",
+                "billing_date": day,
+                "period_start": day,
+                "period_end": _add_months(day, 1) - timedelta(days=1),
+                # A renewal is not a first-time purchase, so it carries no
+                # money-back right — which changes the accounting, not just the
+                # label: no refund reserve is taken and none is released.
+                "is_renewal": True,
+                "guarantee_eligible": False,
+                "guarantee_expires": None,
+                "will_be_refunded": False,
+                "renewal_number": k,
+            })
+    return out
+
+
 def subscriptions_for_day(day: datetime, generation: int = 0) -> list[dict]:
-    """Every new or renewed subscription billed on `day`.
+    """Everything billed on `day`: new signups plus monthly renewals."""
+    return _new_signups_for_day(day, generation) + _renewals_for_day(day, generation)
+
+
+def _new_signups_for_day(day: datetime, generation: int = 0) -> list[dict]:
+    """First-time purchases billed on `day`.
 
     Each subscription carries its own refund fate (`will_be_refunded` and
     `_refund_after_days`). That matters beyond tidiness: the accounting has to
@@ -166,9 +253,9 @@ def subscriptions_for_day(day: datetime, generation: int = 0) -> list[dict]:
         who = _subscriber(rng, day, i, generation)
         period_start = day
         period_end = _add_months(day, plan["months"]) - timedelta(days=1)
-        # A renewal is not a first-time purchase, so it carries no money-back
-        # right — which changes the accounting, not just the label.
-        is_renewal = rng.random() < 0.22
+        # Always a first-time purchase: recurrence is modelled by
+        # _renewals_for_day, not by flagging a share of new rows as renewals.
+        is_renewal = False
         own = _rng(day, f"refund|{who['subscription_id']}", generation)
         out.append({
             "subscription_id": who["subscription_id"],
@@ -213,7 +300,7 @@ def refunds_for_day(day: datetime, generation: int = 0) -> list[dict]:
     """
     out: list[dict] = []
     for back in range(2, GUARANTEE_DAYS):
-        for sub in subscriptions_for_day(day - timedelta(days=back), generation):
+        for sub in _new_signups_for_day(day - timedelta(days=back), generation):
             if not (sub["will_be_refunded"] and sub["_refund_after_days"] == back):
                 continue
             out.append({

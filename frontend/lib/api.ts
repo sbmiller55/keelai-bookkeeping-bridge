@@ -1592,15 +1592,22 @@ export interface RecognitionGrid {
   totals: number[];
   grand_total: number;
   open_periods: RecognitionOpenPeriod[];
+  current_month: string;
 }
 
-export function getRecognitionGrid(clientId: number, months = 12): Promise<RecognitionGrid> {
-  return apiFetch(`/clients/${clientId}/revenue/recognition-grid?months=${months}`);
+// `start` is the first month of the window ("YYYY-MM"); omitted, the backend
+// opens six months back so the history behind today's balance is on screen.
+export function getRecognitionGrid(
+  clientId: number, months = 12, start?: string,
+): Promise<RecognitionGrid> {
+  const qs = start ? `&start=${start}` : "";
+  return apiFetch(`/clients/${clientId}/revenue/recognition-grid?months=${months}${qs}`);
 }
 
-export function exportRecognitionGrid(clientId: number, months = 12): Promise<Blob> {
+export function exportRecognitionGrid(clientId: number, months = 12, start?: string): Promise<Blob> {
   const token = getToken();
-  return fetch(`${BASE_URL}/clients/${clientId}/revenue/recognition-grid.xlsx?months=${months}`, {
+  const qs = start ? `&start=${start}` : "";
+  return fetch(`${BASE_URL}/clients/${clientId}/revenue/recognition-grid.xlsx?months=${months}${qs}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   }).then(async (r) => {
     if (!r.ok) throw new Error("Export failed");
