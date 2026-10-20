@@ -164,6 +164,22 @@ def _apply_coa(data: dict, coa: dict[str, str]) -> list[str]:
         if isinstance(je, dict):
             fix(je, "debit_account")
             fix(je, "credit_account")
+
+    # A cash parent passes the check above — it is a real account — but posts
+    # to the roll-up instead of the account the money moved through. Rewrite it
+    # to the sub-account after names are canonical, so the comparison is
+    # against QBO's exact spelling.
+    chart_text = "\n".join(coa.values()) if coa else None
+    if chart_text:
+        from ai_coder import remap_cash_parent
+
+        for key in _ACCOUNT_KEYS:
+            if key in data:
+                data[key] = remap_cash_parent(data.get(key), chart_text)
+        for je in data.get("journal_entries") or []:
+            if isinstance(je, dict):
+                for key in ("debit_account", "credit_account"):
+                    je[key] = remap_cash_parent(je.get(key), chart_text)
     return sorted(set(unresolved))
 
 

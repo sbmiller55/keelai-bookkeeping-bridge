@@ -123,6 +123,50 @@ def _parse_coa_set(chart: Optional[str]) -> Optional[set]:
     return {line.strip().lower() for line in chart.splitlines() if line.strip()}
 
 
+def _primary_bank_account(names: list) -> Optional[str]:
+    """The account a payment should credit when nothing more specific is known.
+
+    Prefers a checking account, and the fully-qualified "Parent:Child" spelling
+    when the chart carries both — that is the form these books post to.
+    """
+    if not names:
+        return None
+    checking = [n for n in names if "checking" in n.lower()]
+    pool = checking or names
+    qualified = [n for n in pool if ":" in n]
+    return sorted(qualified or pool, key=len)[0]
+
+
+_BANK_WORDS = ("checking", "savings", "treasury", "money market", "bank")
+
+
+def remap_cash_parent_names(name: Optional[str], names: Optional[list]) -> Optional[str]:
+    """remap_cash_parent against an already-parsed list of account names."""
+    if not name or not names:
+        return name
+    children = [n for n in names if n.lower().startswith(name.lower() + ":")]
+    if not children:
+        return name
+    if not any(any(w in c.lower() for w in _BANK_WORDS) for c in children):
+        return name
+    return _primary_bank_account(children) or name
+
+
+def remap_cash_parent(name: Optional[str], chart: Optional[str]) -> Optional[str]:
+    """Rewrite a cash *parent* account to the sub-account money moves through.
+
+    "Cash" is a real line in a QBO chart, so a model that picks it passes
+    validation and the entry books to the balance-sheet roll-up rather than the
+    account the payment actually left. Two invoice payments landed there.
+
+    Deliberately narrow: it only fires when the name has children *and* those
+    children look like bank accounts. Plenty of parents are legitimately
+    postable — QBO allows journal entries against them — so remapping every
+    parent would quietly move expense coding around.
+    """
+    return remap_cash_parent_names(name, _parse_coa_names(chart) or [])
+
+
 def resolve_bank_account(raw: Optional[str], chart: Optional[str]) -> str:
     """Map a bank feed's account label onto a real QBO account name.
 
@@ -138,12 +182,22 @@ def resolve_bank_account(raw: Optional[str], chart: Optional[str]) -> str:
     account under both names. Falls back to the raw label so a client whose
     chart has no match behaves exactly as before.
     """
-    if not raw:
-        return "Mercury Checking"
     names = _parse_coa_names(chart) or []
+    if not raw:
+        return _primary_bank_account(names) or "Mercury Checking"
     if not names:
         return raw
     lower = {n.lower(): n for n in names}
+
+    # Never post to a parent. "Cash" is a real line in the chart and passes
+    # validation, so an invoice coded against it books to the balance-sheet
+    # roll-up instead of the account the money actually left — which is how
+    # two payments landed on bare "Cash". A name with children underneath it
+    # is a parent, whatever it is called.
+    children = [n for n in names if n.lower().startswith(raw.lower() + ":")]
+    if children:
+        return _primary_bank_account(children) or sorted(children, key=len)[0]
+
     if raw.lower() in lower:
         return lower[raw.lower()]
 
@@ -169,6 +223,13 @@ def resolve_bank_account(raw: Optional[str], chart: Optional[str]) -> str:
         if near:
             qualified = [n for n in near if ":" in n]
             return (qualified or near)[0]
+        # QBO suffixes these accounts ("Mercury Credit" is "Mercury Credit - 1"
+        # in the chart), so the feed's name is a prefix of the real one. Safe
+        # here because this only ever runs on the bank side of an entry.
+        prefixed = [n for n in names if core(n).startswith(raw_core)]
+        if prefixed:
+            qualified = [n for n in prefixed if ":" in n]
+            return sorted(qualified or prefixed, key=len)[0]
     return raw
 
 
@@ -209,6 +270,13 @@ def _validate_account(name: str, coa_names: Optional[list]) -> str:
         return name
     if name in _ALWAYS_VALID_ACCOUNTS:
         return name
+
+    # A cash parent is a real account and would match exactly below, so it has
+    # to be intercepted before the lookups: posting there books to the
+    # balance-sheet roll-up rather than the account the money moved through.
+    remapped = remap_cash_parent_names(name, coa_names)
+    if remapped != name:
+        return remapped
 
     by_lower = {c.lower(): c for c in coa_names}
     if name.lower() in by_lower:

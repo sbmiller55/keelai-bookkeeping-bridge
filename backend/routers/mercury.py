@@ -906,7 +906,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
                 txn.status = models.TransactionStatus.rejected
                 rule_coded_ids.add(txn.id)
                 continue
-            je_data_list = rules_engine.apply_rule_jes(matched, txn)
+            je_data_list = rules_engine.apply_rule_jes(matched, txn, chart=coa)
             if not je_data_list:
                 # Rule couldn't resolve all placeholders; fall through to AI
                 continue
@@ -1584,7 +1584,7 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
                 txn.status = models.TransactionStatus.rejected
                 rule_coded_ids.add(txn.id)
                 continue
-            je_data_list = rules_engine.apply_rule_jes(matched_rule, txn)
+            je_data_list = rules_engine.apply_rule_jes(matched_rule, txn, chart=_chart)
             if not je_data_list:
                 continue
             for jd in je_data_list:

@@ -89,15 +89,27 @@ def match_rule(txn: models.Transaction, rules: list[models.Rule]) -> Optional[mo
     return matches[0]
 
 
-def apply_rule_jes(rule: models.Rule, txn: models.Transaction) -> list[dict]:
+def apply_rule_jes(
+    rule: models.Rule,
+    txn: models.Transaction,
+    chart: Optional[str] = None,
+) -> list[dict]:
     """
     Build journal entry dicts for a transaction matched by a rule.
     Dispatches to generate_prepaid_jes / generate_asset_jes based on rule_action.
+
+    `chart` resolves the "$source_account" placeholder onto a real QBO account.
+    Without it the placeholder expands to the bank feed's display label —
+    "Mercury Checking \u2022\u20229882" — which matches no account, so the entry
+    cannot be approved and is flagged for recoding for ever.
     """
     action = rule.rule_action or "expense"
     amount = abs(txn.amount)
     reasoning = f"Matched rule: {rule.match_type}={rule.match_value!r}"
-    source_account = txn.mercury_account_name or "Uncoded"
+    source_account = (
+        ai_coder.resolve_bank_account(txn.mercury_account_name, chart)
+        if chart else (txn.mercury_account_name or "Uncoded")
+    )
 
     def _res(val: str) -> str:
         if val == "$category":
@@ -156,7 +168,7 @@ def apply_rule_jes(rule: models.Rule, txn: models.Transaction) -> list[dict]:
         if val == "$category":
             return txn.mercury_category or "Uncoded"
         if val == "$source_account":
-            return txn.mercury_account_name or "Uncoded"
+            return source_account
         return val
 
     debit = _resolve(rule.debit_account)

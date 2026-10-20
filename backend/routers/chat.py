@@ -553,6 +553,15 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
             ).all()
 
             applied = 0
+            try:
+                import ai_coder as _ai_mod
+                _rule_client = db.query(models.Client).filter(
+                    models.Client.id == rule.client_id
+                ).first()
+                _rule_chart = _ai_mod._resolve_chart(_rule_client) if _rule_client else None
+            except Exception:
+                _rule_chart = None
+
             for txn in pending:
                 if not _re.match_rule(txn, [rule]):
                     continue
@@ -564,7 +573,7 @@ def _execute_tool(tool_name: str, tool_input: dict, db: Session, client_id: int)
                 else:
                     for je in list(txn.journal_entries):
                         db.delete(je)
-                    for jd in _re.apply_rule_jes(rule, txn):
+                    for jd in _re.apply_rule_jes(rule, txn, chart=_rule_chart):
                         db.add(models.JournalEntry(
                             je_number=models.next_je_number(db),
                             transaction_id=txn.id,

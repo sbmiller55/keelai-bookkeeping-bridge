@@ -527,6 +527,16 @@ def sync_to_qbo(
         if mark_exported and all(j.qbo_je_id for j in jes):
             tx.status = TransactionStatus.exported
 
+        # Commit per transaction, not once at the end. Each iteration has
+        # already pushed real journal entries into QuickBooks, and a batch of
+        # seventy runs for minutes — long enough to meet an edge timeout, a
+        # deploy restart or a dropped connection. With a single commit at the
+        # end, any of those loses every qbo_je_id for work Intuit has already
+        # accepted, and the obvious next move — press export again — posts the
+        # whole batch a second time. Committing as it goes makes a retry resume
+        # from where it stopped instead of duplicating.
+        db.commit()
+
     db.commit()
     _persist_token_refresh(client, qbo_c, db)
 

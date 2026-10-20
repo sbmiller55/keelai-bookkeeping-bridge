@@ -182,12 +182,21 @@ def apply_rule(
         .all()
     )
 
+    # One chart lookup for the whole pass, so "$source_account" expands to a
+    # real QBO account rather than the bank feed's display label.
+    try:
+        import ai_coder as _ai
+        _client = db.query(models.Client).filter(models.Client.id == rule.client_id).first()
+        _chart = _ai._resolve_chart(_client) if _client else None
+    except Exception:
+        _chart = None
+
     applied = 0
     for txn in pending:
         if txn.id in already_coded_ids:
             continue
         if rules_engine.match_rule(txn, [rule]):
-            for jd in rules_engine.apply_rule_jes(rule, txn):
+            for jd in rules_engine.apply_rule_jes(rule, txn, chart=_chart):
                 db.add(models.JournalEntry(
                     je_number=models.next_je_number(db),
                     transaction_id=txn.id,
