@@ -123,6 +123,55 @@ def _parse_coa_set(chart: Optional[str]) -> Optional[set]:
     return {line.strip().lower() for line in chart.splitlines() if line.strip()}
 
 
+def resolve_bank_account(raw: Optional[str], chart: Optional[str]) -> str:
+    """Map a bank feed's account label onto a real QBO account name.
+
+    Mercury labels an account "Mercury Checking \u2022\u20229882"; the matching
+    QBO account is "Cash:Mercury Checking (9882) - 1". Posting the feed's label
+    verbatim produced journal entries referencing an account that does not
+    exist, which blocked approval *and* left the transaction permanently
+    flagged for recoding — recoding reproduced the same name, so it never
+    cleared.
+
+    Matching is on the account's last four digits, which both sides carry, and
+    prefers the fully-qualified "Parent:Child" form when a chart holds the
+    account under both names. Falls back to the raw label so a client whose
+    chart has no match behaves exactly as before.
+    """
+    if not raw:
+        return "Mercury Checking"
+    names = _parse_coa_names(chart) or []
+    if not names:
+        return raw
+    lower = {n.lower(): n for n in names}
+    if raw.lower() in lower:
+        return lower[raw.lower()]
+
+    digits = re.findall(r"\d{4}", raw)
+    if digits:
+        last4 = digits[-1]
+        matches = [n for n in names if last4 in n]
+        if matches:
+            # Parent:Child first — a bank account filed under "Cash:" is the
+            # posting account; the bare name is usually the same account's
+            # short form, and some charts only accept the qualified one.
+            qualified = [n for n in matches if ":" in n]
+            return sorted(qualified or matches, key=len)[0]
+
+    # No digits to match on: compare the alphanumeric core, which drops the
+    # bullets and punctuation the two systems render differently.
+    def core(s: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    raw_core = core(raw)
+    if raw_core:
+        near = [n for n in names if core(n) == raw_core]
+        if near:
+            qualified = [n for n in near if ":" in n]
+            return (qualified or near)[0]
+    return raw
+
+
 def _parse_coa_names(chart: Optional[str]) -> Optional[list]:
     """Return the canonical (original-cased) account names from chart text."""
     if not chart:
@@ -553,7 +602,7 @@ def code_outgoing_payment_with_invoice(transaction, invoice_text: str, client_ob
     payment_date = transaction.date.strftime("%Y-%m-%d") if transaction.date else "unknown"
     amount = abs(transaction.amount)
     counterparty = transaction.counterparty_name or transaction.description or ""
-    bank_account = transaction.mercury_account_name or "Mercury Checking"
+    bank_account = resolve_bank_account(transaction.mercury_account_name, chart)
 
     system_parts = [
         "You are an expert bookkeeper specializing in accrual accounting.",

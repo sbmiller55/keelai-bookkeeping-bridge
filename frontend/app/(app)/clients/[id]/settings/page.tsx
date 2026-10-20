@@ -2,8 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings, getStripeSettings, updateStripeSettings, testStripeConnection, StripeConfig } from "@/lib/api";
+import { getClient, updateClient, uploadFile, Client, getQboStatus, getQboAuthUrl, disconnectQbo, QboStatus, getQboAccounts, getQboChartOfAccounts, getRevenueIntegrationSettings, updateRevenueIntegrationSettings, testBillcomConnection, RevenueIntegrationSettings, getStripeSettings, updateStripeSettings, testStripeConnection, StripeConfig } from "@/lib/api";
 import { useAccounts } from "@/lib/useAccounts";
+
+function fmtWhen(iso: string): string {
+  const then = new Date(iso.endsWith("Z") ? iso : iso + "Z").getTime();
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs !== 1 ? "s" : ""} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days !== 1 ? "s" : ""} ago`;
+}
 
 // Simple account picker backed by the live QBO chart of accounts. Falls back to
 // a free-text input when QBO isn't connected yet (so the field is still usable).
@@ -100,6 +111,7 @@ export default function ClientSettingsPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [qboSyncing, setQboSyncing] = useState(false);
   const [qboSyncResult, setQboSyncResult] = useState<string | null>(null);
+  const [coa, setCoa] = useState<{ count: number; cached_at: string | null } | null>(null);
 
   const [qboStatus, setQboStatus] = useState<QboStatus | null>(null);
   const [qboConnecting, setQboConnecting] = useState(false);
@@ -146,6 +158,9 @@ export default function ClientSettingsPage() {
       setPolicyName(c.policy_path ? c.policy_path.split("/").pop() ?? null : null);
     }).finally(() => setLoading(false));
     getQboStatus(clientId).then(setQboStatus).catch(() => {});
+    getQboChartOfAccounts(clientId)
+      .then((r) => setCoa({ count: r.accounts.length, cached_at: r.cached_at }))
+      .catch(() => {});
     getRevenueIntegrationSettings(clientId).then((s) => {
       setBillcomSettings(s);
       setBillcomForm({ username: s.billcom_username ?? "", password: "", org_id: s.billcom_org_id ?? "", dev_key: "", enabled: s.billcom_enabled });
@@ -235,8 +250,14 @@ export default function ClientSettingsPage() {
     setQboSyncing(true);
     setQboSyncResult(null);
     try {
-      const accounts = await getQboAccounts(clientId, /* refresh */ true);
-      setQboSyncResult(`${accounts.length} accounts refreshed from QBO`);
+      const r = await getQboChartOfAccounts(clientId, /* refresh */ true);
+      setCoa({ count: r.accounts.length, cached_at: r.cached_at });
+      const added = coa ? r.accounts.length - coa.count : 0;
+      setQboSyncResult(
+        added > 0
+          ? `${r.accounts.length} accounts — ${added} new since the last refresh`
+          : `${r.accounts.length} accounts, up to date`,
+      );
     } catch (err: unknown) {
       setQboSyncResult(err instanceof Error ? err.message : "Refresh failed");
     } finally {
@@ -531,6 +552,31 @@ export default function ClientSettingsPage() {
                 <p className="text-amber-300/70 mt-1">Live QBO calls (account refresh, journal entry sync) will fail until you reconnect. The cached chart of accounts continues to work in the meantime.</p>
               </div>
             )}
+            {/* Chart of accounts sits with the connection, not three sections
+                down under Documents: when a newly added QBO account was
+                missing, the visible thing to reach for here was Disconnect,
+                which is how reconnecting became the workaround for a refresh. */}
+            <div className="bg-gray-950/60 border border-gray-800 rounded-lg px-4 py-3">
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <p className="text-sm text-gray-200">Chart of accounts</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {coa
+                      ? `${coa.count} accounts${coa.cached_at ? ` · refreshed ${fmtWhen(coa.cached_at)}` : ""}`
+                      : "Loading…"}
+                    {" · "}re-pulled automatically within 10 minutes of a change in QuickBooks
+                  </p>
+                </div>
+                <button
+                  onClick={handleQboSync}
+                  disabled={qboSyncing}
+                  className="shrink-0 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg transition-colors"
+                >
+                  {qboSyncing ? "Refreshing…" : "Refresh now"}
+                </button>
+              </div>
+              {qboSyncResult && <p className="text-xs text-green-400 mt-2">{qboSyncResult}</p>}
+            </div>
             <button
               onClick={handleQboDisconnect}
               disabled={qboDisconnecting}
@@ -624,33 +670,6 @@ export default function ClientSettingsPage() {
         {uploadError && <p className="text-red-400 text-xs mb-3">{uploadError}</p>}
 
         <div className="space-y-4">
-          {qboStatus?.connected && (
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Chart of Accounts</label>
-              <p className="text-xs text-gray-500 mb-2">
-                Pulled live from QuickBooks Online. The cache refreshes automatically on the 1st of each month — use this button to refresh sooner.
-              </p>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleQboSync}
-                  disabled={qboSyncing}
-                  className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
-                >
-                  {qboSyncing
-                    ? <><span className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />Refreshing…</>
-                    : <>
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                        Refresh accounts from QBO
-                      </>}
-                </button>
-                {qboSyncResult && (
-                  <span className="text-xs text-green-400">{qboSyncResult}</span>
-                )}
-              </div>
-            </div>
-          )}
           <UploadField
             label="Policy Document"
             accept=".pdf,.docx,.doc,.txt,.md"

@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import case, literal, or_
 
 from auth import get_current_user
 from database import get_db
@@ -108,6 +108,7 @@ def _apply_invoice_match(
     confidence: float,
     db: Session,
     je_num: int,
+    chart: Optional[str] = None,
 ) -> int:
     """
     Pre-code a Mercury payment as clearing a matched invoice (DR accrued liability / CR bank).
@@ -117,7 +118,11 @@ def _apply_invoice_match(
     """
     inv_je = invoice.journal_entries[0] if invoice.journal_entries else None
     accrued_account = (inv_je.credit_account if inv_je else None) or "Accrued Expenses"
-    bank_account = payment_tx.mercury_account_name or "Mercury Checking"
+    # Resolved against the chart so this posts to the real QBO bank account
+    # rather than the feed's display label. Callers that already hold the chart
+    # pass it in; without one this falls back to the raw label, as before.
+    from ai_coder import resolve_bank_account
+    bank_account = resolve_bank_account(payment_tx.mercury_account_name, chart)
     amount = abs(payment_tx.amount)
 
     je = models.JournalEntry(
@@ -177,6 +182,14 @@ def _rematch_pending_payments(client_id: int, db: Session) -> int:
     """
     rematched = 0
     je_num = models.next_je_number(db)
+    # One chart lookup per run, so the clearing entries below post to the real
+    # QBO bank account instead of the feed's display label.
+    try:
+        import ai_coder as _ai
+        _client = db.query(models.Client).filter(models.Client.id == client_id).first()
+        _rematch_chart = _ai._resolve_chart(_client) if _client else None
+    except Exception:
+        _rematch_chart = None
     candidates = (
         db.query(models.Transaction)
         .filter(
@@ -206,7 +219,7 @@ def _rematch_pending_payments(client_id: int, db: Session) -> int:
         for je in existing_jes:
             db.delete(je)
         db.flush()
-        je_num = _apply_invoice_match(txn, invoice, conf, db, je_num)
+        je_num = _apply_invoice_match(txn, invoice, conf, db, je_num, chart=_rematch_chart)
         rematched += 1
     if rematched:
         db.flush()
@@ -689,6 +702,29 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         really_coded_ids -= stale_coa_ids
         _log(f"stale-COA recode candidates: {len(stale_coa_ids)}")
 
+    # Transactions that already have at least one journal entry, whatever its
+    # quality. Used purely for ordering below.
+    has_je_ids = {
+        row[0]
+        for row in db.query(models.JournalEntry.transaction_id)
+        .join(models.Transaction, models.JournalEntry.transaction_id == models.Transaction.id)
+        .filter(models.Transaction.client_id == client_id)
+        .all()
+    }
+
+    # Never-coded transactions go first, recodes after.
+    #
+    # This is the difference between the feature working and appearing dead. A
+    # chunked call takes the oldest N, and a transaction coded against an
+    # account that no longer exists in the QBO chart stays a recode candidate
+    # for ever — recoding it produces the same name again, so it never leaves
+    # the queue. Ordered purely by date, those permanent candidates sat at the
+    # head and consumed every chunk, while transactions with no journal entry
+    # at all — newer, and the only ones the user can see are missing — were
+    # never reached. Pressing "AI Code" then reported entries created while
+    # nothing the user was looking at changed.
+    priority = case((models.Transaction.id.in_(has_je_ids), 1), else_=0) if has_je_ids else literal(0)
+
     pending_q = (
         db.query(models.Transaction)
         .filter(
@@ -698,7 +734,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
             or_(models.Transaction.source.is_(None), models.Transaction.source == "mercury"),
             ~models.Transaction.id.in_(really_coded_ids) if really_coded_ids else True,
         )
-        .order_by(models.Transaction.date.asc(), models.Transaction.id.asc())
+        .order_by(priority, models.Transaction.date.asc(), models.Transaction.id.asc())
     )
     if limit is not None and limit > 0:
         pending = pending_q.limit(limit).all()
@@ -742,7 +778,7 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
         if match is None:
             continue
         invoice, conf = match
-        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
+        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num, chart=coa)
         rule_coded_ids.add(txn.id)
         je_created += 1
     db.flush()
@@ -1389,6 +1425,14 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
     # For each new outgoing Mercury payment, look for an unmatched invoice
     # (same vendor + amount within 2%). If matched, pre-code as
     # DR accrued / CR bank to prevent double-booking the expense.
+    # Resolved up front: the invoice-match entries below post to the bank
+    # account too, and they were writing the feed's display label.
+    try:
+        import ai_coder as _ai
+        _chart = _ai._resolve_chart(client)
+    except Exception:
+        _chart = None
+
     for txn in new_txn_objects:
         if (txn.kind or "") != "outgoingPayment":
             continue
@@ -1398,7 +1442,7 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
         if match is None:
             continue
         invoice, conf = match
-        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num)
+        _je_num = _apply_invoice_match(txn, invoice, conf, db, _je_num, chart=_chart)
         rule_coded_ids.add(txn.id)
         je_created += 1
     db.flush()
@@ -1411,7 +1455,7 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
     # to the real QBO account ("Mercury Treasury - 1") on the cash entry.
     try:
         import ai_coder as _ai
-        _coa_names = _ai._parse_coa_names(_ai._resolve_chart(client))
+        _coa_names = _ai._parse_coa_names(_chart)
     except Exception:
         _coa_names = None
     for txn in new_txn_objects:

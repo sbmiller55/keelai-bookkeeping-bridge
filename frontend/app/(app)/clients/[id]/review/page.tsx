@@ -1150,11 +1150,14 @@ export default function ReviewQueuePage() {
 
   // Chunk through all pending transactions so a large backlog (e.g. 100+)
   // never hits Railway's per-request HTTP timeout. Returns total JEs created.
+  let lastRemainingOut = 0;
+
   async function runCodingLoop(opts?: { onProgress?: (done: number, total: number) => void }): Promise<number> {
     const CHUNK = 5;
     const MAX_ROUNDS = 200; // safety stop (~1000 transactions)
     let totalCreated = 0;
     let initialRemaining: number | null = null;
+    let lastRemaining: number | null = null;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const result = await codePending(clientId, CHUNK);
       totalCreated += result.je_created;
@@ -1163,10 +1166,16 @@ export default function ReviewQueuePage() {
       const done = Math.max(0, (initialRemaining ?? 0) - remaining);
       opts?.onProgress?.(done, initialRemaining ?? done);
       if (remaining === 0) break;
-      // If a round made no DB-level progress and there are still uncoded
-      // transactions left, bail out to avoid spinning forever.
+      // Stop when a round stops reducing the backlog, not merely when it
+      // creates nothing. A transaction coded against an account that no longer
+      // exists in QBO is recoded to the same name every round, so je_created
+      // stays positive while `remaining` never moves — which span the full 200
+      // rounds reporting entries created and changing nothing.
       if (result.je_created === 0) break;
+      if (lastRemaining !== null && remaining >= lastRemaining) break;
+      lastRemaining = remaining;
     }
+    lastRemainingOut = lastRemaining ?? 0;
     return totalCreated;
   }
 
@@ -1178,8 +1187,18 @@ export default function ReviewQueuePage() {
       const totalCreated = await runCodingLoop({
         onProgress: (done, total) => setCodingProgress({ done, total }),
       });
+      const remainingAfter = lastRemainingOut;
       if (totalCreated === 0) {
         setCodingError("AI coding ran but created 0 journal entries.");
+      } else if (remainingAfter > 0) {
+        // Honest about the stuck remainder rather than reporting success: these
+        // are almost always transactions coded to an account name that is not
+        // in the live QBO chart, which recoding cannot fix on its own.
+        setCodingError(
+          `Coded what it could. ${remainingAfter} transaction${remainingAfter !== 1 ? "s" : ""} ` +
+          `still need attention — usually an account name that no longer exists in QuickBooks. ` +
+          `Check the Debit/Credit columns on those rows.`,
+        );
       }
       reload();
     } catch (err: unknown) {

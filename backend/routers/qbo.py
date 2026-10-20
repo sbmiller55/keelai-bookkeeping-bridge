@@ -249,13 +249,21 @@ def disconnect(
     return {"ok": True}
 
 
+# How long a cached chart of accounts is trusted. This used to be "the same
+# calendar month", which meant an account added in QuickBooks on the 2nd could
+# not appear in any dropdown until the 1st of the next month — the only way to
+# see it sooner was a buried refresh link, so the practical workaround became
+# disconnecting and reconnecting QuickBooks. Ten minutes keeps the cache doing
+# its job (one QBO round trip instead of one per page load) while making a new
+# account show up on its own, without anyone having to know the button exists.
+COA_CACHE_TTL = timedelta(minutes=10)
+
+
 def _cache_is_current(client: Client) -> bool:
-    """Cache is current if it was refreshed in the same calendar month as today (UTC)."""
+    """Whether the cached chart of accounts is still within COA_CACHE_TTL."""
     if not client.qbo_coa_cache or not client.qbo_coa_cached_at:
         return False
-    now = datetime.utcnow()
-    cached = client.qbo_coa_cached_at
-    return cached.year == now.year and cached.month == now.month
+    return datetime.utcnow() - client.qbo_coa_cached_at < COA_CACHE_TTL
 
 
 def _refresh_qbo_coa_cache(client: Client, db: Session) -> list[str]:
@@ -279,9 +287,10 @@ def get_accounts(
     """
     Return the Chart of Accounts pulled from QBO.
 
-    Cached on the Client row and refreshed on the 1st of each month by a
-    scheduled job; falls back to refreshing on first request of a new month
-    or if the cache is empty. Pass `refresh=true` to force-refresh.
+    Cached on the Client row for COA_CACHE_TTL and re-pulled on the first
+    request after that, so an account added in QuickBooks appears on its own
+    within minutes. The monthly scheduled job stays as a backstop for clients
+    nobody has opened. Pass `refresh=true` to force-refresh now.
     """
     client = _get_client(client_id, current_user, db)
 

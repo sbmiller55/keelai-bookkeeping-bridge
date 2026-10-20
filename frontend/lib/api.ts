@@ -1018,9 +1018,17 @@ export function disconnectQbo(clientId: number): Promise<{ ok: boolean }> {
 }
 
 export function getQboAccounts(clientId: number, refresh = false): Promise<string[]> {
+  return getQboChartOfAccounts(clientId, refresh).then((r) => r.accounts);
+}
+
+// Same call, keeping `cached_at` so the UI can show how fresh the chart is.
+export function getQboChartOfAccounts(
+  clientId: number, refresh = false,
+): Promise<{ accounts: string[]; cached_at: string | null }> {
   const qs = refresh ? "?refresh=true" : "";
-  return apiFetch<{ accounts: string[] }>(`/clients/${clientId}/qbo/accounts${qs}`)
-    .then((r) => r.accounts);
+  return apiFetch<{ accounts: string[]; cached_at: string | null }>(
+    `/clients/${clientId}/qbo/accounts${qs}`,
+  );
 }
 
 export function getQboCustomers(clientId: number): Promise<string[]> {
