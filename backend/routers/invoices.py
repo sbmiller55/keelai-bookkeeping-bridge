@@ -120,6 +120,14 @@ _MONTHS = {m.lower(): i for i, m in enumerate(
      "July","August","September","October","November","December"], start=1)}
 
 # "September 21 – October 15, 2026" / "Sep 21, 2026 - Oct 15, 2026" / "9/21/26 - 10/15/26"
+# "...Rendered and Disbursements Incurred through September 30, 2026" — an end
+# date with no start. Common on professional-services bills, where the work is
+# billed in arrears and the invoice date says nothing about when it was earned.
+_THROUGH_RE = re.compile(
+    r"\bthrough\s+(?P<m>[A-Za-z]{3,9})\.?\s+(?P<d>\d{1,2})(?:st|nd|rd|th)?,?\s*(?P<y>\d{4})",
+    re.IGNORECASE,
+)
+
 _PERIOD_RE = re.compile(
     r"(?P<m1>[A-Za-z]{3,9})\.?\s+(?P<d1>\d{1,2})(?:,\s*(?P<y1>\d{4}))?\s*[–\-—to]+\s*"
     r"(?P<m2>[A-Za-z]{3,9})\.?\s+(?P<d2>\d{1,2})(?:,\s*(?P<y2>\d{4}))?",
@@ -185,6 +193,15 @@ def _parse_service_dates(data: dict, text: str) -> tuple[Optional[datetime], Opt
 
     m = _PERIOD_RE.search(text or "")
     if not m:
+        # No range, but an explicit cut-off still dates the expense.
+        t = _THROUGH_RE.search(text or "")
+        if t:
+            mo = next((v for k, v in _MONTHS.items() if k.startswith(t.group("m").lower()[:3])), None)
+            if mo:
+                try:
+                    return None, datetime(int(t.group("y")), mo, int(t.group("d")))
+                except ValueError:
+                    return None, None
         return None, None
     try:
         mo1 = _MONTHS.get(m.group("m1").lower()) or _MONTHS.get(m.group("m1").lower()[:3] + "")
@@ -394,6 +411,10 @@ def _extract_invoice(
         "- Use type=prepaid when the invoice covers multiple months of service (annual plans, multi-month subscriptions, etc.)",
         "- invoice_date: invoice issue date in YYYY-MM-DD format",
         "- service_start/service_end: first and last month of service coverage (e.g. 'January 2025', 'December 2025')",
+        "- An invoice is dated when the work was DONE, not when it was billed. Professional",
+        "  services bills in arrears: 'For Professional Services Rendered through September 30,",
+        "  2026' on an invoice issued 13 October is September's expense, and je_date must be",
+        "  2026-09-30. Use the time-detail or disbursement dates when they are listed.",
         "- service_start_date/service_end_date: when the invoice states an explicit service period",
         "  (e.g. 'Service Period: September 21 - October 15, 2026'), give its exact first and last",
         "  day as YYYY-MM-DD. Copy the dates printed on the invoice; do not infer them from the",
@@ -623,7 +644,20 @@ async def upload_invoice(
         _svc_start, _svc_end = _parse_service_dates(
             data, " ".join(filter(None, [description, str(data.get("service_period") or "")]))
         )
-        je_data_list = _split_jes_across_months(je_data_list, _svc_start, _svc_end)
+        if _svc_start and _svc_end:
+            je_data_list = _split_jes_across_months(je_data_list, _svc_start, _svc_end)
+        elif _svc_end:
+            # Only a cut-off date: nothing to apportion, but the expense still
+            # belongs to the period it was earned in rather than to the invoice
+            # date. A legal bill issued 13 October "for services rendered
+            # through September 30" is September's cost.
+            for jd in je_data_list:
+                jd["je_date"] = _svc_end.strftime("%Y-%m-%d")
+                jd["reasoning"] = (
+                    f"{str(jd.get('reasoning') or '').strip()} "
+                    f"Invoice states services rendered through {_svc_end:%B %d, %Y}, so the "
+                    f"expense is recognised in that period rather than on the invoice date."
+                ).strip()
 
     created_jes = []
     for jd in je_data_list:
