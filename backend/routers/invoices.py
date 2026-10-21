@@ -1,8 +1,10 @@
 """Invoice upload → AI journal entry creation."""
 import base64
+import calendar
 import json
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Optional
 
 import anthropic
@@ -111,6 +113,126 @@ def _resolve_account(name: object, coa: dict[str, str]) -> tuple[str, bool]:
     if raw in ai_coder._ALWAYS_VALID_ACCOUNTS:
         return raw, True
     return raw, False
+
+
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["January","February","March","April","May","June",
+     "July","August","September","October","November","December"], start=1)}
+
+# "September 21 – October 15, 2026" / "Sep 21, 2026 - Oct 15, 2026" / "9/21/26 - 10/15/26"
+_PERIOD_RE = re.compile(
+    r"(?P<m1>[A-Za-z]{3,9})\.?\s+(?P<d1>\d{1,2})(?:,\s*(?P<y1>\d{4}))?\s*[–\-—to]+\s*"
+    r"(?P<m2>[A-Za-z]{3,9})\.?\s+(?P<d2>\d{1,2})(?:,\s*(?P<y2>\d{4}))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_service_dates(data: dict, text: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """The invoice's stated service period, as real dates.
+
+    Prefers what the model returned; falls back to reading the invoice text,
+    because the period is the one fact that decides whether the cost belongs to
+    one month or two and it is usually printed verbatim.
+    """
+    def _iso(v):
+        if isinstance(v, datetime):
+            return v
+        try:
+            return datetime.strptime(str(v)[:10], "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return None
+
+    start = _iso(data.get("service_start_date"))
+    end = _iso(data.get("service_end_date"))
+    if start and end:
+        return start, end
+
+    m = _PERIOD_RE.search(text or "")
+    if not m:
+        return None, None
+    try:
+        mo1 = _MONTHS.get(m.group("m1").lower()) or _MONTHS.get(m.group("m1").lower()[:3] + "")
+        mo2 = _MONTHS.get(m.group("m2").lower())
+        if not mo1:
+            mo1 = next((v for k, v in _MONTHS.items() if k.startswith(m.group("m1").lower()[:3])), None)
+        if not mo2:
+            mo2 = next((v for k, v in _MONTHS.items() if k.startswith(m.group("m2").lower()[:3])), None)
+        if not mo1 or not mo2:
+            return None, None
+        y2 = int(m.group("y2") or m.group("y1") or 0) or None
+        y1 = int(m.group("y1") or 0) or y2
+        if not y1 or not y2:
+            return None, None
+        # A period that runs backwards crossed a year end.
+        if (mo2, int(m.group("d2"))) < (mo1, int(m.group("d1"))) and y1 == y2:
+            y2 = y1 + 1
+        return (datetime(y1, mo1, int(m.group("d1"))),
+                datetime(y2, mo2, int(m.group("d2"))))
+    except (ValueError, TypeError):
+        return None, None
+
+
+def _split_jes_across_months(je_list: list, start: Optional[datetime], end: Optional[datetime]) -> list:
+    """Split expense entries across the calendar months their service covers.
+
+    An invoice reading "Service Period: September 21 - October 15" earns in two
+    months, and booking the whole cost to the invoice date puts September's
+    share in October. Each month gets its share by days of service and is dated
+    the last day it covers — month end, or the service end in the final month.
+
+    Untouched when the period sits inside one calendar month, which is the
+    common case; the last month absorbs the rounding so the split always sums
+    to the original amount.
+    """
+    if not start or not end or end < start:
+        return je_list
+    if (start.year, start.month) == (end.year, end.month):
+        return je_list
+
+    total_days = (end - start).days + 1
+    if total_days <= 0:
+        return je_list
+
+    segments = []
+    cursor = start
+    while cursor <= end:
+        month_end = datetime(
+            cursor.year, cursor.month,
+            calendar.monthrange(cursor.year, cursor.month)[1],
+        )
+        seg_end = min(month_end, end)
+        segments.append((cursor, seg_end, (seg_end - cursor).days + 1))
+        cursor = seg_end + timedelta(days=1)
+    if len(segments) < 2:
+        return je_list
+
+    out = []
+    for jd in je_list:
+        try:
+            amount = abs(float(jd.get("amount") or 0))
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0:
+            out.append(jd)
+            continue
+        allocated = 0.0
+        for i, (seg_start, seg_end, days) in enumerate(segments):
+            last = i == len(segments) - 1
+            share = round(amount - allocated, 2) if last else round(amount * days / total_days, 2)
+            allocated += 0 if last else share
+            piece = dict(jd)
+            piece["amount"] = share
+            piece["je_date"] = seg_end.strftime("%Y-%m-%d")
+            label = f"{seg_start:%b %d}-{seg_end:%b %d}"
+            piece["memo"] = f"{str(jd.get('memo') or '')[:60]} ({label})".strip()[:80]
+            piece["reasoning"] = (
+                f"{str(jd.get('reasoning') or '').strip()} "
+                f"Service period {start:%b %d, %Y} to {end:%b %d, %Y} spans {len(segments)} calendar "
+                f"months, so the cost is recognised by days of service: {days} of {total_days} days "
+                f"in this month."
+            ).strip()
+            out.append(piece)
+    return out
 
 
 def _invalid_accounts(data: dict, coa: dict[str, str]) -> list[str]:
@@ -229,13 +351,19 @@ def _extract_invoice(
         '{"type": "prepaid", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "expense_account": "Specific Expense Account", "prepaid_account": "Prepaid Expenses", "service_start": "January 2025", "service_end": "December 2025", "confidence": 0.9, "reasoning": "explanation"}',
         "",
         "For regular single-period invoices (one month of service, one-time expense), return:",
-        '{"type": "expense", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "service_period": "March 2025", "journal_entries": [{"debit_account": "Account", "credit_account": "Account", "amount": 1234.56, "je_date": "YYYY-MM-DD", "memo": "short memo", "confidence": 0.9, "reasoning": "explanation"}]}',
+        '{"type": "expense", "vendor": "Vendor Name", "invoice_number": "INV-1234", "invoice_date": "YYYY-MM-DD", "total_amount": 1234.56, "description": "description", "service_period": "March 2025", "service_start_date": "YYYY-MM-DD", "service_end_date": "YYYY-MM-DD", "journal_entries": [{"debit_account": "Account", "credit_account": "Account", "amount": 1234.56, "je_date": "YYYY-MM-DD", "memo": "short memo", "confidence": 0.9, "reasoning": "explanation"}]}',
         "",
         "Rules:",
         "- Use type=fixed_asset when the invoice is for a capital asset (computer hardware, equipment, perpetual software license, vehicles, furniture, intangibles) over $2,500",
         "- Use type=prepaid when the invoice covers multiple months of service (annual plans, multi-month subscriptions, etc.)",
         "- invoice_date: invoice issue date in YYYY-MM-DD format",
         "- service_start/service_end: first and last month of service coverage (e.g. 'January 2025', 'December 2025')",
+        "- service_start_date/service_end_date: when the invoice states an explicit service period",
+        "  (e.g. 'Service Period: September 21 - October 15, 2026'), give its exact first and last",
+        "  day as YYYY-MM-DD. Copy the dates printed on the invoice; do not infer them from the",
+        "  invoice date. Omit both only when the invoice states no service period at all.",
+        "  Still return ONE journal entry for the full amount — the split across calendar months",
+        "  is done downstream from these dates.",
         "- For regular invoices: DR Expense Account, CR Accrued Expenses",
         "- confidence: 0.0=total guess, 1.0=certain",
         "- ACCOUNT NAMES: you MUST copy account names verbatim from the Chart of Accounts below.",
@@ -448,6 +576,15 @@ async def upload_invoice(
             "confidence": 0.5,
             "reasoning": "Fallback accrual entry",
         }]
+
+    # An invoice that states its own service period decides which month(s) the
+    # cost belongs to. Prepaid and fixed-asset invoices already have their own
+    # schedules, so only plain expense entries are split here.
+    if invoice_type == "expense":
+        _svc_start, _svc_end = _parse_service_dates(
+            data, " ".join(filter(None, [description, str(data.get("service_period") or "")]))
+        )
+        je_data_list = _split_jes_across_months(je_data_list, _svc_start, _svc_end)
 
     created_jes = []
     for jd in je_data_list:
