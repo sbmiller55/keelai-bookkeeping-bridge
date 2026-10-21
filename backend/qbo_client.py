@@ -457,6 +457,27 @@ class QBOClient:
         result = self._post("/account?minorversion=65", payload)
         return result["Account"]["Id"], True
 
+    def list_journal_entries(self, start: str, end: str) -> list[dict]:
+        """Every JournalEntry QuickBooks holds between two dates (inclusive).
+
+        Read-only. Needed because the app's record of what it pushed can be
+        incomplete — an interrupted batch leaves entries in QuickBooks that no
+        row here points at — and the only way to find those is to ask
+        QuickBooks what it actually has.
+        """
+        out: list[dict] = []
+        start_pos = 1
+        while True:
+            batch = self._query(
+                f"SELECT * FROM JournalEntry "
+                f"WHERE TxnDate >= '{start}' AND TxnDate <= '{end}' "
+                f"ORDER BY TxnDate STARTPOSITION {start_pos} MAXRESULTS 100"
+            )
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            start_pos += 100
+
     def delete_object(self, object_type: str, qbo_id: str):
         """Delete a Purchase or JournalEntry from QBO by fetching its SyncToken first."""
         path = f"/{object_type.lower()}/{qbo_id}"

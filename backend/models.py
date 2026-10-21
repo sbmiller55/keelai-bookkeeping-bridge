@@ -135,6 +135,12 @@ class JournalEntry(Base):
     approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
     exported_at = Column(DateTime, nullable=True)
+    # Hard record that this entry has been pushed to QuickBooks. Checked before
+    # every push and set the instant one succeeds, so no restart, crash or
+    # restore from backup can cause the same entry to be sent twice. Kept
+    # separate from qbo_je_id because the id is only useful while QuickBooks
+    # still holds that object; this flag answers "did we already send it".
+    exported_to_qbo = Column(Boolean, default=False, nullable=False)
     export_file = Column(String, nullable=True)
     qbo_je_id = Column(String, nullable=True)           # QBO's ID for this JE after direct sync
     qbo_object_type = Column(String, nullable=True)     # "Purchase" or "JournalEntry"

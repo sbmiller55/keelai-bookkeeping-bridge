@@ -205,6 +205,7 @@ def _migrate_db():
         ("revenue_integration_settings", "subscription_mode", "BOOLEAN DEFAULT FALSE"),
         ("transactions",                 "revenue_contract_id", "INTEGER"),
         ("revenue_integration_settings", "chargebee_generation", "INTEGER DEFAULT 0"),
+        ("journal_entries",              "exported_to_qbo", "BOOLEAN DEFAULT FALSE"),
         ("accrued_expenses",      "debit_account",       "TEXT"),
         ("accrued_expenses",      "credit_account",      "TEXT"),
         # Invoice/payment-matching columns (added 2026-05)
@@ -242,6 +243,22 @@ def _migrate_db():
                 else:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}"))
         conn.commit()
+
+    # Anything already carrying a QuickBooks id has, by definition, been pushed.
+    # Without this backfill the new flag starts false for every entry already in
+    # QuickBooks and protects nothing on the first run after deploy.
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "UPDATE journal_entries SET exported_to_qbo = TRUE "
+                "WHERE qbo_je_id IS NOT NULL AND (exported_to_qbo IS NULL OR exported_to_qbo = FALSE)"
+            ))
+            conn.execute(text(
+                "UPDATE journal_entries SET exported_to_qbo = FALSE WHERE exported_to_qbo IS NULL"
+            ))
+            conn.commit()
+    except Exception as exc:
+        print(f"[migrate] exported_to_qbo backfill skipped: {exc}")
 
     # Existing clients must land on the documented default rather than NULL.
     try:

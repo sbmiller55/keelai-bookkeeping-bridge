@@ -328,6 +328,66 @@ def get_customers(
     return {"customers": names}
 
 
+@router.get("/journal-entries")
+def list_qbo_journal_entries(
+    client_id: int,
+    start: str,
+    end: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What QuickBooks actually holds for a date range, and which of it we know about.
+
+    Read-only diagnostic. Entries QuickBooks has that no journal entry here
+    points at are the footprint of an interrupted push — the batch reached
+    Intuit but the ids never made it back — and they are what a retry turns
+    into duplicates.
+    """
+    client = _get_client(client_id, current_user, db)
+    qbo_c = _get_qbo_client(client)
+    try:
+        entries = qbo_c.list_journal_entries(start, end)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, _qbo_error_detail(exc, "read your QuickBooks journal entries"))
+    _persist_token_refresh(client, qbo_c, db)
+
+    known = {
+        str(row[0])
+        for row in db.query(JournalEntry.qbo_je_id)
+        .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+        .filter(Transaction.client_id == client_id, JournalEntry.qbo_je_id.isnot(None))
+        .all()
+    }
+    out = []
+    for e in entries:
+        lines = []
+        for ln in e.get("Line") or []:
+            d = ln.get("JournalEntryLineDetail") or {}
+            lines.append({
+                "posting": d.get("PostingType"),
+                "account": (d.get("AccountRef") or {}).get("name"),
+                "amount": ln.get("Amount"),
+                "description": ln.get("Description"),
+            })
+        out.append({
+            "qbo_id": e.get("Id"),
+            "doc_number": e.get("DocNumber"),
+            "txn_date": e.get("TxnDate"),
+            "total": e.get("TotalAmt"),
+            "created": (e.get("MetaData") or {}).get("CreateTime"),
+            "known_to_app": str(e.get("Id")) in known,
+            "lines": lines,
+        })
+    return {
+        "count": len(out),
+        "known_to_app": sum(1 for e in out if e["known_to_app"]),
+        "unknown_to_app": sum(1 for e in out if not e["known_to_app"]),
+        "entries": out,
+    }
+
+
 @router.post("/sync", response_model=SyncResult)
 def sync_to_qbo(
     client_id: int,
@@ -374,6 +434,7 @@ def sync_to_qbo(
     created_customers: list[str]   = []
     errors: list[str]             = []
     synced                        = 0
+    skipped_already_exported      = 0
 
     for tx in transactions:
         jes = (
@@ -401,6 +462,15 @@ def sync_to_qbo(
 
         # ── Push each JE ────────────────────────────────────────────────────
         for je in jes:
+            # The flag is the authority, not the id. An entry can reach
+            # QuickBooks and lose its id here — that is exactly what happened
+            # when a push died mid-batch before the per-entry commit, and the
+            # retry sent the whole batch again. Once this is set, the entry is
+            # never pushed again, whatever the app has been through since.
+            if getattr(je, "exported_to_qbo", False) and not force:
+                synced += 1
+                skipped_already_exported += 1
+                continue
             if je.qbo_je_id and not force:   # already synced — skip
                 synced += 1
                 continue
@@ -507,6 +577,13 @@ def sync_to_qbo(
                 je.qbo_je_id        = qbo_id
                 je.qbo_object_type  = "Purchase" if use_purchase else "JournalEntry"
                 je.qbo_export_error = None
+                # Written and committed before the next entry is pushed, so an
+                # interruption can never lose the fact that QuickBooks already
+                # holds this one.
+                je.exported_to_qbo  = True
+                if not je.exported_at:
+                    je.exported_at  = datetime.utcnow()
+                db.commit()
                 audit.record(
                     db, current_user.id, "je_exported_to_qbo",
                     transaction_id=tx.id, client_id=client_id,
@@ -540,6 +617,11 @@ def sync_to_qbo(
     db.commit()
     _persist_token_refresh(client, qbo_c, db)
 
+    if skipped_already_exported:
+        errors.append(
+            f"Skipped {skipped_already_exported} journal entr"
+            f"{'ies' if skipped_already_exported != 1 else 'y'} already pushed to QuickBooks."
+        )
     return SyncResult(
         synced=synced,
         created_vendors=created_vendors,
