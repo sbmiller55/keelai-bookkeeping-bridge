@@ -641,11 +641,17 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
 
     # ── Rematch pass: reconcile already-coded pending payments against invoices,
     # collapsing any duplicate accrual to a payment-only clearing entry. See
-    # _rematch_pending_payments. This also runs automatically after every sync,
-    # so it's the guardrail — not a manual-only step. Chunked calls (limit set)
-    # skip it because the sync path and unchunked calls already cover it, and a
-    # global pass on every chunk would be wasteful.
-    rematched = 0 if (limit is not None and limit > 0) else _rematch_pending_payments(client_id, db)
+    # _rematch_pending_payments.
+    #
+    # This used to be skipped on chunked calls, on the reasoning that the sync
+    # path and unchunked calls covered it. They do not: the Review Queue's
+    # "AI Code" button always chunks, in fives, so the guardrail never ran from
+    # the one place a user would reach for it. A payment imported before its
+    # invoice is coded as an accrual, the invoice is then uploaded and accrues
+    # the same cost again, and the duplicate stood until someone happened to
+    # sync — expense double-counted, cash untouched. It is one pass over pending
+    # outgoing payments; running it per chunk is cheap next to an AI call.
+    rematched = _rematch_pending_payments(client_id, db)
 
     # A transaction counts as "really coded" only if it has at least one JE whose
     # debit AND credit are real accounts (neither equals "Uncoded" nor begins with
