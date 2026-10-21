@@ -727,7 +727,13 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
         released_accruals += 1
 
     # ── 2. Fixed asset depreciation / amortization ───────────────────────────
-    from routers.fixed_assets import _compute_schedule, _create_dep_transaction
+    from routers.fixed_assets import (
+        _client_chart_names, _compute_schedule, _create_dep_transaction,
+    )
+
+    # One chart lookup for the whole release, so a misconfigured asset falls
+    # back to a real expense account rather than an invented name.
+    _dep_chart = _client_chart_names(client_id, db)
 
     assets = db.query(FixedAsset).filter(
         FixedAsset.client_id == client_id,
@@ -751,7 +757,7 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
         if target_month in existing_months:
             continue
 
-        _create_dep_transaction(asset, period_entry, client_id, db)
+        _create_dep_transaction(asset, period_entry, client_id, db, chart_names=_dep_chart)
 
         # Mark fully depreciated if this is the last period
         if schedule and schedule[-1]["period"] <= target_month:

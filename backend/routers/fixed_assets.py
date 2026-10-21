@@ -493,19 +493,77 @@ def _generate_historical_dep_jes(asset: models.FixedAsset, client_id: int, db: S
         ).all()
     ]
 
+    _chart = _client_chart_names(client_id, db)
     for period in schedule:
         if period["period"] >= today_period:
             break  # don't auto-generate current or future months
         if period["period"] in existing_months:
             continue
-        _create_dep_transaction(asset, period, client_id, db, status=models.TransactionStatus.exported)
+        _create_dep_transaction(asset, period, client_id, db, status=models.TransactionStatus.exported,
+                                chart_names=_chart)
 
     db.commit()
+
+
+def _client_chart_names(client_id: int, db):
+    """The client's live chart, for resolving depreciation accounts. None on failure."""
+    try:
+        import ai_coder as _ai
+        import models as _m
+        client = db.query(_m.Client).filter(_m.Client.id == client_id).first()
+        return _ai._parse_coa_names(_ai._resolve_chart(client)) if client else None
+    except Exception:
+        return None
+
+
+def _depreciation_accounts(asset, chart_names=None) -> tuple[str, str]:
+    """(debit, credit) for one month of depreciation on `asset`.
+
+    Depreciation never touches the asset account. It moves cost into expense
+    and builds a contra-asset:
+
+        DR  Depreciation Expense
+        CR  Accumulated Depreciation
+
+    The asset account only moves on purchase or disposal. This is enforced here
+    rather than trusted from the asset record, because the record is populated
+    by the AI when the asset is first recognised and it had set the *asset*
+    account as the depreciation expense on two assets — so every month debited
+    Long-term office equipment and grew the asset instead of expensing it.
+    """
+    term = "Amortization" if getattr(asset, "asset_type", "tangible") == "intangible" else "Depreciation"
+    expense = (getattr(asset, "qbo_dep_expense_account", None) or f"{term} Expense").strip()
+    accum = (getattr(asset, "qbo_accum_dep_account", None) or f"Accumulated {term}").strip()
+    asset_acct = (getattr(asset, "qbo_asset_account", None) or "").strip()
+
+    def _same(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        # "Long-term office equipment" and "Fixed Assets:Long-term office
+        # equipment" are the same account under two spellings.
+        return a.lower() == b.lower() or a.lower().endswith(":" + b.lower()) or b.lower().endswith(":" + a.lower())
+
+    def _pick(keywords, fallback):
+        for n in (chart_names or []):
+            low = n.lower()
+            if any(k in low for k in keywords) and "accumulated" not in low and not _same(n, asset_acct):
+                return n
+        return fallback
+
+    if _same(expense, asset_acct):
+        expense = _pick(
+            ("amortization",) if term == "Amortization" else ("depreciation",),
+            f"{term} Expense",
+        )
+    if _same(accum, asset_acct):
+        accum = f"Accumulated {term}"
+    return expense, accum
 
 
 def _create_dep_transaction(
     asset: models.FixedAsset, period: dict, client_id: int, db: Session,
     status: models.TransactionStatus = models.TransactionStatus.pending,
+    chart_names=None,
 ):
     y, m = int(period["period"].split("-")[0]), int(period["period"].split("-")[1])
     last_day = calendar.monthrange(y, m)[1]
@@ -527,11 +585,12 @@ def _create_dep_transaction(
     db.add(tx)
     db.flush()
 
+    debit_account, credit_account = _depreciation_accounts(asset, chart_names)
     je = models.JournalEntry(
         transaction_id=tx.id,
         je_number=next_je_number(db),
-        debit_account=asset.qbo_dep_expense_account or f"{term} Expense",
-        credit_account=asset.qbo_accum_dep_account or f"Accumulated {term}",
+        debit_account=debit_account,
+        credit_account=credit_account,
         amount=period["depreciation"],
         je_date=tx_date,
         memo=memo,
@@ -598,6 +657,8 @@ def generate_depreciation(
 
     created = 0
     skipped = 0
+    # One chart lookup for the whole run.
+    _chart = _client_chart_names(client_id, db)
 
     for asset in assets:
         schedule = _compute_schedule(asset)
@@ -618,7 +679,7 @@ def generate_depreciation(
             skipped += 1
             continue
 
-        _create_dep_transaction(asset, period, client_id, db)
+        _create_dep_transaction(asset, period, client_id, db, chart_names=_chart)
 
         # Update status if fully depreciated
         if schedule and schedule[-1]["period"] <= month:
