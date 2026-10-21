@@ -127,6 +127,42 @@ _PERIOD_RE = re.compile(
 )
 
 
+def _merge_identical_jes(je_list: list) -> list:
+    """Collapse entries that post the same date to the same two accounts.
+
+    An invoice with several line items yields one entry per line, and when the
+    lines share a debit and a credit that is two journal entries saying the same
+    thing — a $2,410 legal invoice arrived as $895 and $1,515, same date, same
+    accounts. They are one entry. Lines that differ in date or in either account
+    are left alone, so a genuine split (an asset and its first month of
+    amortization, a service period crossing months) still produces two.
+    """
+    merged: dict = {}
+    order: list = []
+    for jd in je_list:
+        key = (
+            str(jd.get("je_date") or ""),
+            str(jd.get("debit_account") or ""),
+            str(jd.get("credit_account") or ""),
+        )
+        if key not in merged:
+            merged[key] = dict(jd)
+            order.append(key)
+            continue
+        first = merged[key]
+        try:
+            first["amount"] = round(abs(float(first.get("amount") or 0)) + abs(float(jd.get("amount") or 0)), 2)
+        except (TypeError, ValueError):
+            continue
+        # Keep both line descriptions, so the combined entry still says what it
+        # covers rather than silently inheriting the first line's memo.
+        memos = [str(first.get("memo") or "").strip(), str(jd.get("memo") or "").strip()]
+        memos = [m for m in dict.fromkeys(memos) if m]
+        if memos:
+            first["memo"] = "; ".join(memos)[:80]
+    return [merged[k] for k in order]
+
+
 def _parse_service_dates(data: dict, text: str) -> tuple[Optional[datetime], Optional[datetime]]:
     """The invoice's stated service period, as real dates.
 
@@ -581,6 +617,9 @@ async def upload_invoice(
     # cost belongs to. Prepaid and fixed-asset invoices already have their own
     # schedules, so only plain expense entries are split here.
     if invoice_type == "expense":
+        # Collapse duplicate lines before splitting, so a merged entry is what
+        # gets apportioned across months rather than each line separately.
+        je_data_list = _merge_identical_jes(je_data_list)
         _svc_start, _svc_end = _parse_service_dates(
             data, " ".join(filter(None, [description, str(data.get("service_period") or "")]))
         )
