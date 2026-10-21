@@ -191,6 +191,17 @@ def apply_rule_jes(
             if debit.lower() not in allowed or credit.lower() not in allowed:
                 return []
 
+    # Money in reverses the entry. A rule matches on vendor or on the feed's
+    # category, neither of which says which way the cash moved, so a refund from
+    # a vendor produced exactly the entry a payment to them would: expense up,
+    # cash down. A $19.50 Rippling refund was booked that way and exported to
+    # QuickBooks as an expense. When cash comes in, cash is debited and whatever
+    # the rule named is credited — reducing the expense it originally hit, or
+    # recognising income for a rebate.
+    if (txn.amount or 0) > 0 and credit == source_account and debit != source_account:
+        debit, credit = credit, debit
+        reasoning += " (money received — entry reversed: cash debited, account credited)"
+
     # Default: simple expense JE
     return [{
         "debit_account": debit,
