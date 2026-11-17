@@ -853,6 +853,14 @@ def _code_pending_inner(client_id: int, client, limit, db, _log):
     for txn in pending:
         if txn.id in rule_coded_ids:
             continue
+        _verdict = payroll_clearing.classify(txn)
+        if _verdict == payroll_clearing.REJECT:
+            # Rippling's own QBO integration already posted this payroll run.
+            # Reject rather than code it: a clearing entry here would settle the
+            # payroll liability a second time. Leaves the Review Queue entirely.
+            txn.status = models.TransactionStatus.rejected
+            rule_coded_ids.add(txn.id)
+            continue
         jds = payroll_clearing.build_payroll_clearing_jes(txn, coa_names)
         if not jds:
             continue
@@ -1526,6 +1534,14 @@ def _code_new_transactions(client: models.Client, db: Session, new_txn_objects: 
     # Runs ahead of the rules engine, which would otherwise reject them.
     for txn in new_txn_objects:
         if txn.id in rule_coded_ids:
+            continue
+        _verdict = payroll_clearing.classify(txn)
+        if _verdict == payroll_clearing.REJECT:
+            # Rippling's own QBO integration already posted this payroll run.
+            # Reject rather than code it: a clearing entry here would settle the
+            # payroll liability a second time. Leaves the Review Queue entirely.
+            txn.status = models.TransactionStatus.rejected
+            rule_coded_ids.add(txn.id)
             continue
         jds = payroll_clearing.build_payroll_clearing_jes(txn, _coa_names)
         if not jds:
