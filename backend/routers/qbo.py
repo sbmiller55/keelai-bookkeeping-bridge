@@ -22,6 +22,7 @@ from auth import get_current_user
 from database import get_db, SessionLocal
 from models import Client, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
+import qbo_idempotency
 import audit
 
 router = APIRouter(prefix="/clients/{client_id}/qbo", tags=["qbo"])
@@ -147,6 +148,11 @@ class SyncResult(BaseModel):
     created_vendors:   list[str]
     created_customers: list[str] = []
     errors:            list[str]
+    # Entries QuickBooks already held, which this run therefore did not push.
+    # Surfaced rather than swallowed: a non-empty list after a clean run means
+    # a previous push reached QuickBooks without being recorded here, which is
+    # worth a look even though the duplicate was prevented.
+    already_in_qbo:    list[str] = []
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -426,6 +432,47 @@ def sync_to_qbo(
     except Exception as exc:
         raise HTTPException(502, _qbo_error_detail(exc, "load your QuickBooks chart of accounts"))
 
+    # ── Ask QuickBooks what it already holds ────────────────────────────────
+    # The local export flag is written after the POST returns, so a push that
+    # QuickBooks accepted while the response was lost leaves no trace here and
+    # would be sent again. The only record of that entry is in QuickBooks, so
+    # read it back before pushing anything. One read per object type over the
+    # batch's own date range, not one per entry.
+    #
+    # A failure here must not become a licence to double-post: if the read
+    # fails the sync stops, because the alternative is exactly the September
+    # 2026 duplicate.
+    _tx_by_id = {t.id: t for t in transactions}
+    _batch_jes = (
+        db.query(JournalEntry)
+        .filter(JournalEntry.transaction_id.in_(list(_tx_by_id)))
+        .all()
+    ) if _tx_by_id else []
+    _dates = [
+        d for d in (
+            (je.je_date or _tx_by_id[je.transaction_id].date)
+            for je in _batch_jes
+            if je.transaction_id in _tx_by_id
+        ) if d is not None
+    ]
+    existing = qbo_idempotency.ExistingIndex()
+    if _dates:
+        _lo = min(_dates).strftime("%Y-%m-%d")
+        _hi = max(_dates).strftime("%Y-%m-%d")
+        try:
+            existing = qbo_idempotency.ExistingIndex.build(
+                qbo_c.list_journal_entries(_lo, _hi),
+                qbo_c.list_purchases(_lo, _hi),
+            )
+        except Exception as exc:
+            raise HTTPException(502, _qbo_error_detail(
+                exc,
+                "read back what QuickBooks already holds. Nothing was pushed — "
+                "pushing without this check is what duplicated September 2026",
+            ))
+
+    skipped_already_in_qbo: list[str] = []
+
     # Vendor cache: display_name → QBO vendor Id (avoids redundant API calls)
     vendor_cache: dict[str, str]  = {}
     created_vendors: list[str]    = []
@@ -533,8 +580,43 @@ def sync_to_qbo(
             else:
                 customer_line = "credit"
 
-            txn_date = (je.je_date or tx.date).strftime("%Y-%m-%d")
-            memo     = je.memo or tx.description
+            txn_date  = (je.je_date or tx.date).strftime("%Y-%m-%d")
+            memo      = je.memo or tx.description
+            doc_number = str(je.je_number or je.id)
+
+            # Does QuickBooks already hold this entry? Checked against what was
+            # just read back, not against our own flags — the whole point is
+            # that our flags can be wrong in the one direction that duplicates.
+            _key = qbo_idempotency.entry_key(
+                client_id, memo, je.je_date or tx.date, je.amount,
+                je.debit_account, je.credit_account,
+            )
+            if not force:
+                _hit, _how = existing.find(_key, doc_number, txn_date, je.amount)
+                if _hit:
+                    # Adopt the id so the app stops being blind to it, and mark
+                    # it exported so this is a one-time reconciliation.
+                    je.qbo_je_id       = _hit
+                    je.exported_to_qbo = True
+                    if not je.exported_at:
+                        je.exported_at = datetime.utcnow()
+                    db.commit()
+                    audit.record(
+                        db, current_user.id, "je_already_in_qbo",
+                        transaction_id=tx.id, client_id=client_id,
+                        after={"je_number": je.je_number, "qbo_id": _hit,
+                               "matched_on": _how, "key": _key},
+                    )
+                    skipped_already_in_qbo.append(
+                        "JE %s ($%.2f, %s): already in QuickBooks as %s (matched on %s)"
+                        % (je.je_number or je.id, je.amount or 0, txn_date, _hit, _how)
+                    )
+                    synced += 1
+                    continue
+
+            # Stamp the key so the next run recognises this entry exactly,
+            # rather than falling back to the weaker document-number match.
+            memo = qbo_idempotency.stamp(memo, _key)
 
             try:
                 # Use Purchase for vendor expenses paid from a real bank/card
@@ -550,7 +632,7 @@ def sync_to_qbo(
                 if use_purchase:
                     payment_type = "CreditCard" if credit_type == "CreditCard" else "Cash"
                     qbo_id = qbo_c.create_purchase(
-                        doc_number=str(je.je_number or je.id),
+                        doc_number=doc_number,
                         txn_date=txn_date,
                         memo=memo,
                         payment_account_id=credit_id,
@@ -562,7 +644,7 @@ def sync_to_qbo(
                     )
                 else:
                     qbo_id = qbo_c.create_journal_entry(
-                        doc_number=str(je.je_number or je.id),
+                        doc_number=doc_number,
                         txn_date=txn_date,
                         memo=memo,
                         debit_account_id=debit_id,
@@ -627,6 +709,171 @@ def sync_to_qbo(
         created_vendors=created_vendors,
         created_customers=created_customers,
         errors=errors,
+        already_in_qbo=skipped_already_in_qbo,
+    )
+
+
+# ── Month-end close check ────────────────────────────────────────────────────
+
+class CloseCheckResult(BaseModel):
+    period:             str
+    qbo_entries:        int
+    duplicates:         list[dict]
+    recurring_series:   list[dict]
+    orphans:            list[dict]
+    clean:              bool
+
+
+@router.get("/close-check", response_model=CloseCheckResult)
+def close_check(
+    client_id: int,
+    period: str,                      # "YYYY-MM"
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read-only month-end check: would this period close clean?
+
+    Three questions, all answered from what QuickBooks actually holds rather
+    than from this app's record of what it pushed — the September 2026
+    duplicate was invisible here precisely because the app's record was the
+    thing that was wrong.
+
+      duplicates        two entries sharing a document number, date and amount
+      recurring_series  each recurring entry that should appear once a month —
+                        amortization, depreciation, accruals — counted for this
+                        period, so a missing one and a doubled one both show
+      orphans           entries QuickBooks holds that nothing here points at
+
+    Pushes nothing and changes nothing.
+    """
+    import calendar
+    from collections import defaultdict
+
+    client = _get_client(client_id, current_user, db)
+    qbo_c  = _get_qbo_client(client)
+
+    try:
+        year, month = (int(x) for x in period.split("-"))
+        start = f"{year:04d}-{month:02d}-01"
+        end   = f"{year:04d}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}"
+    except Exception:
+        raise HTTPException(400, "period must be YYYY-MM, e.g. 2026-09")
+
+    try:
+        jes       = qbo_c.list_journal_entries(start, end)
+        purchases = qbo_c.list_purchases(start, end)
+    except Exception as exc:
+        raise HTTPException(502, _qbo_error_detail(exc, "read your QuickBooks entries"))
+
+    rows = [(e, qbo_idempotency.debit_total(e), "JournalEntry") for e in jes]
+    rows += [(e, qbo_idempotency.purchase_total(e), "Purchase") for e in purchases]
+
+    # ── duplicates ──────────────────────────────────────────────────────────
+    by_sig = defaultdict(list)
+    for entry, amount, kind in rows:
+        doc = (entry.get("DocNumber") or "").strip()
+        if not doc:
+            continue                      # Rippling's own entries carry none
+        by_sig[qbo_idempotency.signature(doc, entry.get("TxnDate"), amount)].append(
+            (entry, amount, kind)
+        )
+    duplicates = []
+    for sig, group in sorted(by_sig.items()):
+        if len(group) < 2:
+            continue
+        duplicates.append({
+            "doc_number": sig[0],
+            "txn_date":   sig[1],
+            "amount":     float(sig[2]),
+            "count":      len(group),
+            "qbo_ids":    [e.get("Id") for e, _, _ in group],
+            "memo":       (group[0][0].get("PrivateNote") or "")[:120],
+            "overstated_by": round(float(sig[2]) * (len(group) - 1), 2),
+        })
+
+    # ── recurring series ────────────────────────────────────────────────────
+    # Count alone is the wrong signal, and saying so costs nothing: August 2026
+    # legitimately holds two Vanta entries (the prepaid being set up, $8,832.60,
+    # and that month's amortization, $736.05), ContextBridge runs three
+    # depreciation schedules, and Rippling's employer tax posts twice a month.
+    # A check that called those duplicates would be ignored by the second month.
+    #
+    # The real signal is a REPEATED AMOUNT inside one series in one period. Two
+    # entries for $106.67 of Carta amortization in September is a duplicate;
+    # $8,832.60 and $736.05 of Vanta is a prepaid and its first amortization.
+    RECURRING = [
+        ("Carta",                 "accrual: carta ("),
+        ("Carta (equity mgmt)",   "accrual: carta (equity management)"),
+        ("Vanta",                 "vanta"),
+        ("Buckner",               "accrual: the buckner company"),
+        ("Hanover",               "hanover insurance"),
+        ("Domain amortization",   "amortization - domain name"),
+        ("Depreciation",          "depreciation - "),
+        ("Mercury Treasury fee",  "treasury fee"),
+        ("Rippling employer tax", "rippling employer tax contribution"),
+        ("People Center PEO",     "people center peo benefits fees"),
+    ]
+    notes = {str(e.get("Id")): (e.get("PrivateNote") or "").lower() for e, _, _ in rows}
+    series = []
+    for label, needle in RECURRING:
+        hits = []
+        for entry, amount, kind in rows:
+            note = notes.get(str(entry.get("Id")), "")
+            if needle not in note:
+                continue
+            # "Carta" would otherwise swallow "Carta (equity management)".
+            if label == "Carta" and "equity management" in note:
+                continue
+            hits.append({"qbo_id": entry.get("Id"), "amount": amount,
+                         "txn_date": entry.get("TxnDate"), "type": kind,
+                         "memo": (entry.get("PrivateNote") or "")[:80]})
+        repeated = defaultdict(list)
+        for h in hits:
+            repeated["%.2f" % h["amount"]].append(h["qbo_id"])
+        dup_amounts = {a: ids for a, ids in repeated.items() if len(ids) > 1}
+        series.append({
+            "name": label,
+            "count": len(hits),
+            "total": round(sum(h["amount"] for h in hits), 2),
+            "entries": hits,
+            "repeated_amounts": dup_amounts,
+            "status": "DUPLICATED" if dup_amounts else ("missing" if not hits else "ok"),
+            "overstated_by": round(
+                sum(float(a) * (len(ids) - 1) for a, ids in dup_amounts.items()), 2
+            ),
+        })
+
+    # ── orphans ─────────────────────────────────────────────────────────────
+    known = {
+        str(j.qbo_je_id)
+        for j in db.query(JournalEntry)
+        .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+        .filter(Transaction.client_id == client_id, JournalEntry.qbo_je_id.isnot(None))
+        .all()
+    }
+    orphans = []
+    for entry, amount, kind in rows:
+        if str(entry.get("Id")) in known:
+            continue
+        note = (entry.get("PrivateNote") or "").strip()
+        orphans.append({
+            "qbo_id": entry.get("Id"), "type": kind,
+            "doc_number": entry.get("DocNumber"), "txn_date": entry.get("TxnDate"),
+            "amount": amount, "memo": note[:100],
+            # A blank note is the signature of a QuickBooks entry this app never
+            # wrote — Rippling's own integration posts these.
+            "likely_external": not note,
+        })
+
+    dup_free   = not duplicates
+    series_ok  = all(x["status"] != "DUPLICATED" for x in series)
+    return CloseCheckResult(
+        period=period,
+        qbo_entries=len(rows),
+        duplicates=duplicates,
+        recurring_series=series,
+        orphans=orphans,
+        clean=dup_free and series_ok,
     )
 
 

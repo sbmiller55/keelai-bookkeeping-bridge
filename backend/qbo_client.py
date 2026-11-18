@@ -478,6 +478,27 @@ class QBOClient:
                 return out
             start_pos += 100
 
+    def list_purchases(self, start: str, end: str) -> list[dict]:
+        """Every Purchase QuickBooks holds between two dates (inclusive).
+
+        Read-only, and the companion to list_journal_entries: an entry with a
+        vendor paid from a bank or card is pushed as a Purchase, not a
+        JournalEntry, so a duplicate check that reads only journal entries
+        would miss the Rippling and People Center clearing entries entirely.
+        """
+        out: list[dict] = []
+        start_pos = 1
+        while True:
+            batch = self._query(
+                f"SELECT * FROM Purchase "
+                f"WHERE TxnDate >= '{start}' AND TxnDate <= '{end}' "
+                f"ORDER BY TxnDate STARTPOSITION {start_pos} MAXRESULTS 100"
+            )
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            start_pos += 100
+
     def delete_object(self, object_type: str, qbo_id: str):
         """Delete a Purchase or JournalEntry from QBO by fetching its SyncToken first."""
         path = f"/{object_type.lower()}/{qbo_id}"
