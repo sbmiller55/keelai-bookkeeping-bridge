@@ -11,6 +11,7 @@ import {
   updateChecklistItem,
   deleteChecklistItem,
 } from "@/lib/api";
+import CloseChecks from "./CloseChecks";
 
 // ── Due date helpers ───────────────────────────────────────────────────────────
 
@@ -352,6 +353,15 @@ export default function MonthlyClosePage() {
           </span>
         )}
       </div>
+
+      {/* Verify against QuickBooks before signing the month off. Sits above the
+          to-do list because it answers "is this month actually right?", which
+          is the question the checklist exists to settle. */}
+      <CloseChecks
+        clientId={clientId}
+        period={closeMonthStr}
+        periodLabel={formatMonthLabel(closeMonthStr)}
+      />
 
       {/* Add form — only shown when active */}
       {addingNew && (

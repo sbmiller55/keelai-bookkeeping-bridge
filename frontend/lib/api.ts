@@ -928,6 +928,92 @@ export type CloseChecklistItem = {
   completed_at: string | null;
 };
 
+// ── Close checks (read-only QuickBooks verification) ─────────────────────────
+
+export interface CloseCheckDuplicate {
+  doc_number: string;
+  txn_date: string;
+  amount: number;
+  count: number;
+  qbo_ids: string[];
+  memo: string;
+  overstated_by: number;
+}
+
+export interface CloseCheckSeries {
+  name: string;
+  count: number;
+  total: number;
+  entries: { qbo_id: string; amount: number; txn_date: string; type: string; memo: string }[];
+  repeated_amounts: Record<string, string[]>;
+  status: "ok" | "missing" | "DUPLICATED";
+  overstated_by: number;
+}
+
+export interface CloseCheckOrphan {
+  qbo_id: string;
+  type: string;
+  doc_number: string | null;
+  txn_date: string;
+  amount: number;
+  memo: string;
+  likely_external: boolean;
+}
+
+export interface CloseCheckResult {
+  period: string;
+  qbo_entries: number;
+  duplicates: CloseCheckDuplicate[];
+  recurring_series: CloseCheckSeries[];
+  orphans: CloseCheckOrphan[];
+  clean: boolean;
+}
+
+export interface TieOutSchedule {
+  kind: "prepaid" | "fixed_asset";
+  name: string;
+  monthly: number;
+  start: string;
+  end: string | null;
+  months_elapsed: number;
+  months_total: number;
+  expected_to_date: number;
+  keel_to_date: number;
+  qbo_to_date: number;
+  original_amount: number;
+  balance_expected: number;
+  balance_per_gl: number;
+  variance_qbo_vs_expected: number;
+  missing_periods: string[];
+  duplicated_periods: Record<string, string[]>;
+  status: string;
+  flags: string[];
+}
+
+export interface TieOutUnscheduled {
+  kind: string;
+  name: string;
+  periods: string[];
+  total: number;
+  note: string;
+}
+
+export interface TieOutResult {
+  period: string;
+  schedules: TieOutSchedule[];
+  unscheduled: TieOutUnscheduled[];
+  clean: boolean;
+  total_variance: number;
+}
+
+export function runCloseCheck(clientId: number, period: string): Promise<CloseCheckResult> {
+  return apiFetch<CloseCheckResult>(`/qbo/close-check?client_id=${clientId}&period=${period}`);
+}
+
+export function runScheduleTieOut(clientId: number, period: string): Promise<TieOutResult> {
+  return apiFetch<TieOutResult>(`/qbo/schedule-tieout?client_id=${clientId}&period=${period}`);
+}
+
 export function getCloseChecklist(clientId: number, closeMonth: string): Promise<CloseChecklistItem[]> {
   return apiFetch<CloseChecklistItem[]>(`/clients/${clientId}/close-checklist?close_month=${closeMonth}`);
 }
