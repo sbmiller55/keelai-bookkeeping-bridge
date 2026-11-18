@@ -34,21 +34,25 @@ import re
 from datetime import date, datetime
 from typing import Optional
 
-# Three memo shapes are in live use for the same thing, because two of these
-# schedules were set up by hand rather than generated:
-#   "Accrual: Carta (equity management) (2026-09)"   the generator's format
-#   "The Hanover Insurance Group accrual (2026-09)"       Payments-tab prepaid
-#   "The Hanover Insurance Group amortization (2026-04)"  ...same schedule, other word
-#   "Vanta Sep 2026 amortization"                         Vanta, by hand
-# All optionally key-stamped. Matching only the first leaves Hanover and Vanta
-# invisible; matching "accrual" but not "amortization" is worse still, because
-# it reports a confident phantom gap for the two months Hanover happened to
-# word differently.
+# Several memo shapes are in live use for the same thing, and all of them are
+# ours — this app wrote every one of them:
+#   "Accrual: Carta (2026-09)"                            routers/accruals.py
+#   "The Hanover Insurance Group accrual (2026-06)"       auto-release path
+#   "The Hanover Insurance Group amortization (2026-04)"  single-month path
+#   "Vanta Sep 2026 amortization"                         ai_coder.py
+#
+# The middle two were the same Hanover schedule worded two ways because two
+# code paths each built their own memo string. That is fixed at the source —
+# routers.accruals.monthly_memo is now the only place a monthly memo is
+# worded, and the word follows what the entry is rather than which button made
+# it. The patterns below still accept every shape, because the rows already in
+# QuickBooks keep the wording they were written with and a tie-out that only
+# understood the new one would report a phantom gap across all of history.
 _ACCRUAL_RES = (
+
     re.compile(r"^accrual:\s*(?P<vendor>.+?)\s*\((?P<period>\d{4}-\d{2})\)\s*(?:\[keel:[0-9a-f]+\])?$"),
-    # Hanover's own entries say "accrual" some months and "amortization" others
-    # for the same schedule, so both have to match or the tie-out reports a
-    # phantom gap in exactly the months that used the other word.
+    # Accepts both words: historical rows carry whichever one the code path
+    # that created them happened to use.
     re.compile(r"^(?P<vendor>.+?)\s+(?:accrual|amorti[sz]ation)\s*\((?P<period>\d{4}-\d{2})\)\s*(?:\[keel:[0-9a-f]+\])?$"),
     re.compile(r"^(?P<vendor>.+?)\s+(?P<month>[a-z]{3,9} \d{4})\s+amortization\s*(?:\[keel:[0-9a-f]+\])?$"),
 )

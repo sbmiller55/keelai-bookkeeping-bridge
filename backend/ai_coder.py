@@ -2,6 +2,7 @@
 import calendar
 import difflib
 import json
+import memo_format
 import os
 
 from sqlalchemy import func
@@ -436,7 +437,11 @@ def generate_prepaid_jes(
             "credit_account": prepaid_account,
             "amount": amount,
             "je_date": month_end,
-            "memo": f"{vendor} {month_dt.strftime('%b %Y')} amortization"[:80],
+            # Worded in memo_format so a prepaid coded here and one generated
+            # by the monthly release read identically — the tie-out matches
+            # schedules by memo text.
+            "memo": memo_format.monthly_memo(
+                vendor, month_dt.strftime("%Y-%m"), memo_format.PREPAID),
             "ai_confidence": confidence,
             "ai_reasoning": f"Month {i + 1} of {n_months}: amortization of prepaid {vendor}. {reasoning}",
             "service_period_start": month_dt,

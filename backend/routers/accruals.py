@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db
+import memo_format
 from models import (
     AccruedExpense,
     AccruedExpenseStatus,
@@ -59,6 +60,25 @@ def _get_client(client_id: int, user: User, db: Session) -> Client:
     if not client:
         raise HTTPException(404, "Client not found")
     return client
+
+
+def entry_kind(accrued_expense) -> str:
+    """"prepaid" or "accrual", from the account the entry credits."""
+    return memo_format.kind_for_credit_account(
+        getattr(accrued_expense, "credit_account", None))
+
+
+def monthly_memo(accrued_expense) -> str:
+    """This month's memo. Worded in memo_format, which every path shares."""
+    return memo_format.monthly_memo(
+        accrued_expense.vendor_name, accrued_expense.service_period,
+        entry_kind(accrued_expense))
+
+
+def monthly_description(accrued_expense) -> str:
+    return memo_format.monthly_description(
+        accrued_expense.vendor_name, accrued_expense.service_period,
+        entry_kind(accrued_expense))
 
 
 def _current_month() -> str:
@@ -247,8 +267,7 @@ def list_accruals(
         je = je_map.get(a.accrual_je_id) if a.accrual_je_id else None
         derived = _derive_status(a, je, this_month)
         # Determine kind: prepaid if credit account contains 'prepaid', else accrual
-        cred = (a.credit_account or "").lower()
-        kind = "prepaid" if "prepaid" in cred else "accrual"
+        kind = entry_kind(a)
 
         if derived == "upcoming" and a.service_period == this_month:
             upcoming_this_month_amount += a.amount
@@ -629,7 +648,7 @@ def release_accrual(
     tx = Transaction(
         client_id=client_id,
         date=je_date,
-        description=f"{ae.vendor_name} prepaid amortization ({ae.service_period})",
+        description=monthly_description(ae),
         counterparty_name=ae.vendor_name,
         amount=-abs(ae.amount),
         status=TransactionStatus.pending,
@@ -646,7 +665,7 @@ def release_accrual(
         credit_account=ae.credit_account,
         amount=ae.amount,
         je_date=je_date,
-        memo=f"{ae.vendor_name} amortization ({ae.service_period})"[:80],
+        memo=monthly_memo(ae),
         ai_confidence=ae.ai_confidence or 0.9,
         ai_reasoning=ae.ai_reasoning or "",
     )
@@ -700,7 +719,7 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
         tx = Transaction(
             client_id=client_id,
             date=je_date,
-            description=f"{ae.vendor_name} accrual release ({ae.service_period})",
+            description=monthly_description(ae),
             counterparty_name=ae.vendor_name,
             amount=-abs(ae.amount),
             status=TransactionStatus.pending,
@@ -716,7 +735,7 @@ def _auto_release_for_client(client_id: int, target_month: str, db: Session) -> 
             credit_account=ae.credit_account,
             amount=ae.amount,
             je_date=je_date,
-            memo=f"{ae.vendor_name} accrual ({ae.service_period})"[:80],
+            memo=monthly_memo(ae),
             ai_confidence=ae.ai_confidence or 0.9,
             ai_reasoning=ae.ai_reasoning or "",
         )
