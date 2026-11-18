@@ -1053,6 +1053,82 @@ def schedule_tieout_report(
             "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
         })
 
+    # ── prepaids coded straight to journal entries ──────────────────────────
+    # "Code as Prepaid" writes the whole year's amortization as journal entries
+    # against the original transaction and never creates accrued-expense rows,
+    # so a schedule built this way is invisible to everything above. Vanta is
+    # one: twelve $736.05 entries dated each month-end from August 2026, all
+    # thirteen of them pushed to QuickBooks in a twelve-second burst on
+    # 2026-09-04. Nothing posts monthly — the whole year was posted at once and
+    # future-dated, which is why it looks like a monthly entry appears.
+    je_rows = (db.query(JournalEntry, Transaction)
+               .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+               .filter(Transaction.client_id == client_id)
+               .filter(JournalEntry.je_date.isnot(None))
+               .all())
+    by_txn = defaultdict(list)
+    for je, tx in je_rows:
+        by_txn[je.transaction_id].append(je)
+
+    for txn_id, group in sorted(by_txn.items()):
+        if len(group) < 3:
+            continue
+        amounts = [round(float(j.amount or 0), 2) for j in group]
+        modal = max(set(amounts), key=amounts.count)
+        monthly_jes = [j for j in group
+                       if abs(round(float(j.amount or 0), 2) - modal) <= 0.05]
+        if len(monthly_jes) < 3 or modal <= 0:
+            continue
+        months = sorted({j.je_date.strftime("%Y-%m") for j in monthly_jes})
+        if len(months) != len(monthly_jes):
+            continue                    # two in a month: not one-per-month
+        if months != schedule_tieout.months_between(months[0], months[-1]):
+            continue                    # not consecutive
+        credit = next((j.credit_account for j in monthly_jes if j.credit_account), "")
+        if "prepaid" not in (credit or "").lower():
+            continue                    # only prepaid amortization, not payroll etc.
+        # "Vanta Aug 2026 amortization" and "Vanta amortization (2026-08)" both
+        # name the same schedule; strip the month either way so the row reads
+        # "Vanta" rather than "Vanta Aug 2026".
+        raw_memo = (monthly_jes[0].memo or "").strip()
+        vendor_label = re.sub(
+            r"\s*(?:\(\d{4}-\d{2}\)|[A-Z][a-z]{2,8}\s+\d{4})\s*|\s*amorti[sz]ation\s*",
+            " ", raw_memo).strip() or raw_memo
+        vendor = schedule_tieout._norm(vendor_label)
+        if vendor in seen_vendors:
+            continue
+        seen_vendors.add(vendor)
+
+        debit = next((j.debit_account for j in monthly_jes if j.debit_account), None)
+        through = min(period, months[-1])
+        periods = schedule_tieout.months_between(months[0], through)
+        if not periods:
+            continue
+        expected = round(modal * len(periods), 2)
+        keel_total = round(modal * len([m for m in months if m in set(periods)]), 2)
+        qbo_by_period = qbo_hits(debit, modal, periods, "Debit")
+        qbo_total = round(modal * sum(len(v) for v in qbo_by_period.values()), 2)
+        original = round(modal * len(months), 2)
+
+        schedules.append({
+            "kind": "prepaid", "rule_id": None, "source": "coded as prepaid",
+            "name": vendor_label,
+            "monthly": modal, "start": months[0], "end": months[-1],
+            "months_elapsed": len(periods), "months_total": len(months),
+            "expected_to_date": expected, "keel_to_date": keel_total,
+            "qbo_to_date": qbo_total,
+            "original_amount": original,
+            "balance_expected": round(original - expected, 2),
+            "balance_per_gl": round(original - qbo_total, 2),
+            "variance_qbo_vs_expected": round(qbo_total - expected, 2),
+            "missing_periods": [],
+            "duplicated_periods": {p: ids for p, ids in qbo_by_period.items() if len(ids) > 1},
+            "missing_in_qbo": [p for p in periods if not qbo_by_period.get(p)],
+            "anchor_account": debit,
+            "status": schedule_tieout.classify(expected, keel_total, qbo_total),
+            "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
+        })
+
     # ── fixed assets ────────────────────────────────────────────────────────
     for a in assets:
         name = schedule_tieout._norm(a.name)
