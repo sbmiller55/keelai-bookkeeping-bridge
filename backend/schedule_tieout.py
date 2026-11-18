@@ -37,14 +37,19 @@ from typing import Optional
 # Three memo shapes are in live use for the same thing, because two of these
 # schedules were set up by hand rather than generated:
 #   "Accrual: Carta (equity management) (2026-09)"   the generator's format
-#   "The Hanover Insurance Group accrual (2026-09)"  Hanover, entered by hand
-#   "Vanta Sep 2026 amortization"                    Vanta, entered by hand
-# All optionally key-stamped. Matching only the first would leave Hanover and
-# Vanta invisible to the tie-out — which is exactly the position they are in
-# today, amortizing monthly with nothing watching for a skipped month.
+#   "The Hanover Insurance Group accrual (2026-09)"       Payments-tab prepaid
+#   "The Hanover Insurance Group amortization (2026-04)"  ...same schedule, other word
+#   "Vanta Sep 2026 amortization"                         Vanta, by hand
+# All optionally key-stamped. Matching only the first leaves Hanover and Vanta
+# invisible; matching "accrual" but not "amortization" is worse still, because
+# it reports a confident phantom gap for the two months Hanover happened to
+# word differently.
 _ACCRUAL_RES = (
     re.compile(r"^accrual:\s*(?P<vendor>.+?)\s*\((?P<period>\d{4}-\d{2})\)\s*(?:\[keel:[0-9a-f]+\])?$"),
-    re.compile(r"^(?P<vendor>.+?)\s+accrual\s*\((?P<period>\d{4}-\d{2})\)\s*(?:\[keel:[0-9a-f]+\])?$"),
+    # Hanover's own entries say "accrual" some months and "amortization" others
+    # for the same schedule, so both have to match or the tie-out reports a
+    # phantom gap in exactly the months that used the other word.
+    re.compile(r"^(?P<vendor>.+?)\s+(?:accrual|amorti[sz]ation)\s*\((?P<period>\d{4}-\d{2})\)\s*(?:\[keel:[0-9a-f]+\])?$"),
     re.compile(r"^(?P<vendor>.+?)\s+(?P<month>[a-z]{3,9} \d{4})\s+amortization\s*(?:\[keel:[0-9a-f]+\])?$"),
 )
 # "Depreciation - Domain Name - September 2026", optionally key-stamped.
@@ -148,6 +153,41 @@ def asset_expected_periods(asset, through: str) -> list[str]:
     periods = months_between(start, through)
     life = int(getattr(asset, "useful_life_months", 0) or 0)
     return periods[:life] if life else periods
+
+
+def derive_schedule(rows) -> Optional[dict]:
+    """Infer a fixed amortization schedule from its own AccruedExpense rows.
+
+    A prepaid does not need a StandingAccrualRule to be a real schedule. The
+    Payments tab creates prepaids directly as accrued-expense rows with no
+    standing rule attached, which is how Hanover is set up — twelve rows,
+    April 2026 to March 2027, $139.83 a month, every one of them real. Reading
+    only standing rules made the tie-out call that "unscheduled" and skip it,
+    which is precisely backwards: it is scheduled, this app simply held the
+    schedule somewhere else.
+
+    Returns None for a vendor whose rows are variable accruals rather than an
+    amortization schedule. The discriminator is the thing that makes a schedule
+    a schedule: several periods, all for materially the same amount. Relentful
+    and Morrison & Foerster bill a different amount every month and have no
+    promise to test; Hanover, Buckner and Carta repeat to the cent.
+    """
+    periods = sorted({r.service_period for r in rows if r.service_period})
+    if len(periods) < 3:
+        return None
+    amounts = [round(float(r.amount or 0), 2) for r in rows if r.amount]
+    if not amounts:
+        return None
+    # The modal amount is the schedule's monthly charge; a final stub month
+    # that differs by a few cents of rounding is normal and must not disqualify.
+    modal = max(set(amounts), key=amounts.count)
+    if modal <= 0:
+        return None
+    consistent = sum(1 for a in amounts if abs(a - modal) <= max(0.05, modal * 0.01))
+    if consistent < len(amounts) * 0.8:
+        return None                     # variable accrual, not an amortization
+    return {"monthly": modal, "start": periods[0], "end": periods[-1],
+            "periods": periods}
 
 
 def flags(expected_total: float, keel_total: float, qbo_total: float,

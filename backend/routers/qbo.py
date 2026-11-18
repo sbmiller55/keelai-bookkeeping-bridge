@@ -977,33 +977,53 @@ def schedule_tieout_report(
     seen_vendors: set = set()
     seen_assets: set  = set()
 
-    # ── prepaid / standing accrual schedules ────────────────────────────────
-    for r in rules:
-        if not r.schedule_end_month or not r.amount:
-            continue            # open-ended or variable amount: no fixed promise to test
-        vendor = schedule_tieout._norm(r.vendor_name)
-        seen_vendors.add(vendor)
-        own = [a for a in accrual_rows if a.standing_rule_id == r.id and a.service_period]
-        start = min((a.service_period for a in own), default=None)
-        if not start:
-            start = min((p for (v, p) in list(keel_accrual) if v == vendor), default=None)
-        if not start:
+    # ── prepaid / amortization schedules ────────────────────────────────────
+    # Keyed on the vendor, not on StandingAccrualRule. A prepaid created from
+    # the Payments tab has no standing rule — Hanover is twelve real rows with
+    # standing_rule_id None — and reading only standing rules called that
+    # "unscheduled" and skipped it. The accrued-expense rows ARE the schedule;
+    # a standing rule, where one exists, just states the promise more exactly.
+    rows_by_vendor = defaultdict(list)
+    for a in accrual_rows:
+        if a.vendor_name:
+            rows_by_vendor[a.vendor_name].append(a)
+    rule_by_vendor = {r.vendor_name: r for r in rules}
+
+    for vendor_name, own in sorted(rows_by_vendor.items()):
+        rule = rule_by_vendor.get(vendor_name)
+        derived = schedule_tieout.derive_schedule(own)
+        if rule is not None and rule.schedule_end_month and rule.amount:
+            monthly = round(float(rule.amount), 2)
+            start_p = min((a.service_period for a in own if a.service_period),
+                          default=(derived or {}).get("start"))
+            end_p   = rule.schedule_end_month
+            source  = "standing rule"
+        elif derived:
+            monthly, start_p, end_p = derived["monthly"], derived["start"], derived["end"]
+            source = "prepaid schedule"
+        else:
+            continue                    # variable accrual: no fixed promise to test
+        if not start_p:
             continue
 
-        through  = min(period, r.schedule_end_month)
-        periods  = schedule_tieout.months_between(start, through)
-        monthly  = round(float(r.amount), 2)
+        vendor  = schedule_tieout._norm(vendor_name)
+        seen_vendors.add(vendor)
+        through = min(period, end_p)
+        periods = schedule_tieout.months_between(start_p, through)
+        if not periods:
+            continue
         expected = round(monthly * len(periods), 2)
         keel_total = round(sum(a for p in periods
                                for _, a in keel_accrual.get((vendor, p), [])), 2)
         qbo_total  = round(sum(a for p in periods
                                for _, a in qbo_accrual.get((vendor, p), [])), 2)
-        all_periods = schedule_tieout.months_between(start, r.schedule_end_month)
+        all_periods = schedule_tieout.months_between(start_p, end_p)
         original = round(monthly * len(all_periods), 2)
 
         schedules.append({
-            "kind": "prepaid", "name": r.vendor_name, "rule_id": r.id,
-            "monthly": monthly, "start": start, "end": r.schedule_end_month,
+            "kind": "prepaid", "name": vendor_name,
+            "rule_id": rule.id if rule else None, "source": source,
+            "monthly": monthly, "start": start_p, "end": end_p,
             "months_elapsed": len(periods), "months_total": len(all_periods),
             "expected_to_date": expected, "keel_to_date": keel_total,
             "qbo_to_date": qbo_total,

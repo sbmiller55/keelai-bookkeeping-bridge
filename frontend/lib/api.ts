@@ -1006,12 +1006,14 @@ export interface TieOutResult {
   total_variance: number;
 }
 
+// The QBO router is mounted at /clients/{client_id}/qbo — client_id is a PATH
+// segment, not a query parameter. Calling /qbo/... returns 404.
 export function runCloseCheck(clientId: number, period: string): Promise<CloseCheckResult> {
-  return apiFetch<CloseCheckResult>(`/qbo/close-check?client_id=${clientId}&period=${period}`);
+  return apiFetch<CloseCheckResult>(`/clients/${clientId}/qbo/close-check?period=${period}`);
 }
 
 export function runScheduleTieOut(clientId: number, period: string): Promise<TieOutResult> {
-  return apiFetch<TieOutResult>(`/qbo/schedule-tieout?client_id=${clientId}&period=${period}`);
+  return apiFetch<TieOutResult>(`/clients/${clientId}/qbo/schedule-tieout?period=${period}`);
 }
 
 export function getCloseChecklist(clientId: number, closeMonth: string): Promise<CloseChecklistItem[]> {

@@ -257,13 +257,13 @@ export default function CloseChecks({
                 <div key={u.name} className="flex items-baseline justify-between gap-2 py-1 border-b border-gray-800 last:border-b-0">
                   <p className="text-sm text-gray-200 capitalize truncate">{u.name}</p>
                   <p className="text-[11px] text-gray-500 whitespace-nowrap">
-                    {u.periods.length} month{u.periods.length === 1 ? "" : "s"} · {money(u.total)}
+                    {u.periods.length} month{u.periods.length === 1 ? "" : "s"} in QuickBooks · {money(u.total)}
                   </p>
                 </div>
               ))}
               <p className="text-[11px] text-gray-500 mt-1">
-                These are being amortized by hand. Nothing would notice a skipped month until
-                a schedule exists here.
+                Amortizing in QuickBooks with nothing here tracking the schedule, so a skipped
+                month would go unnoticed. Set one up in Payments → prepaid expenses.
               </p>
             </div>
           )}
