@@ -12,6 +12,7 @@ from database import get_db
 import models
 import audit
 import schemas
+import prepaid_rows
 from ai_coder import generate_prepaid_jes, _parse_month, _add_months
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
@@ -757,7 +758,9 @@ def code_as_prepaid(
     vendor = tx.counterparty_name or tx.description or "Vendor"
     total_amount = abs(tx.amount)
 
-    # Delete existing JEs
+    # Delete existing JEs. The prepaid rows that track them are replaced below,
+    # in sync_for_transaction — rows left pointing at deleted entries would
+    # show a schedule that no longer exists.
     db.query(models.JournalEntry).filter(models.JournalEntry.transaction_id == tx.id).delete()
 
     je_data_list = generate_prepaid_jes(
@@ -792,6 +795,26 @@ def code_as_prepaid(
         )
         db.add(je)
         created.append(je)
+
+    # Give the schedule the rows the Payments tab lists. This path writes the
+    # whole year's entries up front and used to stop there, so a prepaid coded
+    # here was right in QuickBooks and invisible in the app — Vanta sat that
+    # way from August 2026 until someone went looking for it.
+    #
+    # Flush first so every entry has an id to link to. Each row carries
+    # accrual_je_id, which is also what stops _auto_release_for_client ever
+    # posting a second entry for a month that already has one.
+    db.flush()
+    prepaid_rows.sync_for_transaction(
+        db,
+        client_id=tx.client_id,
+        transaction_id=tx.id,
+        journal_entries=created,
+        prepaid_account=payload.prepaid_account,
+        vendor_name=vendor,
+        description=f"{vendor} prepaid, amortized "
+                    f"{service_start.strftime('%b %Y')}–{service_end.strftime('%b %Y')}",
+    )
 
     db.commit()
     for je in created:
