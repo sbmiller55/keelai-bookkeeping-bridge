@@ -946,18 +946,26 @@ def schedule_tieout_report(
         return (qbo_idempotency.debit_total(e) if e.get("Line")
                 else qbo_idempotency.purchase_total(e))
 
-    # Index QuickBooks by what each entry IS, parsed from its memo.
-    qbo_accrual = defaultdict(list)
-    qbo_asset   = defaultdict(list)
+    # QuickBooks entries are matched to a schedule by the ACCOUNT they post to
+    # and the amount, not by their memo. Memo matching failed in both
+    # directions on live data: the Domain Name's first four months carry no
+    # memo (they predate this app) and Hanover's April reads "Business Owners
+    # Advantage Policy - April 2026". Both were invisible, and the tie-out
+    # reported confident variances that were not real.
+    qbo_entries = []
     for e in qbo_rows:
-        note, amt = e.get("PrivateNote") or "", _amount(e)
-        hit = schedule_tieout.parse_accrual_memo(note)
-        if hit:
-            qbo_accrual[hit].append((e.get("Id"), amt))
-            continue
-        hit = schedule_tieout.parse_asset_memo(note)
-        if hit:
-            qbo_asset[hit].append((e.get("Id"), amt))
+        txn_date = (e.get("TxnDate") or "")[:7]
+        if txn_date:
+            qbo_entries.append((txn_date, e))
+
+    def qbo_hits(account, amount, periods, posting=None):
+        """QBO entries posting `amount` to `account`, grouped by month."""
+        found = defaultdict(list)
+        wanted = set(periods)
+        for per, e in qbo_entries:
+            if per in wanted and schedule_tieout.entry_hits(e, account, amount, posting):
+                found[per].append(e.get("Id"))
+        return found
 
     keel_accrual = defaultdict(list)
     keel_asset   = defaultdict(list)
@@ -1015,8 +1023,13 @@ def schedule_tieout_report(
         expected = round(monthly * len(periods), 2)
         keel_total = round(sum(a for p in periods
                                for _, a in keel_accrual.get((vendor, p), [])), 2)
-        qbo_total  = round(sum(a for p in periods
-                               for _, a in qbo_accrual.get((vendor, p), [])), 2)
+        # The expense account this schedule debits each month is its anchor in
+        # the ledger. Hanover and Buckner both debit Business insurance, so the
+        # amount separates them; both are distinct to the cent.
+        expense_acct = (getattr(rule, "expense_account", None)
+                        or next((a.debit_account for a in own if a.debit_account), None))
+        qbo_by_period = qbo_hits(expense_acct, monthly, periods, "Debit")
+        qbo_total = round(monthly * sum(len(v) for v in qbo_by_period.values()), 2)
         all_periods = schedule_tieout.months_between(start_p, end_p)
         original = round(monthly * len(all_periods), 2)
 
@@ -1032,9 +1045,10 @@ def schedule_tieout_report(
             "balance_per_gl": round(original - qbo_total, 2),
             "variance_qbo_vs_expected": round(qbo_total - expected, 2),
             "missing_periods": [p for p in periods if not keel_accrual.get((vendor, p))],
-            "duplicated_periods": {p: [i for i, _ in qbo_accrual[(vendor, p)]]
-                                   for p in periods
-                                   if len(qbo_accrual.get((vendor, p), [])) > 1},
+            "duplicated_periods": {p: ids for p, ids in qbo_by_period.items()
+                                   if len(ids) > 1},
+            "missing_in_qbo": [p for p in periods if not qbo_by_period.get(p)],
+            "anchor_account": expense_acct,
             "status": schedule_tieout.classify(expected, keel_total, qbo_total),
             "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
         })
@@ -1050,8 +1064,13 @@ def schedule_tieout_report(
         expected = round(monthly * len(periods), 2)
         keel_total = round(sum(x for p in periods
                                for _, x in keel_asset.get((name, p), [])), 2)
-        qbo_total  = round(sum(x for p in periods
-                               for _, x in qbo_asset.get((name, p), [])), 2)
+        # Credits to this asset's accumulated account ARE its depreciation to
+        # date. The two MacBooks share one accumulated account, so the monthly
+        # amount tells them apart ($62.75 against $74.74).
+        accum_acct = (getattr(a, "qbo_accum_dep_account", None)
+                      or getattr(a, "qbo_dep_expense_account", None))
+        qbo_by_period = qbo_hits(accum_acct, monthly, periods, "Credit")
+        qbo_total = round(monthly * sum(len(v) for v in qbo_by_period.values()), 2)
         depreciable = round(float(a.purchase_price or 0) - float(a.salvage_value or 0), 2)
 
         schedules.append({
@@ -1066,41 +1085,48 @@ def schedule_tieout_report(
             "balance_per_gl": round(depreciable - qbo_total, 2),
             "variance_qbo_vs_expected": round(qbo_total - expected, 2),
             "missing_periods": [p for p in periods if not keel_asset.get((name, p))],
-            "duplicated_periods": {p: [i for i, _ in qbo_asset[(name, p)]]
-                                   for p in periods
-                                   if len(qbo_asset.get((name, p), [])) > 1},
+            "duplicated_periods": {p: ids for p, ids in qbo_by_period.items()
+                                   if len(ids) > 1},
+            "missing_in_qbo": [p for p in periods if not qbo_by_period.get(p)],
+            "anchor_account": accum_acct,
             "status": schedule_tieout.classify(expected, keel_total, qbo_total),
             "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
         })
 
-    # ── recurring series in QuickBooks that no schedule here backs ──────────
-    by_vendor = defaultdict(list)
-    for (vendor, p), hits in qbo_accrual.items():
-        if vendor in seen_vendors:
-            continue
-        by_vendor[vendor].append((p, round(sum(a for _, a in hits), 2)))
+    # ── recurring in QuickBooks that no schedule here accounts for ─────────
+    # Found by looking for a repeating monthly charge against Prepaid expenses
+    # that none of the schedules above claimed. This is how Vanta shows up: it
+    # amortizes $736.05 a month in QuickBooks with no accrued-expense rows here
+    # at all, so nothing would notice if a month were skipped.
+    claimed = set()
+    for sch in schedules:
+        for per in schedule_tieout.months_between(sch["start"], sch["end"] or period):
+            claimed.add((round(sch["monthly"], 2), per))
+
+    by_amount = defaultdict(list)
+    for per, e in qbo_entries:
+        for name, posting, amt in schedule_tieout.entry_lines(e):
+            if posting != "Credit" or amt <= 0:
+                continue
+            if not schedule_tieout.account_matches(name, "Prepaid expenses"):
+                continue
+            if (amt, per) in claimed:
+                continue
+            by_amount[amt].append((per, e.get("Id"), (e.get("PrivateNote") or "")[:60]))
+
     unscheduled = []
-    for vendor, entries in sorted(by_vendor.items()):
-        entries.sort()
+    for amt, hits in sorted(by_amount.items(), key=lambda kv: -kv[0]):
+        periods_seen = sorted({p for p, _, _ in hits})
+        if len(periods_seen) < 2:
+            continue            # a one-off prepaid release, not a schedule
+        label = next((n for _, _, n in hits if n), "$%.2f monthly" % amt)
         unscheduled.append({
-            "kind": "prepaid", "name": vendor,
-            "periods": [p for p, _ in entries],
-            "total": round(sum(t for _, t in entries), 2),
-            "note": "posted in QuickBooks with no schedule in this app — "
-                    "a skipped month would go unnoticed",
-        })
-    by_asset = defaultdict(list)
-    for (nm, p), hits in qbo_asset.items():
-        if nm in seen_assets:
-            continue
-        by_asset[nm].append((p, round(sum(a for _, a in hits), 2)))
-    for nm, entries in sorted(by_asset.items()):
-        entries.sort()
-        unscheduled.append({
-            "kind": "fixed_asset", "name": nm,
-            "periods": [p for p, _ in entries],
-            "total": round(sum(t for _, t in entries), 2),
-            "note": "depreciation in QuickBooks with no asset record here",
+            "kind": "prepaid",
+            "name": re.sub(r"\s*\(?\d{4}-\d{2}\)?|\s+[A-Z][a-z]{2} \d{4}", "", label).strip()
+                    or ("$%.2f monthly" % amt),
+            "periods": periods_seen,
+            "total": round(amt * len(hits), 2),
+            "note": "amortizing in QuickBooks with no schedule in this app",
         })
 
     return TieOutResult(

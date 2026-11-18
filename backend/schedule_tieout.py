@@ -159,6 +159,67 @@ def asset_expected_periods(asset, through: str) -> list[str]:
     return periods[:life] if life else periods
 
 
+def account_matches(qbo_name: Optional[str], wanted: Optional[str]) -> bool:
+    """Is this QuickBooks account the one a schedule posts to?
+
+    QuickBooks returns a fully qualified name ("Insurance:Business insurance")
+    where the schedule stores the leaf ("Business insurance"), and the stored
+    name can itself be qualified. Compare on the leaf, which is what both
+    always agree on.
+    """
+    if not qbo_name or not wanted:
+        return False
+    a, b = _norm(qbo_name), _norm(wanted)
+    if a == b:
+        return True
+    return a.split(":")[-1].strip() == b.split(":")[-1].strip()
+
+
+def entry_lines(entry: dict):
+    """(account_name, posting_type, amount) for every line of a QBO object.
+
+    Purchases carry no PostingType - the whole object is a debit to the expense
+    account - so they are reported as debits to keep one shape for the caller.
+    """
+    out = []
+    for line in entry.get("Line") or []:
+        detail = line.get("JournalEntryLineDetail")
+        amount = round(float(line.get("Amount") or 0), 2)
+        if detail:
+            out.append(((detail.get("AccountRef") or {}).get("name"),
+                        detail.get("PostingType"), amount))
+            continue
+        exp = line.get("AccountBasedExpenseLineDetail")
+        if exp:
+            out.append(((exp.get("AccountRef") or {}).get("name"), "Debit", amount))
+    return out
+
+
+def entry_hits(entry: dict, account: Optional[str], amount: float,
+               posting: Optional[str] = None, tolerance: float = 0.01) -> bool:
+    """Does this QuickBooks entry post `amount` to `account`?
+
+    This is how a schedule is matched to the ledger, and it replaces matching
+    on the memo. Memo matching was wrong in both directions on live data: the
+    Domain Name's first four months carry no memo at all (they predate this
+    app) and were invisible, and Hanover's April reads "Business Owners
+    Advantage Policy - April 2026", which looks nothing like an amortization.
+    Between them that understated QuickBooks by $137.16 and $139.83 and
+    produced two confident findings that were not real.
+
+    The account and the amount are what the ledger is actually made of. A memo
+    is a label somebody typed.
+    """
+    for name, posting_type, amt in entry_lines(entry):
+        if abs(amt - amount) > tolerance:
+            continue
+        if posting and posting_type and posting_type != posting:
+            continue
+        if account_matches(name, account):
+            return True
+    return False
+
+
 def derive_schedule(rows) -> Optional[dict]:
     """Infer a fixed amortization schedule from its own AccruedExpense rows.
 
@@ -198,15 +259,22 @@ def flags(expected_total: float, keel_total: float, qbo_total: float,
           tolerance: float = 0.01) -> list[str]:
     """Every way this schedule is out, not just the first one found.
 
-    A schedule can fail two ways at once and both need fixing: the Domain Name
-    was short one generated month AND had three months generated that never
-    reached QuickBooks. Reporting only the first would have hidden $102.87 of
-    amortization missing from the ledger behind a one-month generation gap.
+    A schedule can fail two ways at once and both need fixing, so this returns
+    a list rather than a verdict.
+
+    "Not exported" is judged against what SHOULD have been exported, not
+    against everything sitting in this app. Buckner has May 2026 three times
+    locally; only one copy belongs in QuickBooks and only one is there, so the
+    ledger is correct and the extras are a local problem. Comparing raw totals
+    called that "not exported" too, which reads as money missing from the books
+    when nothing is missing at all.
     """
     out = []
     if qbo_total - keel_total > tolerance:
         out.append("duplicated_in_qbo")
-    if keel_total - qbo_total > tolerance:
+    # Only the entries the schedule actually calls for are owed to QuickBooks.
+    owed = min(keel_total, expected_total)
+    if owed - qbo_total > tolerance:
         out.append("not_exported")
     if expected_total - keel_total > tolerance:
         out.append("not_generated")
