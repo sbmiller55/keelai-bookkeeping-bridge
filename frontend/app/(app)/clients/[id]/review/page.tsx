@@ -34,6 +34,27 @@ const DEFAULT_COL_WIDTHS = {
 };
 type ColKey = keyof typeof DEFAULT_COL_WIDTHS;
 const COL_WIDTHS_KEY = "bb-review-col-widths";
+const HIDDEN_COLS_KEY = "bb-review-hidden-cols";
+
+// What each column is called in the Columns menu, in table order.
+const COL_LABELS: Record<ColKey, string> = {
+  date: "Date", description: "Description", amount: "Amount", category: "Category",
+  debit: "Debit account", credit: "Credit account", customer: "Customer",
+  jeAmt: "JE amount", memo: "Memo", conf: "Confidence",
+  reasoning: "Reasoning", actions: "Actions",
+};
+
+// Description and Actions always stay: one identifies the row, the other is
+// how you act on it, and a queue with neither cannot be worked.
+const ALWAYS_SHOWN: ColKey[] = ["description", "actions"];
+
+function loadHiddenCols(): ColKey[] {
+  try {
+    const raw = typeof window !== "undefined" ? localStorage.getItem(HIDDEN_COLS_KEY) : null;
+    const parsed: ColKey[] = raw ? JSON.parse(raw) : [];
+    return parsed.filter((c) => c in DEFAULT_COL_WIDTHS && !ALWAYS_SHOWN.includes(c));
+  } catch { return []; }
+}
 
 function loadColWidths(): typeof DEFAULT_COL_WIDTHS {
   try {
@@ -760,7 +781,7 @@ function JeRow({
     )}
     <tr className={`border-b border-gray-800 ${isFirst && !je.is_ai_matched ? "border-t border-t-gray-700" : ""} hover:bg-gray-800/20 transition-colors`}>
       {/* Date — per JE row */}
-      <td className={`${cellBase} whitespace-nowrap`}>
+      <td data-col="date" className={`${cellBase} whitespace-nowrap`}>
         <input
           type="date"
           value={jeDate}
@@ -777,7 +798,7 @@ function JeRow({
 
       {/* Description — only on first row */}
       {isFirst ? (
-        <td className={`${cellBase}`} rowSpan={txRowCount}>
+        <td data-col="description" className={`${cellBase}`} rowSpan={txRowCount}>
           <div className="truncate text-white font-medium">{tx.description}</div>
           {tx.counterparty_name && tx.counterparty_name !== tx.description && (
             <div className="truncate text-gray-500 text-xs">{tx.counterparty_name}</div>
@@ -790,7 +811,7 @@ function JeRow({
 
       {/* TX Amount — only on first row */}
       {isFirst ? (
-        <td className={`${cellBase} text-right whitespace-nowrap font-mono`} rowSpan={txRowCount}>
+        <td data-col="amount" className={`${cellBase} text-right whitespace-nowrap font-mono`} rowSpan={txRowCount}>
           <span className={tx.amount < 0 ? "text-red-400" : "text-green-400"}>
             {tx.amount < 0 ? "-" : "+"}${Math.abs(tx.amount).toLocaleString("en-US", { minimumFractionDigits: 2 })}
           </span>
@@ -799,7 +820,7 @@ function JeRow({
 
       {/* Category — only on first row */}
       {isFirst ? (
-        <td className={`${cellBase} whitespace-nowrap`} rowSpan={txRowCount}>
+        <td data-col="category" className={`${cellBase} whitespace-nowrap`} rowSpan={txRowCount}>
           {formatCategory(tx.mercury_category) ? (
             <span className="text-gray-400 text-xs truncate block">{formatCategory(tx.mercury_category)}</span>
           ) : null}
@@ -807,17 +828,17 @@ function JeRow({
       ) : null}
 
       {/* Debit account */}
-      <td className={`${cellBase}`}>
+      <td data-col="debit" className={`${cellBase}`}>
         <AccountSelect value={debit} onChange={handleDebitChange} accounts={accounts} />
       </td>
 
       {/* Credit account */}
-      <td className={`${cellBase}`}>
+      <td data-col="credit" className={`${cellBase}`}>
         <AccountSelect value={credit} onChange={handleCreditChange} accounts={accounts} />
       </td>
 
       {/* Customer — only for money-in / income (deposits + interest earned) */}
-      <td className={`${cellBase}`}>
+      <td data-col="customer" className={`${cellBase}`}>
         {showCustomer ? (
           <CustomerSelect value={customer} onChange={handleCustomerChange} customers={customers} />
         ) : (
@@ -826,7 +847,7 @@ function JeRow({
       </td>
 
       {/* JE Amount */}
-      <td className={`${cellBase} text-right whitespace-nowrap`}>
+      <td data-col="jeAmt" className={`${cellBase} text-right whitespace-nowrap`}>
         <input
           type="text"
           inputMode="decimal"
@@ -839,7 +860,7 @@ function JeRow({
       </td>
 
       {/* Memo */}
-      <td className={`${cellBase}`}>
+      <td data-col="memo" className={`${cellBase}`}>
         <input
           value={memo}
           onChange={(e) => handleMemoChange(e.target.value)}
@@ -850,7 +871,7 @@ function JeRow({
       </td>
 
       {/* Confidence */}
-      <td className={`${cellBase} text-center`}>
+      <td data-col="conf" className={`${cellBase} text-center`}>
         {saving ? (
           <span className="w-3 h-3 border border-gray-500 border-t-transparent rounded-full animate-spin inline-block" />
         ) : (
@@ -860,7 +881,7 @@ function JeRow({
       </td>
 
       {/* AI Reasoning */}
-      <td className={`${cellBase}`}>
+      <td data-col="reasoning" className={`${cellBase}`}>
         {je.ai_reasoning ? (
           <span className="text-gray-600 text-xs line-clamp-2 cursor-help" title={je.ai_reasoning}>
             {je.ai_reasoning}
@@ -871,7 +892,7 @@ function JeRow({
       </td>
 
       {/* Actions */}
-      <td className={`${cellBase} whitespace-nowrap`}>
+      <td data-col="actions" className={`${cellBase} whitespace-nowrap`}>
         <div className="flex items-center gap-1">
           {isFirst && (
             <button
@@ -1037,14 +1058,14 @@ function NoJeRow({ tx }: { tx: TransactionWithEntries }) {
   const cellBase = "px-3 py-2 text-xs align-middle";
   return (
     <tr className="border-t border-gray-700 border-b border-gray-800 bg-red-950/10">
-      <td className={`${cellBase} text-gray-400 whitespace-nowrap`}>
+      <td data-col="date" className={`${cellBase} text-gray-400 whitespace-nowrap`}>
         {tx.date ? new Date(tx.date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—"}
       </td>
-      <td className={`${cellBase}`}>
+      <td data-col="description" className={`${cellBase}`}>
         <div className="truncate text-white font-medium">{tx.description}</div>
         {tx.counterparty_name && <div className="truncate text-gray-500 text-xs">{tx.counterparty_name}</div>}
       </td>
-      <td className={`${cellBase} text-right whitespace-nowrap font-mono`}>
+      <td data-col="amount" className={`${cellBase} text-right whitespace-nowrap font-mono`}>
         <span className={tx.amount < 0 ? "text-red-400" : "text-green-400"}>
           {tx.amount < 0 ? "-" : "+"}${Math.abs(tx.amount).toLocaleString("en-US", { minimumFractionDigits: 2 })}
         </span>
@@ -1073,12 +1094,35 @@ export default function ReviewQueuePage() {
   const [approvingAll, setApprovingAll] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [dateRange, setDateRange] = useState<DateRangeOption>("since_last_sync");
+  const [dateRange, setDateRange] = useState<DateRangeOption>("last_month");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [sortBy, setSortBy] = useState<"standard" | "amount" | "confidence" | "debit" | "credit">("standard");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [colWidths, setColWidths] = useState<typeof DEFAULT_COL_WIDTHS>(loadColWidths);
+  const [hiddenCols, setHiddenCols] = useState<ColKey[]>([]);
+  // "all", or a "YYYY-MM" to work one month at a time.
+  const [monthFilter, setMonthFilter] = useState<string>("all");
+  const [colMenuOpen, setColMenuOpen] = useState(false);
+
+  // Read on mount rather than seeding state from localStorage during render:
+  // the server has none, so the first client render would disagree with the
+  // server's and React throws the tree away.
+  useEffect(() => { setHiddenCols(loadHiddenCols()); }, []);
+
+  function toggleCol(col: ColKey) {
+    if (ALWAYS_SHOWN.includes(col)) return;
+    setHiddenCols((prev) => {
+      const next = prev.includes(col) ? prev.filter((c) => c !== col) : [...prev, col];
+      try { localStorage.setItem(HIDDEN_COLS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+
+  function showAllCols() {
+    setHiddenCols([]);
+    try { localStorage.setItem(HIDDEN_COLS_KEY, "[]"); } catch {}
+  }
   const [fixedAssetTarget, setFixedAssetTarget] = useState<{ tx: TransactionWithEntries; jeId: number } | null>(null);
   const [prepaidTarget, setPrepaidTarget] = useState<TransactionWithEntries | null>(null);
 
@@ -1295,7 +1339,10 @@ export default function ReviewQueuePage() {
   }
 
   async function approveAll() {
-    const approvable = items.filter((t) => t.journal_entries.length > 0);
+    // What is on screen, not everything loaded. With a month filter active the
+    // two differ, and approving rows the user cannot see — November's, while
+    // they are closing October — is not something to do quietly.
+    const approvable = visibleItems.filter((t) => t.journal_entries.length > 0);
     setApprovingAll(true);
     try {
       // Run sequentially so we can collect per-tx COA-validation failures.
@@ -1324,7 +1371,41 @@ export default function ReviewQueuePage() {
     }
   }
 
-  const sortedItems = [...items].sort((a, b) => {
+  // Months present in the queue, newest first, each with how many rows it holds.
+  // Built from what is actually loaded rather than a fixed range, so a month
+  // with nothing in it never appears as an empty choice.
+  const availableMonths = (() => {
+    const counts = new Map<string, number>();
+    for (const t of items) {
+      if (!t.date) continue;
+      const d = new Date(t.date);
+      if (isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([value, count]) => {
+        const [y, m] = value.split("-").map(Number);
+        return {
+          value,
+          count,
+          label: new Date(y, m - 1, 1).toLocaleDateString("en-US",
+            { month: "short", year: "numeric" }),
+        };
+      });
+  })();
+
+  // Filter before sorting, so the counts below the heading describe what is
+  // actually on screen.
+  const visibleItems = monthFilter === "all" ? items : items.filter((t) => {
+    if (!t.date) return false;
+    const d = new Date(t.date);
+    if (isNaN(d.getTime())) return false;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` === monthFilter;
+  });
+
+  const sortedItems = [...visibleItems].sort((a, b) => {
     let cmp = 0;
     if (sortBy === "amount") {
       cmp = Math.abs(a.amount) - Math.abs(b.amount);
@@ -1343,6 +1424,19 @@ export default function ReviewQueuePage() {
   const coded = sortedItems.filter((t) => t.journal_entries.length > 0);
   const uncoded = sortedItems.filter((t) => t.journal_entries.length === 0);
 
+  const isHidden = (c: ColKey) => hiddenCols.includes(c);
+
+  // A hidden column keeps its cell and loses its width. Dropping the cells
+  // instead would be simpler to read but wrong: the first four columns use
+  // rowSpan across a transaction's entries and the empty-state rows use
+  // colSpan, so removing cells pulls those rows out of alignment. Collapsing
+  // to zero and clipping leaves every row structurally identical.
+  const hiddenColCss = hiddenCols.length === 0 ? "" : hiddenCols
+    .map((c) => `[data-col="${c}"]{padding-left:0!important;padding-right:0!important;` +
+                `overflow:hidden!important;white-space:nowrap!important;` +
+                `border-left-width:0!important;border-right-width:0!important}`)
+    .join("");
+
   // Resize handle rendered inside each <th>
   const handle = (col: ColKey) => (
     <div
@@ -1353,6 +1447,7 @@ export default function ReviewQueuePage() {
 
   return (
     <div className="w-full">
+      {hiddenColCss && <style>{hiddenColCss}</style>}
       {fixedAssetTarget && (
         <FixedAssetPanel
           tx={fixedAssetTarget.tx}
@@ -1384,8 +1479,19 @@ export default function ReviewQueuePage() {
         <div className="mr-2">
           <h1 className="text-xl font-bold text-white">Review Queue</h1>
           <p className="text-gray-500 text-xs mt-0.5">
-            {items.length} pending
+            {monthFilter === "all"
+              ? `${items.length} pending`
+              : `${visibleItems.length} of ${items.length} pending`}
             {uncoded.length > 0 && ` · ${uncoded.length} need coding`}
+            {monthFilter !== "all" && (
+              <>
+                {" · "}
+                <button onClick={() => setMonthFilter("all")}
+                  className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+                  showing one month
+                </button>
+              </>
+            )}
           </p>
         </div>
 
@@ -1396,6 +1502,8 @@ export default function ReviewQueuePage() {
             onChange={(e) => setDateRange(e.target.value as DateRangeOption)}
             className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500"
           >
+            <option value="last_month">Last month</option>
+            <option value="this_month">This month</option>
             <option value="since_last_sync">Since last sync</option>
             <option value="last_30">Last 30 days</option>
             <option value="last_90">Last 90 days</option>
@@ -1428,6 +1536,82 @@ export default function ReviewQueuePage() {
               </>
             )}
           </button>
+        </div>
+
+        {/* Show only one month — for closing last month while this month's
+            transactions are already arriving. Filters what is on screen; it
+            does not change what has been imported. */}
+        <select
+          value={monthFilter}
+          onChange={(e) => setMonthFilter(e.target.value)}
+          className={`border text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500 ${
+            monthFilter === "all"
+              ? "bg-gray-800 border-gray-700 text-gray-300"
+              : "bg-indigo-950 border-indigo-600 text-indigo-200"}`}
+          title="Show only transactions dated in one month"
+        >
+          <option value="all">All months</option>
+          {availableMonths.map((m) => (
+            <option key={m.value} value={m.value}>{m.label} ({m.count})</option>
+          ))}
+        </select>
+
+        {/* Columns */}
+        <div className="relative">
+          <button
+            onClick={() => setColMenuOpen((o) => !o)}
+            className={`flex items-center gap-1 border text-xs px-2.5 py-2 rounded-lg transition-colors ${
+              hiddenCols.length > 0
+                ? "bg-indigo-950 border-indigo-600 text-indigo-200"
+                : "bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200"}`}
+            title="Show or hide columns. Drag a column edge to resize."
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+            Columns{hiddenCols.length > 0 && ` (${hiddenCols.length} hidden)`}
+          </button>
+          {colMenuOpen && (
+            <>
+              {/* Click anywhere else to close */}
+              <div className="fixed inset-0 z-40" onClick={() => setColMenuOpen(false)} />
+              <div className="absolute right-0 mt-1 z-50 w-56 bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1">
+                <p className="px-3 py-1.5 text-[10px] uppercase tracking-wide text-gray-500">
+                  Show columns
+                </p>
+                {(Object.keys(COL_LABELS) as ColKey[]).map((c) => {
+                  const locked = ALWAYS_SHOWN.includes(c);
+                  return (
+                    <label
+                      key={c}
+                      className={`flex items-center gap-2 px-3 py-1.5 text-xs ${
+                        locked ? "text-gray-600 cursor-default" : "text-gray-300 hover:bg-gray-800 cursor-pointer"}`}
+                      title={locked ? "Always shown" : undefined}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!isHidden(c)}
+                        disabled={locked}
+                        onChange={() => toggleCol(c)}
+                        className="accent-indigo-500"
+                      />
+                      {COL_LABELS[c]}
+                    </label>
+                  );
+                })}
+                <div className="border-t border-gray-800 mt-1 pt-1 px-3 pb-1">
+                  <button
+                    onClick={showAllCols}
+                    disabled={hiddenCols.length === 0}
+                    className="text-[11px] text-gray-400 hover:text-white disabled:opacity-40 disabled:hover:text-gray-400"
+                  >
+                    Show all
+                  </button>
+                  <p className="text-[10px] text-gray-600 mt-1">Drag a column edge to resize.</p>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Secondary actions */}
@@ -1476,55 +1660,56 @@ export default function ReviewQueuePage() {
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-gray-800">
-          <table className="border-collapse text-sm table-fixed" style={{ width: Object.values(colWidths).reduce((a, b) => a + b, 0) }}>
+          <table className="border-collapse text-sm table-fixed" style={{ width: (Object.keys(colWidths) as ColKey[])
+              .reduce((a, k) => a + (isHidden(k) ? 0 : colWidths[k]), 0) }}>
             <colgroup>
-              <col style={{ width: colWidths.date }} />
-              <col style={{ width: colWidths.description }} />
-              <col style={{ width: colWidths.amount }} />
-              <col style={{ width: colWidths.category }} />
-              <col style={{ width: colWidths.debit }} />
-              <col style={{ width: colWidths.credit }} />
-              <col style={{ width: colWidths.customer }} />
-              <col style={{ width: colWidths.jeAmt }} />
-              <col style={{ width: colWidths.memo }} />
-              <col style={{ width: colWidths.conf }} />
-              <col style={{ width: colWidths.reasoning }} />
-              <col style={{ width: colWidths.actions }} />
+              <col style={{ width: isHidden("date") ? 0 : colWidths.date }} />
+              <col style={{ width: isHidden("description") ? 0 : colWidths.description }} />
+              <col style={{ width: isHidden("amount") ? 0 : colWidths.amount }} />
+              <col style={{ width: isHidden("category") ? 0 : colWidths.category }} />
+              <col style={{ width: isHidden("debit") ? 0 : colWidths.debit }} />
+              <col style={{ width: isHidden("credit") ? 0 : colWidths.credit }} />
+              <col style={{ width: isHidden("customer") ? 0 : colWidths.customer }} />
+              <col style={{ width: isHidden("jeAmt") ? 0 : colWidths.jeAmt }} />
+              <col style={{ width: isHidden("memo") ? 0 : colWidths.memo }} />
+              <col style={{ width: isHidden("conf") ? 0 : colWidths.conf }} />
+              <col style={{ width: isHidden("reasoning") ? 0 : colWidths.reasoning }} />
+              <col style={{ width: isHidden("actions") ? 0 : colWidths.actions }} />
             </colgroup>
             <thead>
               <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
-                <th className="px-3 py-2.5 text-left font-medium whitespace-nowrap relative select-none">Date{handle("date")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Description{handle("description")}</th>
-                <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">
+                <th data-col="date" className="px-3 py-2.5 text-left font-medium whitespace-nowrap relative select-none">Date{handle("date")}</th>
+                <th data-col="description" className="px-3 py-2.5 text-left font-medium relative select-none">Description{handle("description")}</th>
+                <th data-col="amount" className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">
                   <button onClick={() => { if (sortBy === "amount") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("amount"); setSortDir("desc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Amount <span className={sortBy === "amount" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "amount" && sortDir === "asc" ? "↑" : "↓"}</span>
                   </button>
                   {handle("amount")}
                 </th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Category{handle("category")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">
+                <th data-col="category" className="px-3 py-2.5 text-left font-medium relative select-none">Category{handle("category")}</th>
+                <th data-col="debit" className="px-3 py-2.5 text-left font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "debit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("debit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Debit Account <span className={sortBy === "debit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "debit" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
                   {handle("debit")}
                 </th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">
+                <th data-col="credit" className="px-3 py-2.5 text-left font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "credit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("credit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Credit Account <span className={sortBy === "credit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "credit" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
                   {handle("credit")}
                 </th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Customer{handle("customer")}</th>
-                <th className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{handle("jeAmt")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Memo{handle("memo")}</th>
-                <th className="px-3 py-2.5 text-center font-medium relative select-none">
+                <th data-col="customer" className="px-3 py-2.5 text-left font-medium relative select-none">Customer{handle("customer")}</th>
+                <th data-col="jeAmt" className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{handle("jeAmt")}</th>
+                <th data-col="memo" className="px-3 py-2.5 text-left font-medium relative select-none">Memo{handle("memo")}</th>
+                <th data-col="conf" className="px-3 py-2.5 text-center font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "confidence") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("confidence"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Conf <span className={sortBy === "confidence" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "confidence" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
                   {handle("conf")}
                 </th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Reasoning{handle("reasoning")}</th>
-                <th className="px-3 py-2.5 text-left font-medium relative select-none">Actions{handle("actions")}</th>
+                <th data-col="reasoning" className="px-3 py-2.5 text-left font-medium relative select-none">Reasoning{handle("reasoning")}</th>
+                <th data-col="actions" className="px-3 py-2.5 text-left font-medium relative select-none">Actions{handle("actions")}</th>
               </tr>
             </thead>
             <tbody>

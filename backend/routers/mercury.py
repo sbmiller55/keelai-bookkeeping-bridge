@@ -229,6 +229,8 @@ def _rematch_pending_payments(client_id: int, db: Session) -> int:
 router = APIRouter(prefix="/mercury", tags=["mercury"])
 
 DateRangeOption = Literal[
+    "last_month",
+    "this_month",
     "since_last_sync",
     "last_30",
     "last_90",
@@ -306,6 +308,18 @@ def _compute_date_range(
         else:
             start_dt = now - timedelta(days=90)
             return start_dt.strftime("%Y-%m-%d"), today
+
+    # Calendar months, not rolling windows. Closing October means every October
+    # transaction and nothing from November, which "last 30 days" cannot say.
+    if option in ("last_month", "this_month"):
+        first_this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if option == "this_month":
+            return first_this.strftime("%Y-%m-%d"), today
+        last_prev = first_this - timedelta(days=1)          # last day of last month
+        first_prev = last_prev.replace(day=1)
+        # End at the month's own last day rather than today: a sync run on the
+        # 3rd should still cover the whole of the month being closed.
+        return first_prev.strftime("%Y-%m-%d"), last_prev.strftime("%Y-%m-%d")
 
     days_map = {"last_30": 30, "last_90": 90, "last_180": 180, "last_365": 365}
     if option in days_map:

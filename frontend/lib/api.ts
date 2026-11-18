@@ -620,7 +620,11 @@ export interface MercurySyncResponse {
   total_je_created: number;
 }
 
-export type DateRangeOption = "since_last_sync" | "last_30" | "last_90" | "last_180" | "last_365" | "custom";
+// "last_month" / "this_month" are calendar months, not rolling windows:
+// closing October means every October transaction and nothing from November.
+export type DateRangeOption =
+  | "last_month" | "this_month"
+  | "since_last_sync" | "last_30" | "last_90" | "last_180" | "last_365" | "custom";
 
 export function codePending(
   clientId: number,
