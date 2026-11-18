@@ -11,6 +11,7 @@ Routes:
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -23,6 +24,7 @@ from database import get_db, SessionLocal
 from models import Client, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
 import qbo_idempotency
+import schedule_tieout
 import audit
 
 router = APIRouter(prefix="/clients/{client_id}/qbo", tags=["qbo"])
@@ -877,6 +879,216 @@ def close_check(
         recurring_series=series,
         orphans=orphans,
         clean=dup_free and series_ok,
+    )
+
+
+# ── Schedule tie-out ─────────────────────────────────────────────────────────
+
+class TieOutResult(BaseModel):
+    period:         str
+    schedules:      list[dict]
+    unscheduled:    list[dict]
+    clean:          bool
+    total_variance: float
+
+
+@router.get("/schedule-tieout", response_model=TieOutResult)
+def schedule_tieout_report(
+    client_id: int,
+    period: str,                      # "YYYY-MM" — close through this month
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Read-only: does every amortization and depreciation schedule tie to the GL?
+
+    For each schedule, three numbers that have to agree — what the schedule
+    says should have posted by now, what this app generated, and what
+    QuickBooks actually holds — plus the prepaid balance that should remain.
+    A schedule can fail in four directions and they need different fixes, so
+    each is named rather than lumped into one "variance".
+
+    Also lists recurring series QuickBooks holds that no schedule here backs.
+    That is how Vanta and Hanover surface: real amortization posted by hand,
+    with nothing in this app that would notice a skipped month.
+
+    Pushes nothing and changes nothing.
+    """
+    from collections import defaultdict
+    import models as _m
+
+    client = _get_client(client_id, current_user, db)
+    qbo_c  = _get_qbo_client(client)
+
+    if not re.match(r"^\d{4}-\d{2}$", period or ""):
+        raise HTTPException(400, "period must be YYYY-MM, e.g. 2026-09")
+
+    assets = db.query(_m.FixedAsset).filter(_m.FixedAsset.client_id == client_id).all()
+    rules  = (db.query(_m.StandingAccrualRule)
+              .filter(_m.StandingAccrualRule.client_id == client_id).all())
+    accrual_rows = (db.query(_m.AccruedExpense)
+                    .filter(_m.AccruedExpense.client_id == client_id).all())
+
+    starts = [schedule_tieout.asset_first_period(a) for a in assets]
+    starts += [r.service_period for r in accrual_rows if r.service_period]
+    starts = [s for s in starts if s]
+    first = min(starts) if starts else period
+    if first > period:
+        first = period
+
+    lo = schedule_tieout.month_end(first).replace(day=1).isoformat()
+    hi = schedule_tieout.month_end(period).isoformat()
+    try:
+        qbo_rows = qbo_c.list_journal_entries(lo, hi) + qbo_c.list_purchases(lo, hi)
+    except Exception as exc:
+        raise HTTPException(502, _qbo_error_detail(exc, "read your QuickBooks entries"))
+
+    def _amount(e):
+        return (qbo_idempotency.debit_total(e) if e.get("Line")
+                else qbo_idempotency.purchase_total(e))
+
+    # Index QuickBooks by what each entry IS, parsed from its memo.
+    qbo_accrual = defaultdict(list)
+    qbo_asset   = defaultdict(list)
+    for e in qbo_rows:
+        note, amt = e.get("PrivateNote") or "", _amount(e)
+        hit = schedule_tieout.parse_accrual_memo(note)
+        if hit:
+            qbo_accrual[hit].append((e.get("Id"), amt))
+            continue
+        hit = schedule_tieout.parse_asset_memo(note)
+        if hit:
+            qbo_asset[hit].append((e.get("Id"), amt))
+
+    keel_accrual = defaultdict(list)
+    keel_asset   = defaultdict(list)
+    for je in (db.query(JournalEntry)
+               .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+               .filter(Transaction.client_id == client_id).all()):
+        memo = je.memo or ""
+        hit = schedule_tieout.parse_accrual_memo(memo)
+        if hit:
+            keel_accrual[hit].append((je.id, float(je.amount or 0)))
+            continue
+        hit = schedule_tieout.parse_asset_memo(memo)
+        if hit:
+            keel_asset[hit].append((je.id, float(je.amount or 0)))
+
+    schedules: list[dict] = []
+    seen_vendors: set = set()
+    seen_assets: set  = set()
+
+    # ── prepaid / standing accrual schedules ────────────────────────────────
+    for r in rules:
+        if not r.schedule_end_month or not r.amount:
+            continue            # open-ended or variable amount: no fixed promise to test
+        vendor = schedule_tieout._norm(r.vendor_name)
+        seen_vendors.add(vendor)
+        own = [a for a in accrual_rows if a.standing_rule_id == r.id and a.service_period]
+        start = min((a.service_period for a in own), default=None)
+        if not start:
+            start = min((p for (v, p) in list(keel_accrual) if v == vendor), default=None)
+        if not start:
+            continue
+
+        through  = min(period, r.schedule_end_month)
+        periods  = schedule_tieout.months_between(start, through)
+        monthly  = round(float(r.amount), 2)
+        expected = round(monthly * len(periods), 2)
+        keel_total = round(sum(a for p in periods
+                               for _, a in keel_accrual.get((vendor, p), [])), 2)
+        qbo_total  = round(sum(a for p in periods
+                               for _, a in qbo_accrual.get((vendor, p), [])), 2)
+        all_periods = schedule_tieout.months_between(start, r.schedule_end_month)
+        original = round(monthly * len(all_periods), 2)
+
+        schedules.append({
+            "kind": "prepaid", "name": r.vendor_name, "rule_id": r.id,
+            "monthly": monthly, "start": start, "end": r.schedule_end_month,
+            "months_elapsed": len(periods), "months_total": len(all_periods),
+            "expected_to_date": expected, "keel_to_date": keel_total,
+            "qbo_to_date": qbo_total,
+            "original_amount": original,
+            "balance_expected": round(original - expected, 2),
+            "balance_per_gl": round(original - qbo_total, 2),
+            "variance_qbo_vs_expected": round(qbo_total - expected, 2),
+            "missing_periods": [p for p in periods if not keel_accrual.get((vendor, p))],
+            "duplicated_periods": {p: [i for i, _ in qbo_accrual[(vendor, p)]]
+                                   for p in periods
+                                   if len(qbo_accrual.get((vendor, p), [])) > 1},
+            "status": schedule_tieout.classify(expected, keel_total, qbo_total),
+            "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
+        })
+
+    # ── fixed assets ────────────────────────────────────────────────────────
+    for a in assets:
+        name = schedule_tieout._norm(a.name)
+        seen_assets.add(name)
+        periods = schedule_tieout.asset_expected_periods(a, period)
+        if not periods:
+            continue
+        monthly  = schedule_tieout.asset_monthly(a)
+        expected = round(monthly * len(periods), 2)
+        keel_total = round(sum(x for p in periods
+                               for _, x in keel_asset.get((name, p), [])), 2)
+        qbo_total  = round(sum(x for p in periods
+                               for _, x in qbo_asset.get((name, p), [])), 2)
+        depreciable = round(float(a.purchase_price or 0) - float(a.salvage_value or 0), 2)
+
+        schedules.append({
+            "kind": "fixed_asset", "name": a.name, "asset_id": a.id,
+            "monthly": monthly, "start": periods[0], "end": None,
+            "months_elapsed": len(periods),
+            "months_total": int(a.useful_life_months or 0),
+            "expected_to_date": expected, "keel_to_date": keel_total,
+            "qbo_to_date": qbo_total,
+            "original_amount": depreciable,
+            "balance_expected": round(depreciable - expected, 2),
+            "balance_per_gl": round(depreciable - qbo_total, 2),
+            "variance_qbo_vs_expected": round(qbo_total - expected, 2),
+            "missing_periods": [p for p in periods if not keel_asset.get((name, p))],
+            "duplicated_periods": {p: [i for i, _ in qbo_asset[(name, p)]]
+                                   for p in periods
+                                   if len(qbo_asset.get((name, p), [])) > 1},
+            "status": schedule_tieout.classify(expected, keel_total, qbo_total),
+            "flags": schedule_tieout.flags(expected, keel_total, qbo_total),
+        })
+
+    # ── recurring series in QuickBooks that no schedule here backs ──────────
+    by_vendor = defaultdict(list)
+    for (vendor, p), hits in qbo_accrual.items():
+        if vendor in seen_vendors:
+            continue
+        by_vendor[vendor].append((p, round(sum(a for _, a in hits), 2)))
+    unscheduled = []
+    for vendor, entries in sorted(by_vendor.items()):
+        entries.sort()
+        unscheduled.append({
+            "kind": "prepaid", "name": vendor,
+            "periods": [p for p, _ in entries],
+            "total": round(sum(t for _, t in entries), 2),
+            "note": "posted in QuickBooks with no schedule in this app — "
+                    "a skipped month would go unnoticed",
+        })
+    by_asset = defaultdict(list)
+    for (nm, p), hits in qbo_asset.items():
+        if nm in seen_assets:
+            continue
+        by_asset[nm].append((p, round(sum(a for _, a in hits), 2)))
+    for nm, entries in sorted(by_asset.items()):
+        entries.sort()
+        unscheduled.append({
+            "kind": "fixed_asset", "name": nm,
+            "periods": [p for p, _ in entries],
+            "total": round(sum(t for _, t in entries), 2),
+            "note": "depreciation in QuickBooks with no asset record here",
+        })
+
+    return TieOutResult(
+        period=period,
+        schedules=sorted(schedules, key=lambda s: (s["status"] == "ok", s["name"])),
+        unscheduled=unscheduled,
+        clean=all(s["status"] == "ok" for s in schedules),
+        total_variance=round(sum(abs(s["variance_qbo_vs_expected"]) for s in schedules), 2),
     )
 
 
