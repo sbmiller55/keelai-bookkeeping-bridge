@@ -807,7 +807,10 @@ def close_check(
         ("Vanta",                 "vanta"),
         ("Buckner",               "accrual: the buckner company"),
         ("Hanover",               "hanover insurance"),
-        ("Domain amortization",   "amortization - domain name"),
+        # The domain is one of the three schedules the Depreciation row already
+        # counts ("Depreciation - Domain Name - September 2026"); listing it
+        # separately reported a phantom "missing" every month, which is exactly
+        # the kind of noise that gets a close check ignored.
         ("Depreciation",          "depreciation - "),
         ("Mercury Treasury fee",  "treasury fee"),
         ("Rippling employer tax", "rippling employer tax contribution"),
