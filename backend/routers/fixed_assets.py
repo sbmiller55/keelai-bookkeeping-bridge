@@ -756,7 +756,8 @@ async def extract_asset_from_receipt(
         chart = None
 
     try:
-        data = _extract_asset(file_bytes, media_type, chart)
+        data = _extract_asset(file_bytes, media_type, chart,
+                              _asset_precedent(client_id, db))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
     except Exception as exc:
@@ -765,7 +766,38 @@ async def extract_asset_from_receipt(
     return data
 
 
-def _extract_asset(file_bytes: bytes, media_type: str, chart: Optional[str]) -> dict:
+def _asset_precedent(client_id: int, db: Session, limit: int = 25) -> str:
+    """How this client already sets up assets, newest first.
+
+    Generic GAAP lives are a starting point, not an answer. This client's first
+    domain name is "Other Intangibles" over 60 months; a hardcoded rule in the
+    prompt called the next one a Trademark over 120 and produced a schedule
+    that disagreed with its own predecessor. Their own history is the better
+    authority, so it is handed over and told to outrank the defaults.
+    """
+    rows = (db.query(models.FixedAsset)
+            .filter(models.FixedAsset.client_id == client_id)
+            .order_by(models.FixedAsset.created_at.desc())
+            .limit(limit).all())
+    if not rows:
+        return ""
+    lines = []
+    for a in rows:
+        lines.append(
+            "- %s | category: %s | %s | life: %s months | %s | asset acct: %s | "
+            "accumulated: %s | expense: %s" % (
+                a.name, a.category,
+                "intangible" if a.asset_type == "intangible" else "tangible",
+                "indefinite" if a.is_indefinite_life else a.useful_life_months,
+                a.depreciation_method,
+                a.qbo_asset_account or "-", a.qbo_accum_dep_account or "-",
+                a.qbo_dep_expense_account or "-")
+        )
+    return "\n".join(lines)
+
+
+def _extract_asset(file_bytes: bytes, media_type: str, chart: Optional[str],
+                   precedent: str = "") -> dict:
     """Ask Claude what asset this receipt describes."""
     import base64
     import json as _json
@@ -811,7 +843,6 @@ def _extract_asset(file_bytes: bytes, media_type: str, chart: Optional[str]) -> 
         "  Capitalized Software 36, Licenses 36, Patents 240, Trademarks 120,",
         "  Customer Lists 60, Non-Compete Agreements 36, Other Intangibles 60",
         "  Computer hardware is Equipment with a 60-month life, not 84.",
-        "  A domain name is a Trademark at 120 months.",
         "Goodwill is the only indefinite-life asset: useful_life_months 0 and",
         "is_indefinite_life true. Everything else gets a finite life.",
         "",
@@ -826,6 +857,17 @@ def _extract_asset(file_bytes: bytes, media_type: str, chart: Optional[str]) -> 
         "the price or date cannot be read. Say so plainly in reasoning. Do not invent a date or",
         "a price to fill the field — a blank a person notices is better than a number they do not.",
     ])
+    if precedent:
+        system += (
+            "\n\nTHIS CLIENT'S EXISTING ASSETS. These outrank every default above.\n"
+            "If the receipt is for the same kind of thing as one of these, copy its\n"
+            "category, useful_life_months, asset_type and all three accounts. A second\n"
+            "domain name should be set up exactly like the first one — matching how this\n"
+            "client already does it matters more than any general rule, and a schedule\n"
+            "that disagrees with its predecessor is a reconciliation problem for years.\n"
+            "Say in reasoning which existing asset you matched, or that none fit.\n\n"
+            + precedent
+        )
     if chart:
         system += (
             "\n\nUse ONLY these account names, copied verbatim, for the three account fields. "

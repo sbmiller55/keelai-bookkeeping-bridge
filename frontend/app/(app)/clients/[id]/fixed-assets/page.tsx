@@ -342,11 +342,42 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
   const [receipt, setReceipt] = useState<AssetFromReceipt | null>(null);
   const [receiptName, setReceiptName] = useState<string>("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  // dragenter/dragleave fire for every child element the pointer crosses, so a
+  // single boolean flickers as the cursor moves over the button or the text.
+  // Counting enters and leaves instead means the highlight only clears when
+  // the pointer has actually left the drop zone.
+  const dragDepth = useRef(0);
+
+  function onDragEnter(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current += 1;
+    if (e.dataTransfer?.types?.includes("Files")) setDragging(true);
+  }
+  function onDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragging(false);
+  }
+  function onDragOver(e: React.DragEvent) {
+    e.preventDefault();                       // without this the browser opens the file
+    e.dataTransfer.dropEffect = "copy";
+  }
+  async function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragging(false);
+    await readReceipt(e.dataTransfer?.files?.[0]);
+  }
 
   async function handleReceipt(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     // Let the same file be picked again after a failure.
     e.target.value = "";
+    await readReceipt(file);
+  }
+
+  async function readReceipt(file?: File | null) {
     if (!file) return;
     setReading(true);
     setError(null);
@@ -440,7 +471,16 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
           {/* Read it off the receipt. Fills the form; creates nothing — every
               value below stays editable and the useful life in particular is
               worth a look, since a wrong one runs for years unnoticed. */}
-          <div className="border border-dashed border-gray-700 rounded-lg px-3 py-3">
+          <div
+            onDragEnter={onDragEnter}
+            onDragLeave={onDragLeave}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
+            className={`border border-dashed rounded-lg px-3 py-3 transition-colors ${
+              dragging
+                ? "border-indigo-400 bg-indigo-950/40"
+                : "border-gray-700"}`}
+          >
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -460,9 +500,11 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
                 )}
               </button>
               <p className="text-[11px] text-gray-500 leading-tight">
-                {receiptName
-                  ? <span className="text-gray-400">{receiptName}</span>
-                  : "PDF or photo — fills the form below for you to check."}
+                {dragging
+                  ? <span className="text-indigo-300">Drop it here</span>
+                  : receiptName
+                    ? <span className="text-gray-400">{receiptName}</span>
+                    : <>Drag a receipt here, or browse. PDF or photo —<br />fills the form below for you to check.</>}
               </p>
             </div>
             <input
