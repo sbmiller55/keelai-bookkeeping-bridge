@@ -14,7 +14,7 @@
  * point is that it is safe to press during a close.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CloseCheckResult,
   TieOutResult,
@@ -22,6 +22,34 @@ import {
   runCloseCheck,
   runScheduleTieOut,
 } from "@/lib/api";
+
+// The result outlives the page. A check that vanishes the moment you navigate
+// away is a check you have to remember to re-run, and the whole reason it
+// exists is that nobody notices these problems unaided. It stays until it is
+// either resolved or re-run clean.
+const STORE_PREFIX = "bb-close-check";
+
+type Saved = {
+  dupes: CloseCheckResult;
+  tie: TieOutResult;
+  ranAt: string;
+  resolved: boolean;
+};
+
+function loadSaved(clientId: number, period: string): Saved | null {
+  try {
+    const raw = localStorage.getItem(`${STORE_PREFIX}:${clientId}:${period}`);
+    return raw ? (JSON.parse(raw) as Saved) : null;
+  } catch { return null; }
+}
+
+function storeSaved(clientId: number, period: string, value: Saved | null) {
+  try {
+    const key = `${STORE_PREFIX}:${clientId}:${period}`;
+    if (value) localStorage.setItem(key, JSON.stringify(value));
+    else localStorage.removeItem(key);
+  } catch { /* private window, blocked storage — the check still runs */ }
+}
 
 function money(n: number): string {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -139,6 +167,21 @@ export default function CloseChecks({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [resolved, setResolved] = useState(false);
+  const [ranAt, setRanAt] = useState<string | null>(null);
+
+  // Read on mount rather than seeding state during render: the server has no
+  // localStorage, so a value read at render time makes the first client render
+  // disagree with the server's and React discards the tree.
+  useEffect(() => {
+    const saved = loadSaved(clientId, period);
+    if (!saved) return;
+    setDupes(saved.dupes);
+    setTie(saved.tie);
+    setResolved(saved.resolved);
+    setRanAt(saved.ranAt);
+    setOpen(!saved.resolved);
+  }, [clientId, period]);
 
   async function run() {
     setRunning(true);
@@ -149,13 +192,35 @@ export default function CloseChecks({
         runCloseCheck(clientId, period),
         runScheduleTieOut(clientId, period),
       ]);
+      const now = new Date().toISOString();
       setDupes(d);
       setTie(t);
+      setRanAt(now);
+      // A fresh run replaces an earlier verdict, including one marked
+      // resolved: if the problem is back, saying so is the point.
+      setResolved(false);
       setOpen(true);
+      storeSaved(clientId, period, { dupes: d, tie: t, ranAt: now, resolved: false });
     } catch (e: any) {
       setError(e?.message ?? "Could not reach QuickBooks.");
     } finally {
       setRunning(false);
+    }
+  }
+
+  function markResolved() {
+    setResolved(true);
+    setOpen(false);
+    if (dupes && tie && ranAt) {
+      storeSaved(clientId, period, { dupes, tie, ranAt, resolved: true });
+    }
+  }
+
+  function reopen() {
+    setResolved(false);
+    setOpen(true);
+    if (dupes && tie && ranAt) {
+      storeSaved(clientId, period, { dupes, tie, ranAt, resolved: false });
     }
   }
 
@@ -175,8 +240,17 @@ export default function CloseChecks({
             nothing is posted or changed.
           </p>
         </div>
+        {hasRun && !allClean && !resolved && (
+          <button
+            onClick={markResolved}
+            className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 border border-emerald-800 hover:border-emerald-600 rounded-lg px-2.5 py-1.5 transition-colors whitespace-nowrap"
+            title="Stop showing this. A re-check that still finds something brings it back."
+          >
+            Mark resolved
+          </button>
+        )}
         {hasRun && (
-          <button onClick={() => setOpen((o) => !o)}
+          <button onClick={() => (open ? setOpen(false) : reopen())}
             className="text-[11px] text-gray-400 hover:text-white transition-colors whitespace-nowrap">
             {open ? "Hide" : "Show"}
           </button>
@@ -193,6 +267,36 @@ export default function CloseChecks({
       {error && (
         <div className="mx-4 mb-3 bg-red-900/40 border border-red-700 rounded-lg px-3 py-2 text-xs text-red-300">
           {error}
+        </div>
+      )}
+
+      {/* What the last run found, still standing. Shown whether or not the
+          detail is expanded, so leaving the page and coming back does not
+          quietly drop an unresolved problem. */}
+      {hasRun && !open && (
+        <div className={`mx-4 mb-3 rounded-lg px-3 py-2 text-xs border flex items-center gap-2 ${
+          resolved
+            ? "bg-gray-800 border-gray-700 text-gray-400"
+            : allClean
+              ? "bg-emerald-900/30 border-emerald-800 text-emerald-300"
+              : "bg-amber-900/30 border-amber-700 text-amber-200"}`}>
+          <span className="font-medium">
+            {resolved
+              ? `Marked resolved — ${problems} thing${problems === 1 ? "" : "s"} was flagged`
+              : allClean
+                ? `${periodLabel} looked clean`
+                : `${problems} thing${problems === 1 ? "" : "s"} still to look at`}
+          </span>
+          {ranAt && (
+            <span className="text-gray-500">
+              · checked {new Date(ranAt).toLocaleDateString("en-US",
+                { month: "short", day: "numeric" })}
+            </span>
+          )}
+          <button onClick={reopen}
+            className="ml-auto underline underline-offset-2 hover:opacity-80">
+            {resolved ? "Show anyway" : "Open"}
+          </button>
         </div>
       )}
 
