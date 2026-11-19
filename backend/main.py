@@ -241,6 +241,7 @@ def _migrate_db():
         # AR cash-receipt JEs for paid revenue contracts (added 2026-08)
         ("revenue_streams",       "bank_account",   "TEXT"),
         ("revenue_contracts",     "payment_je_id",  "INTEGER"),
+        ("clients",               "close_carryover_from", "VARCHAR(7)"),
         ("fixed_assets",          "asset_type",      "TEXT DEFAULT 'tangible'"),
         ("fixed_assets",          "is_indefinite_life", "BOOLEAN DEFAULT FALSE"),
         ("audit_log",             "client_id",           "INTEGER"),

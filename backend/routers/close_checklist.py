@@ -107,7 +107,7 @@ def _month_before(month: str) -> str:
     return "%04d-12" % (y - 1) if m == 1 else "%04d-%02d" % (y, m - 1)
 
 
-def _outstanding_from_earlier(client_id: int, close_month: str, items, db) -> list:
+def _outstanding_from_earlier(client_id: int, close_month: str, items, db) -> list:  # noqa: C901
     """Recurring tasks from earlier months that were never ticked.
 
     A monthly task used to roll silently onto the next month the moment that
@@ -126,11 +126,25 @@ def _outstanding_from_earlier(client_id: int, close_month: str, items, db) -> li
     if not monthly:
         return []
 
+    # A client can draw a line under an older backlog. Honoured here rather
+    # than by writing completions, because a completion says the work was done
+    # and that would be a lie recorded in the audit trail.
+    floor = None
+    try:
+        client = db.query(models.Client).filter(models.Client.id == client_id).first()
+        floor = getattr(client, "close_carryover_from", None)
+    except Exception:
+        floor = None
+
     months = []
     cursor = _month_before(close_month)
     for _ in range(_CARRY_BACK_MONTHS):
+        if floor and cursor < floor:
+            break
         months.append(cursor)
         cursor = _month_before(cursor)
+    if not months:
+        return []
 
     rows = (
         db.query(models.CloseChecklistCompletion)

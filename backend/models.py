@@ -62,6 +62,11 @@ class Client(Base):
     last_sync_at = Column(DateTime, nullable=True)
     qbo_coa_cache = Column(Text, nullable=True)               # JSON array of account names
     qbo_coa_cached_at = Column(DateTime, nullable=True)       # when the cache was last refreshed from QBO
+    # Earliest close month the checklist carries unfinished work forward from,
+    # as "YYYY-MM". Lets a client draw a line under a backlog from before they
+    # were using the checklist properly without pretending that work was done —
+    # marking it complete would assert something false in the audit trail.
+    close_carryover_from = Column(String(7), nullable=True)
 
     owner = relationship("User", back_populates="clients")
     transactions = relationship("Transaction", back_populates="client")
