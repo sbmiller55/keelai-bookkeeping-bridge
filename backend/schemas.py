@@ -333,6 +333,13 @@ class FixedAssetCreate(BaseModel):
     qbo_accum_dep_account: Optional[str] = None
     qbo_dep_expense_account: Optional[str] = None
     notes: Optional[str] = None
+    # Book the purchase itself. Adding an asset used to record only the
+    # schedule, so an asset bought outright — no bank transaction to recode —
+    # appeared in the register with nothing on the balance sheet behind it.
+    # Credit is whatever paid for it: the bank or card, or Accrued Expenses if
+    # the bill is unpaid.
+    create_purchase_je: bool = False
+    purchase_credit_account: Optional[str] = None
 
 
 class FixedAssetUpdate(BaseModel):

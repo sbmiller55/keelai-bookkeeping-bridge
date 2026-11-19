@@ -194,7 +194,12 @@ class AuditLog(Base):
     action = Column(String, nullable=False)
     before_state = Column(Text, nullable=True)
     after_state = Column(Text, nullable=True)
-    actor = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Nullable since 2026-11: the automatic trail records background writes
+    # too — the monthly scheduler generating accruals and depreciation has no
+    # user behind it. NOT NULL made those writes fail outright, which breaks
+    # the one rule this module has: a missing log line is bad, a failed
+    # financial write because logging broke is worse.
+    actor = Column(Integer, ForeignKey("users.id"), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     transaction = relationship("Transaction", back_populates="audit_logs")

@@ -482,6 +482,48 @@ def create_asset(
             tx.status = models.TransactionStatus.approved
             tx.fixed_asset_id = asset.id
 
+    # ── Book the purchase ───────────────────────────────────────────────────
+    # Without this an asset bought outright lands in the register with nothing
+    # on the balance sheet behind it: no debit to the asset account, no credit
+    # to whatever paid for it. patchwave.com was added at $7,213.19 and
+    # produced no entry at all, which is invisible until the balance sheet is
+    # short by the cost of the asset.
+    #
+    # Only when asked, and never when a bank transaction is already being
+    # recoded into the asset account — that transaction IS the purchase, and
+    # booking it twice would capitalize the cost twice.
+    if (payload.create_purchase_je and payload.purchase_credit_account
+            and payload.qbo_asset_account and not payload.transaction_id):
+        try:
+            purchase_date = datetime.strptime(payload.purchase_date, "%Y-%m-%d")
+        except ValueError:
+            purchase_date = datetime.utcnow()
+        memo = f"Purchase: {payload.name}"
+        ptx = models.Transaction(
+            client_id=client_id,
+            description=memo,
+            amount=-abs(payload.purchase_price),
+            date=purchase_date,
+            status=models.TransactionStatus.pending,
+            source="asset_purchase",
+            fixed_asset_id=asset.id,
+            imported_at=datetime.utcnow(),
+        )
+        db.add(ptx)
+        db.flush()
+        db.add(models.JournalEntry(
+            transaction_id=ptx.id,
+            je_number=next_je_number(db),
+            debit_account=payload.qbo_asset_account,
+            credit_account=payload.purchase_credit_account,
+            amount=abs(payload.purchase_price),
+            je_date=purchase_date,
+            memo=memo,
+            ai_confidence=1.0,
+            ai_reasoning="Capitalizes the asset on its purchase date. Sits in the "
+                         "Review Queue unapproved like any other entry.",
+        ))
+
     db.commit()
     db.refresh(asset)
 

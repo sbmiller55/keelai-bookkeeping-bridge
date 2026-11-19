@@ -343,6 +343,10 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
   const [receiptName, setReceiptName] = useState<string>("");
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  // On by default: an asset added here has no bank transaction behind it, so
+  // without the entry nothing reaches the balance sheet.
+  const [bookPurchase, setBookPurchase] = useState(true);
+  const [purchaseCredit, setPurchaseCredit] = useState("");
   // dragenter/dragleave fire for every child element the pointer crosses, so a
   // single boolean flickers as the cursor moves over the button or the text.
   // Counting enters and leaves instead means the highlight only clears when
@@ -448,6 +452,8 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
         qbo_asset_account: form.assetAcct || undefined,
         qbo_accum_dep_account: form.accumAcct || undefined,
         qbo_dep_expense_account: form.expAcct || undefined,
+        create_purchase_je: bookPurchase && !!purchaseCredit,
+        purchase_credit_account: purchaseCredit || undefined,
       });
       onAdd(asset);
     } catch (err: unknown) {
@@ -547,6 +553,39 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
             </div>
           )}
           <AssetFormFields form={form} setForm={setForm} accounts={accounts} onNameBlur={handleNameBlur} suggesting={suggesting} />
+          {/* Book the purchase. Separate from the schedule: the schedule spreads
+              the cost, this is what puts the asset on the books in the first
+              place. */}
+          <div className="border-t border-gray-800 pt-4">
+            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+              <input type="checkbox" checked={bookPurchase}
+                onChange={(e) => setBookPurchase(e.target.checked)}
+                className="accent-indigo-500" />
+              Also create the purchase entry
+            </label>
+            {bookPurchase && (
+              <div className="mt-2">
+                <label className="block text-[11px] text-gray-500 mb-1">
+                  Paid from — what the purchase credits
+                </label>
+                <input
+                  list="purchase-credit-accounts"
+                  value={purchaseCredit}
+                  onChange={(e) => setPurchaseCredit(e.target.value)}
+                  placeholder="Bank, credit card, or Accrued Expenses"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                />
+                <datalist id="purchase-credit-accounts">
+                  {accounts.map((a) => <option key={a} value={a} />)}
+                </datalist>
+                <p className="text-[11px] text-gray-500 mt-1">
+                  {purchaseCredit
+                    ? <>DR {form.assetAcct || "the asset account"} / CR {purchaseCredit} on {form.purchaseDate || "the purchase date"}. Lands in the Review Queue unapproved.</>
+                    : "Pick an account, or untick above if this purchase is already booked."}
+                </p>
+              </div>
+            )}
+          </div>
           {error && <p className="text-xs text-red-400 bg-red-950 border border-red-800 rounded-lg px-3 py-2">{error}</p>}
           <div className="flex gap-2 pt-1">
             <button onClick={handleSave} disabled={saving || !valid}

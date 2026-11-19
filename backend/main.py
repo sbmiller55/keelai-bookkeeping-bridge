@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from database import Base, engine
+from database import Base, SessionLocal, engine
+import audit
 from auth import get_current_user
 from routers import auth, clients, transactions, journal_entries, rules, audit_log, mercury, files, chat, email_inbound, invoices, close_checklist, qbo, fixed_assets, accruals, revenue, billcom, stripe
 
@@ -115,8 +116,53 @@ if _frontend_url:
     )
 ALLOWED_ORIGINS = sorted(set(_DEFAULT_ORIGINS + _extra_origins))
 
+class AuditActorMiddleware:
+    """Name whoever is making this request, for the automatic audit trail.
+
+    Raw ASGI like the middleware beside it. The actor is read from the bearer
+    token rather than a route dependency, so an endpoint that forgets to depend
+    on get_current_user is still attributed. A request with no usable token
+    records no actor rather than guessing: an audit row blaming the wrong
+    person is worse than one admitting it does not know.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        actor = None
+        try:
+            for key, value in scope.get("headers") or []:
+                if key == b"authorization":
+                    raw = value.decode("latin-1")
+                    if raw.lower().startswith("bearer "):
+                        from jose import jwt as _jwt
+                        from auth import SECRET_KEY as _SK, ALGORITHM as _ALG
+                        sub = _jwt.decode(raw.split(" ", 1)[1], _SK,
+                                          algorithms=[_ALG]).get("sub")
+                        actor = int(sub) if sub is not None else None
+                    break
+        except Exception:
+            actor = None            # expired or unreadable token: no actor
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        audit.set_actor(actor, f"{method} {path}")
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            audit.set_actor(None, None)
+
+
+# Record every insert, update and delete on the financial tables. Installed
+# once, against the session factory the whole app shares.
+audit.install(SessionLocal)
+
 # Order matters: add_middleware pushes onto the front of the stack, so CORS
 # must be added LAST to end up outermost and wrap the JSON error response.
+app.add_middleware(AuditActorMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(JsonErrorMiddleware)
 app.add_middleware(
@@ -286,6 +332,21 @@ def _migrate_db():
         except Exception as exc:
             __import__("sys").stderr.write(
                 f"[migrate] audit_log.transaction_id DROP NOT NULL skipped: {exc}\n"
+            )
+
+    # audit_log.actor, same story and same reasoning as transaction_id above:
+    # the automatic trail records writes made by the scheduler, which has no
+    # user behind it, and NOT NULL turned a missing actor into a failed write.
+    if not is_sqlite:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE audit_log ALTER COLUMN actor DROP NOT NULL"
+                ))
+                conn.commit()
+        except Exception as exc:
+            __import__("sys").stderr.write(
+                f"[migrate] audit_log.actor DROP NOT NULL skipped: {exc}\n"
             )
 
     # Postgres enums need explicit ALTER TYPE to accept new values added on

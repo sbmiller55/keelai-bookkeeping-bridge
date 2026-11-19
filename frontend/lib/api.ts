@@ -1233,6 +1233,10 @@ export interface FixedAssetCreate {
   qbo_accum_dep_account?: string;
   qbo_dep_expense_account?: string;
   notes?: string;
+  // Book the purchase itself. Without this an asset bought outright appears in
+  // the register with nothing on the balance sheet behind it.
+  create_purchase_je?: boolean;
+  purchase_credit_account?: string;
 }
 
 export interface FixedAssetSuggestion {
