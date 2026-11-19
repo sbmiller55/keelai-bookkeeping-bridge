@@ -6,7 +6,8 @@ import {
   getFixedAssets, createFixedAsset, updateFixedAsset, disposeFixedAsset,
   generateDepreciationJEs,
   suggestFixedAssetByName,
-  FixedAsset, DepreciationPeriod, FixedAssetSuggestion,
+  extractAssetFromReceipt,
+  FixedAsset, DepreciationPeriod, FixedAssetSuggestion, AssetFromReceipt,
 } from "@/lib/api";
 import { useAccounts } from "@/lib/useAccounts";
 
@@ -337,6 +338,48 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
   const [suggesting, setSuggesting] = useState(false);
   const [suggestion, setSuggestion] = useState<FixedAssetSuggestion | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [receipt, setReceipt] = useState<AssetFromReceipt | null>(null);
+  const [receiptName, setReceiptName] = useState<string>("");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function handleReceipt(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Let the same file be picked again after a failure.
+    e.target.value = "";
+    if (!file) return;
+    setReading(true);
+    setError(null);
+    setReceipt(null);
+    setSuggestion(null);
+    setReceiptName(file.name);
+    try {
+      const r = await extractAssetFromReceipt(clientId, file);
+      setReceipt(r);
+      // Fill only what was actually read. A field the receipt did not answer
+      // keeps whatever is already typed rather than being blanked — the form
+      // is an aid, not an overwrite.
+      setForm((prev) => ({
+        ...prev,
+        name: r.name || prev.name,
+        category: r.category || prev.category,
+        purchaseDate: r.purchase_date || prev.purchaseDate,
+        purchasePrice: r.purchase_price > 0 ? String(r.purchase_price) : prev.purchasePrice,
+        salvageValue: String(r.salvage_value ?? 0),
+        usefulLife: r.is_indefinite_life ? "0"
+          : (r.useful_life_months > 0 ? String(r.useful_life_months) : prev.usefulLife),
+        method: r.depreciation_method || prev.method,
+        assetAcct: r.qbo_asset_account || prev.assetAcct,
+        accumAcct: r.qbo_accum_dep_account || prev.accumAcct,
+        expAcct: r.qbo_dep_expense_account || prev.expAcct,
+      }));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not read that receipt");
+      setReceiptName("");
+    } finally {
+      setReading(false);
+    }
+  }
 
   async function handleNameBlur(e: React.FocusEvent<HTMLInputElement>) {
     const name = e.currentTarget.value.trim();
@@ -394,6 +437,68 @@ function AddPanel({ clientId, accounts, onAdd, onClose }: {
           <button onClick={onClose} className="text-gray-500 hover:text-white text-xl leading-none">×</button>
         </div>
         <div className="px-6 py-5 space-y-4">
+          {/* Read it off the receipt. Fills the form; creates nothing — every
+              value below stays editable and the useful life in particular is
+              worth a look, since a wrong one runs for years unnoticed. */}
+          <div className="border border-dashed border-gray-700 rounded-lg px-3 py-3">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                disabled={reading}
+                className="flex items-center gap-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 text-gray-200 text-xs font-medium px-3 py-2 rounded-lg transition-colors"
+              >
+                {reading ? (
+                  <><span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />Reading receipt…</>
+                ) : (
+                  <>
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.9A5 5 0 1115.9 6H16a4 4 0 010 8h-1m-6 1l3-3m0 0l3 3m-3-3v9" />
+                    </svg>
+                    Upload receipt
+                  </>
+                )}
+              </button>
+              <p className="text-[11px] text-gray-500 leading-tight">
+                {receiptName
+                  ? <span className="text-gray-400">{receiptName}</span>
+                  : "PDF or photo — fills the form below for you to check."}
+              </p>
+            </div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,application/pdf,image/*"
+              onChange={handleReceipt}
+              className="hidden"
+            />
+            {receipt && (
+              <div className={`mt-2.5 rounded-lg px-3 py-2 text-xs border ${
+                receipt.confidence >= 0.5
+                  ? "bg-indigo-950/40 border-indigo-800/50 text-indigo-200"
+                  : "bg-amber-950/40 border-amber-800/60 text-amber-200"}`}>
+                <p className="font-medium">
+                  {receipt.confidence >= 0.5
+                    ? `Filled from the receipt${receipt.vendor ? ` — ${receipt.vendor}` : ""}`
+                    : "Read this one carefully"}
+                  <span className="text-gray-500 font-normal">
+                    {" "}· {Math.round(receipt.confidence * 100)}% confident
+                  </span>
+                </p>
+                {receipt.reasoning && (
+                  <p className="mt-0.5 text-gray-400 leading-snug">{receipt.reasoning}</p>
+                )}
+                {Object.keys(receipt.unresolved_accounts).length > 0 && (
+                  <p className="mt-1 text-amber-300/90 leading-snug">
+                    Not in your chart, so left blank:{" "}
+                    {Object.values(receipt.unresolved_accounts).join(", ")}. Pick the right ones below.
+                  </p>
+                )}
+                <p className="mt-1 text-gray-500">Check the useful life before saving — it runs for years.</p>
+              </div>
+            )}
+          </div>
+
           {suggestion && (
             <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-lg px-3 py-2 text-xs text-indigo-300">
               ✦ AI pre-filled based on asset name — review and adjust as needed

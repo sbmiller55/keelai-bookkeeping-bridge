@@ -6,7 +6,7 @@ from typing import List, Optional
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,18 @@ from database import get_db
 import models
 import schemas
 from models import next_je_number
+import ai_coder
+# The invoice upload path already solved reading a document with Claude —
+# media-type resolution, magic-byte checking, and resolving account names
+# against the live chart instead of trusting them. Reuse it rather than grow a
+# second copy that drifts.
+from routers.invoices import (
+    _CONTENT_TYPES,
+    _coa_index,
+    _content_matches,
+    _resolve_account,
+    _resolve_media_type,
+)
 
 router = APIRouter(prefix="/clients", tags=["fixed_assets"])
 
@@ -689,3 +701,189 @@ def generate_depreciation(
 
     db.commit()
     return {"created": created, "skipped": skipped, "month": month}
+
+# ── Read an asset off its receipt ────────────────────────────────────────────
+
+_RECEIPT_MAX_BYTES = 20 * 1024 * 1024
+
+
+@router.post("/{client_id}/fixed-assets/extract-receipt")
+async def extract_asset_from_receipt(
+    client_id: int,
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read a receipt and return the Add Asset form, filled in.
+
+    Fills a form; it does not create anything. Everything here is a proposal a
+    person confirms, because the cost of a wrong useful life is a decade of
+    wrong monthly entries and it is invisible once the schedule starts running.
+
+    Accounts are resolved against the live chart rather than trusted. The model
+    is asked for verbatim names, but asking is not enforcing — on invoices it
+    returned "Legal Expenses" for a chart holding "Legal Fees" — so a name that
+    does not resolve comes back as a suggestion the form leaves blank rather
+    than a plausible-looking account nobody checks.
+    """
+    client = _get_client_or_403(client_id, current_user, db)
+
+    media_type = _resolve_media_type(file.filename or "", file.content_type)
+    if not media_type:
+        raise HTTPException(400, "Unsupported file type. Upload a PDF or image (JPG, PNG, WEBP).")
+
+    # Read in chunks and stop at the cap, rather than buffering a huge upload
+    # in memory only to reject it afterwards.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _RECEIPT_MAX_BYTES:
+            raise HTTPException(413, "File too large (max 20 MB)")
+        chunks.append(chunk)
+    file_bytes = b"".join(chunks)
+    if not file_bytes:
+        raise HTTPException(400, "The file is empty.")
+    if not _content_matches(file_bytes, media_type):
+        raise HTTPException(400, f"That file is not really a {media_type}. Re-save it and try again.")
+
+    try:
+        chart = ai_coder._resolve_chart(client)
+    except Exception:
+        chart = None
+
+    try:
+        data = _extract_asset(file_bytes, media_type, chart)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Could not read the receipt: {exc}")
+
+    return data
+
+
+def _extract_asset(file_bytes: bytes, media_type: str, chart: Optional[str]) -> dict:
+    """Ask Claude what asset this receipt describes."""
+    import base64
+    import json as _json
+    import os as _os
+
+    api_key = _os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("AI is not configured on the server (no ANTHROPIC_API_KEY).")
+
+    b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
+    kind = _CONTENT_TYPES[media_type]
+    file_block = (
+        {"type": "document", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+        if kind == "document"
+        else {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+    )
+
+    system = "\n".join([
+        "You are an expert bookkeeper reading a purchase receipt to set up a fixed or intangible asset.",
+        "Respond with ONLY valid JSON — no markdown fences, no explanation.",
+        "",
+        '{"name": "short asset name", "category": "<one of the categories below>",',
+        ' "purchase_date": "YYYY-MM-DD", "purchase_price": 1234.56, "salvage_value": 0.0,',
+        ' "useful_life_months": 60, "depreciation_method": "straight_line",',
+        ' "asset_type": "tangible|intangible", "is_indefinite_life": false,',
+        ' "qbo_asset_account": "", "qbo_accum_dep_account": "", "qbo_dep_expense_account": "",',
+        ' "vendor": "", "confidence": 0.0, "reasoning": "one or two sentences"}',
+        "",
+        # These are exactly the options the Add Asset form offers. Returning
+        # anything else means the form falls back to a blank category and the
+        # autofill looks broken for the one field a person is least likely to
+        # re-check.
+        "category must be EXACTLY one of these.",
+        "  Tangible (these depreciate):",
+        "    Equipment, Furniture, Leasehold Improvements, Vehicles, Other",
+        "  Intangible (these amortize):",
+        "    Capitalized Software, Licenses, Patents, Trademarks, Customer Lists,",
+        "    Non-Compete Agreements, Goodwill, Other Intangibles",
+        "Set asset_type to match the half the category came from.",
+        "",
+        "Default useful_life_months by category, unless the receipt says otherwise:",
+        "  Equipment 84, Furniture 84, Leasehold Improvements 120, Vehicles 60, Other 60",
+        "  Capitalized Software 36, Licenses 36, Patents 240, Trademarks 120,",
+        "  Customer Lists 60, Non-Compete Agreements 36, Other Intangibles 60",
+        "  Computer hardware is Equipment with a 60-month life, not 84.",
+        "  A domain name is a Trademark at 120 months.",
+        "Goodwill is the only indefinite-life asset: useful_life_months 0 and",
+        "is_indefinite_life true. Everything else gets a finite life.",
+        "",
+        "purchase_price is the capitalized cost: the asset plus anything needed to put it into",
+        "service (delivery, installation, non-recoverable tax). Exclude recoverable sales tax,",
+        "extended warranties and service plans — those are not part of the asset.",
+        "",
+        "purchase_date is the date on the receipt, not today.",
+        "salvage_value is 0 unless the receipt states a residual or trade-in value.",
+        "",
+        "Set confidence below 0.5 when the document is not a purchase receipt at all, or when",
+        "the price or date cannot be read. Say so plainly in reasoning. Do not invent a date or",
+        "a price to fill the field — a blank a person notices is better than a number they do not.",
+    ])
+    if chart:
+        system += (
+            "\n\nUse ONLY these account names, copied verbatim, for the three account fields. "
+            "If none fits, return an empty string for that field rather than inventing one.\n" + chart
+        )
+
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model="claude-opus-5",
+        max_tokens=1600,
+        system=system,
+        messages=[{"role": "user", "content": [file_block,
+                   {"type": "text", "text": "Extract the asset details as JSON."}]}],
+    )
+    raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        raw = raw[4:] if raw.startswith("json") else raw
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        raise RuntimeError("The AI did not return readable JSON for this receipt.")
+
+    coa = _coa_index(chart)
+    suggested: dict[str, str] = {}
+    for key in ("qbo_asset_account", "qbo_accum_dep_account", "qbo_dep_expense_account"):
+        name, ok = _resolve_account(data.get(key), coa)
+        if ok:
+            data[key] = name
+        else:
+            # Hand back what it proposed, separately, so the form can show
+            # "we think X, pick the real one" instead of silently blanking.
+            if data.get(key):
+                suggested[key] = str(data[key])
+            data[key] = ""
+    data["unresolved_accounts"] = suggested
+
+    # Keep the numbers sane before they reach a form a human will trust.
+    try:
+        data["purchase_price"] = round(abs(float(data.get("purchase_price") or 0)), 2)
+    except Exception:
+        data["purchase_price"] = 0.0
+    try:
+        data["salvage_value"] = round(abs(float(data.get("salvage_value") or 0)), 2)
+    except Exception:
+        data["salvage_value"] = 0.0
+    try:
+        life = int(data.get("useful_life_months") or 0)
+    except Exception:
+        life = 0
+    data["useful_life_months"] = max(0, min(life, 600))
+    if data.get("is_indefinite_life"):
+        data["useful_life_months"] = 0
+    if data.get("depreciation_method") not in ("straight_line", "double_declining"):
+        data["depreciation_method"] = "straight_line"
+    if data.get("asset_type") not in ("tangible", "intangible"):
+        data["asset_type"] = "tangible"
+    if data["salvage_value"] > data["purchase_price"]:
+        data["salvage_value"] = 0.0
+    return data

@@ -1020,6 +1020,50 @@ export function runScheduleTieOut(clientId: number, period: string): Promise<Tie
   return apiFetch<TieOutResult>(`/clients/${clientId}/qbo/schedule-tieout?period=${period}`);
 }
 
+// ── Read an asset off its receipt ────────────────────────────────────────────
+
+export interface AssetFromReceipt {
+  name: string;
+  category: string;
+  purchase_date: string;
+  purchase_price: number;
+  salvage_value: number;
+  useful_life_months: number;
+  depreciation_method: string;
+  asset_type: "tangible" | "intangible";
+  is_indefinite_life: boolean;
+  qbo_asset_account: string;
+  qbo_accum_dep_account: string;
+  qbo_dep_expense_account: string;
+  vendor?: string;
+  confidence: number;
+  reasoning: string;
+  // Accounts the model proposed that are not in the live chart. Returned
+  // separately so the form can say what it wanted rather than silently
+  // leaving the field blank.
+  unresolved_accounts: Record<string, string>;
+}
+
+export async function extractAssetFromReceipt(
+  clientId: number, file: File,
+): Promise<AssetFromReceipt> {
+  // Not apiFetch: it sets Content-Type: application/json, and a multipart body
+  // needs the browser to set the header itself so it can include the boundary.
+  // Same reason uploadInvoice goes direct.
+  const token = getToken();
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch(
+    `${BASE_URL}/clients/${clientId}/fixed-assets/extract-receipt`,
+    { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Could not read the receipt");
+  }
+  return res.json();
+}
+
 export function getCloseChecklist(clientId: number, closeMonth: string): Promise<CloseChecklistItem[]> {
   return apiFetch<CloseChecklistItem[]>(`/clients/${clientId}/close-checklist?close_month=${closeMonth}`);
 }
