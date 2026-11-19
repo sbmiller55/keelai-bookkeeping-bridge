@@ -62,10 +62,17 @@ class Client(Base):
     last_sync_at = Column(DateTime, nullable=True)
     qbo_coa_cache = Column(Text, nullable=True)               # JSON array of account names
     qbo_coa_cached_at = Column(DateTime, nullable=True)       # when the cache was last refreshed from QBO
-    # Earliest close month the checklist carries unfinished work forward from,
+    # Earliest CLOSE MONTH the checklist carries unfinished work forward from,
     # as "YYYY-MM". Lets a client draw a line under a backlog from before they
-    # were using the checklist properly without pretending that work was done —
-    # marking it complete would assert something false in the audit trail.
+    # were using the checklist properly, without pretending that work was done —
+    # marking it complete would assert something false, and now says so
+    # permanently in the audit trail.
+    #
+    # Close month, not due date, and the two are a month apart: the October
+    # close is worked during November, so its tasks carry November dates. A
+    # value of "2026-10" therefore keeps everything due in November and drops
+    # everything due in October, which belonged to the September close. Worth
+    # stating because it is the obvious thing to get backwards.
     close_carryover_from = Column(String(7), nullable=True)
 
     owner = relationship("User", back_populates="clients")
