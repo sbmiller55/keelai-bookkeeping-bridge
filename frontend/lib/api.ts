@@ -930,6 +930,10 @@ export type CloseChecklistItem = {
   milestone: string | null;
   recurrence: string;
   completed_at: string | null;
+  // The close month this row belongs to. An unfinished recurring task stays
+  // attached to its own month instead of reappearing against the next one.
+  for_month?: string | null;
+  carried_over?: boolean;
 };
 
 // ── Close checks (read-only QuickBooks verification) ─────────────────────────

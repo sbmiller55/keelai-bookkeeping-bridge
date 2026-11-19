@@ -59,6 +59,32 @@ function formatDate(d: Date): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+// The month the work is done in: close October during November. Due rules
+// resolve against this, so "day 5" means the 5th of the month after the close
+// and "last business day" means the end of it.
+function workingMonthFor(closeMonth: string): { year: number; month: number } {
+  const [y, m] = closeMonth.split("-").map(Number);
+  return m === 12 ? { year: y + 1, month: 1 } : { year: y, month: m + 1 };
+}
+
+function dueDateForItem(item: CloseChecklistItem, viewMonth: string,
+                        fallbackYear: number, fallbackMonth: number): Date {
+  // A carried-over task keeps its OWN month's due date. Recomputing it against
+  // the month being viewed is what made October's final check look like a
+  // December task the moment December began.
+  const month = item.for_month || viewMonth;
+  if (month) {
+    const w = workingMonthFor(month);
+    return calcDueDate(item.due_rule, w.year, w.month);
+  }
+  return calcDueDate(item.due_rule, fallbackYear, fallbackMonth);
+}
+
+function monthLabel(m: string): string {
+  const [y, mm] = m.split("-").map(Number);
+  return new Date(y, mm - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 function getCloseMonthStr(now: Date): string {
   const prev = now.getMonth() === 0 ? 12 : now.getMonth();
   const yr = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
@@ -226,7 +252,9 @@ export default function MonthlyClosePage() {
   const [addingNew, setAddingNew] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  const [justCheckedId, setJustCheckedId] = useState<number | null>(null);
+  // Keyed by item AND month: the same task can appear for several months.
+  const [justCheckedId, setJustCheckedId] = useState<string | null>(null);
+  const [showCarried, setShowCarried] = useState(false);
 
   useEffect(() => {
     if (!clientId) return;
@@ -237,23 +265,60 @@ export default function MonthlyClosePage() {
       .finally(() => setLoading(false));
   }, [clientId, closeMonthStr]);
 
-  const completedCount = items.filter((i) => i.completed_at !== null).length;
-  const totalCount = items.length;
+  // This month's work, due-date order. The list is worked chronologically, so
+  // that is the order it should read in — order_index was the order someone
+  // typed them in.
+  const thisMonth = items
+    .filter((i) => !i.carried_over)
+    .sort((a, b) =>
+      dueDateForItem(a, closeMonthStr, workingYear, workingMonth).getTime() -
+      dueDateForItem(b, closeMonthStr, workingYear, workingMonth).getTime());
+
+  // Unfinished months, newest first, each still carrying its own due dates.
+  const carried = items.filter((i) => i.carried_over);
+  const carriedByMonth = Array.from(
+    carried.reduce((map, i) => {
+      const k = i.for_month || "";
+      if (!map.has(k)) map.set(k, [] as CloseChecklistItem[]);
+      map.get(k)!.push(i);
+      return map;
+    }, new Map<string, CloseChecklistItem[]>()),
+  )
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([month, rows]) => ({
+      month,
+      rows: rows.sort((a, b) =>
+        dueDateForItem(a, month, workingYear, workingMonth).getTime() -
+        dueDateForItem(b, month, workingYear, workingMonth).getTime()),
+    }));
+
+  const completedCount = items.filter((i) => i.completed_at !== null && !i.carried_over).length;
+  const totalCount = thisMonth.length;
   const softCloseDone = items.find((i) => i.milestone === "Soft Close completed")?.completed_at != null;
   const financialsClosedDone = items.find((i) => i.milestone === "Financials Closed")?.completed_at != null;
   const today = new Date(); today.setHours(0, 0, 0, 0);
 
   async function handleToggle(item: CloseChecklistItem) {
+    // Record against the month the task is FOR. Ticking October's final check
+    // in December must close October, not December — otherwise the thing you
+    // just did leaves the month it belonged to still unfinished.
+    const month = item.for_month || closeMonthStr;
+    const key = `${item.id}:${month}`;
     const completing = !item.completed_at;
-    setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, completed_at: completing ? new Date().toISOString() : null } : i));
-    if (completing) { setJustCheckedId(item.id); setTimeout(() => setJustCheckedId(null), 700); }
+    const match = (i: CloseChecklistItem) =>
+      i.id === item.id && (i.for_month || closeMonthStr) === month;
+
+    setItems((prev) => prev.map((i) =>
+      match(i) ? { ...i, completed_at: completing ? new Date().toISOString() : null } : i));
+    if (completing) { setJustCheckedId(key); setTimeout(() => setJustCheckedId(null), 700); }
     try {
       if (item.completed_at) {
-        await uncompleteChecklistItem(clientId, item.id, closeMonthStr);
-        setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, completed_at: null } : i));
+        await uncompleteChecklistItem(clientId, item.id, month);
+        setItems((prev) => prev.map((i) => match(i) ? { ...i, completed_at: null } : i));
       } else {
-        const updated = await completeChecklistItem(clientId, item.id, closeMonthStr);
-        setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, completed_at: updated.completed_at } : i));
+        const updated = await completeChecklistItem(clientId, item.id, month);
+        setItems((prev) => prev.map((i) =>
+          match(i) ? { ...i, completed_at: updated.completed_at } : i));
       }
     } catch { setItems(items); }
   }
@@ -373,11 +438,11 @@ export default function MonthlyClosePage() {
 
       {/* Checklist — Todoist style: plain rows, thin dividers, no card */}
       <div>
-        {items.map((item) => {
-          const dueDate = calcDueDate(item.due_rule, workingYear, workingMonth);
+        {thisMonth.map((item) => {
+          const dueDate = dueDateForItem(item, closeMonthStr, workingYear, workingMonth);
           const isOverdue = !item.completed_at && dueDate < today;
           const isCompleted = item.completed_at !== null;
-          const justChecked = justCheckedId === item.id;
+          const justChecked = justCheckedId === `${item.id}:${item.for_month || closeMonthStr}`;
           const isEditing = editingId === item.id;
 
           return (
@@ -450,6 +515,63 @@ export default function MonthlyClosePage() {
           );
         })}
       </div>
+
+      {/* Months that were never finished. Collapsed, because the current month
+          is the work in front of you — but counted in the open, because the
+          whole point of noticing is that it stops being silent. */}
+      {carriedByMonth.length > 0 && (
+        <div className="mt-6 border border-amber-900/60 bg-amber-950/20 rounded-xl overflow-hidden">
+          <button
+            onClick={() => setShowCarried((v) => !v)}
+            className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-amber-950/30 transition-colors"
+          >
+            <svg className={`w-3.5 h-3.5 text-amber-400 transition-transform ${showCarried ? "rotate-90" : ""}`}
+              fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span className="text-sm font-semibold text-amber-200">
+              {carried.length} to-do{carried.length === 1 ? "" : "s"} still open from{" "}
+              {carriedByMonth.length} earlier month{carriedByMonth.length === 1 ? "" : "s"}
+            </span>
+            <span className="ml-auto text-[11px] text-amber-500/80">
+              {carriedByMonth.map((g) => monthLabel(g.month).split(" ")[0]).join(", ")}
+            </span>
+          </button>
+
+          {showCarried && (
+            <div className="px-4 pb-3">
+              {carriedByMonth.map((group) => (
+                <div key={group.month} className="mt-2">
+                  <p className="text-[11px] uppercase tracking-wide text-amber-500/90 py-1">
+                    {monthLabel(group.month)} close
+                  </p>
+                  {group.rows.map((item) => {
+                    const dueDate = dueDateForItem(item, group.month, workingYear, workingMonth);
+                    const key = `${item.id}:${group.month}`;
+                    return (
+                      <div key={key}
+                        className="flex items-center gap-3 py-1.5 border-b border-amber-900/30 last:border-b-0">
+                        <button
+                          onClick={() => handleToggle(item)}
+                          className="shrink-0 w-4 h-4 rounded-full border-2 border-amber-600 hover:border-amber-300 transition-colors"
+                          title={`Mark done for ${monthLabel(group.month)}`}
+                        />
+                        <span className="text-sm text-gray-300 truncate">{item.title}</span>
+                        <span className="ml-auto text-[11px] text-amber-400/90 whitespace-nowrap">
+                          was due {formatDate(dueDate)}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+              <p className="text-[11px] text-gray-500 mt-2">
+                Ticking one of these closes the month it belongs to, not {formatMonthLabel(closeMonthStr)}.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
     </div>
   );

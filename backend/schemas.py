@@ -307,6 +307,11 @@ class CloseChecklistItemRead(BaseModel):
     milestone: Optional[str] = None
     recurrence: str = "monthly"
     completed_at: Optional[datetime] = None  # populated when fetching with close_month
+    # The close month this row belongs to. Usually the month being viewed, but
+    # an unfinished recurring task stays attached to the month it was for
+    # rather than quietly reappearing against the next one.
+    for_month: Optional[str] = None
+    carried_over: bool = False
 
     model_config = {"from_attributes": True}
 

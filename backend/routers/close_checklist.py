@@ -87,10 +87,75 @@ def get_checklist(
                 continue
             d = schemas.CloseChecklistItemRead.model_validate(item)
             d.completed_at = completions.get(item.id)
+            d.for_month = close_month
             result.append(d)
+
+        result.extend(_outstanding_from_earlier(client_id, close_month, items, db))
         return result
 
     return items
+
+
+# How far back to look for unfinished months. A checklist that has never been
+# finished should not produce an unbounded wall of history; six months is long
+# enough to cover a quarter-end that slipped and short enough to stay readable.
+_CARRY_BACK_MONTHS = 6
+
+
+def _month_before(month: str) -> str:
+    y, m = (int(x) for x in month.split("-"))
+    return "%04d-12" % (y - 1) if m == 1 else "%04d-%02d" % (y, m - 1)
+
+
+def _outstanding_from_earlier(client_id: int, close_month: str, items, db) -> list:
+    """Recurring tasks from earlier months that were never ticked.
+
+    A monthly task used to roll silently onto the next month the moment that
+    month began: the final payments check for October, due 30 November, became
+    a December task on 1 December with nothing saying October had been left
+    unfinished. A close checklist exists to catch exactly that, so an
+    unfinished task stays attached to the month it was for until it is done.
+
+    Only months the checklist was actually being used in are considered — a
+    month with no completions at all was a month nobody worked, and listing
+    every task from it as outstanding would bury the one task that matters.
+    """
+    if not close_month:
+        return []
+    monthly = [i for i in items if (i.recurrence or "monthly") == "monthly"]
+    if not monthly:
+        return []
+
+    months = []
+    cursor = _month_before(close_month)
+    for _ in range(_CARRY_BACK_MONTHS):
+        months.append(cursor)
+        cursor = _month_before(cursor)
+
+    rows = (
+        db.query(models.CloseChecklistCompletion)
+        .filter(
+            models.CloseChecklistCompletion.item_id.in_([i.id for i in monthly]),
+            models.CloseChecklistCompletion.close_month.in_(months),
+        )
+        .all()
+    )
+    done_by_month: dict[str, set] = {}
+    for r in rows:
+        done_by_month.setdefault(r.close_month, set()).add(r.item_id)
+
+    out = []
+    for month in sorted(done_by_month):          # only months with activity
+        done = done_by_month[month]
+        for item in monthly:
+            if item.id in done:
+                continue
+            d = schemas.CloseChecklistItemRead.model_validate(item)
+            d.completed_at = None
+            d.for_month = month
+            d.carried_over = True
+            out.append(d)
+    return out
 
 
 @router.post("/{client_id}/close-checklist", response_model=schemas.CloseChecklistItemRead, status_code=status.HTTP_201_CREATED)
