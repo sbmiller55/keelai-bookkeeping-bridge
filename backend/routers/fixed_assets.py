@@ -157,18 +157,49 @@ def _compute_schedule(asset: models.FixedAsset) -> list[dict]:
     return schedule
 
 
-def _enrich(asset: models.FixedAsset) -> schemas.FixedAssetRead:
+def _posted_to_date(asset_id: int, db) -> Optional[float]:
+    """Total depreciation actually posted for this asset, from the ledger."""
+    if db is None or asset_id is None:
+        return None
+    try:
+        rows = (db.query(models.JournalEntry)
+                .join(models.Transaction,
+                      models.JournalEntry.transaction_id == models.Transaction.id)
+                .filter(models.Transaction.fixed_asset_id == asset_id,
+                        models.Transaction.source == "depreciation")
+                .all())
+        return round(sum(float(j.amount or 0) for j in rows), 2)
+    except Exception:
+        return None
+
+
+def _enrich(asset: models.FixedAsset, db=None) -> schemas.FixedAssetRead:
+    """The asset as the register shows it.
+
+    Accumulated depreciation is read from the LEDGER, not recomputed from the
+    schedule. Recomputing was wrong in a way that only appears once a useful
+    life is edited after entries have posted: the screen restated ten months of
+    ContextBridge's domain from $34.29 to $68.58 a month while the books still
+    held $34.29, so the fixed-asset register and the general ledger disagreed
+    by $342.90 and nothing said so.
+
+    What the schedule expects is still reported, beside it, as `scheduled_to_date`
+    with the gap in `catch_up` — the difference is a real thing that needs a
+    decision, not something to hide by picking whichever number looks tidier.
+    """
     schedule = _compute_schedule(asset)
     today_period = date.today().strftime("%Y-%m")
-    accum_to_date = sum(p["depreciation"] for p in schedule if p["period"] <= today_period)
-    nbv = round(asset.purchase_price - accum_to_date, 2)
-    monthly_dep = schedule[0]["depreciation"] if schedule else 0.0
+    scheduled = round(sum(p["depreciation"] for p in schedule if p["period"] <= today_period), 2)
+    posted = _posted_to_date(asset.id, db)
+    accum = posted if posted is not None else scheduled
 
     r = schemas.FixedAssetRead.model_validate(asset)
     r.schedule = [schemas.DepreciationPeriod(**p) for p in schedule]
-    r.accumulated_depreciation_to_date = round(accum_to_date, 2)
-    r.net_book_value = nbv
-    r.monthly_depreciation = monthly_dep
+    r.accumulated_depreciation_to_date = accum
+    r.scheduled_to_date = scheduled
+    r.catch_up = round(scheduled - accum, 2)
+    r.net_book_value = round(asset.purchase_price - accum, 2)
+    r.monthly_depreciation = schedule[0]["depreciation"] if schedule else 0.0
     return r
 
 
@@ -206,7 +237,7 @@ def list_assets(
     assets = db.query(models.FixedAsset).filter(
         models.FixedAsset.client_id == client_id,
     ).order_by(models.FixedAsset.purchase_date).all()
-    return [_enrich(a) for a in assets]
+    return [_enrich(a, db) for a in assets]
 
 
 @router.get("/{client_id}/fixed-assets/export")
@@ -220,7 +251,7 @@ def export_schedule(
     assets = db.query(models.FixedAsset).filter(
         models.FixedAsset.client_id == client_id,
     ).order_by(models.FixedAsset.purchase_date).all()
-    enriched = [_enrich(a) for a in assets]
+    enriched = [_enrich(a, db) for a in assets]
 
     wb = openpyxl.Workbook()
 
@@ -531,7 +562,7 @@ def create_asset(
     if not payload.is_indefinite_life:
         _generate_historical_dep_jes(asset, client_id, db)
 
-    return _enrich(asset)
+    return _enrich(asset, db)
 
 
 def _generate_historical_dep_jes(asset: models.FixedAsset, client_id: int, db: Session):
@@ -661,7 +692,7 @@ def get_asset(
 ):
     _get_client_or_403(client_id, current_user, db)
     asset = _get_asset_or_404(asset_id, client_id, db)
-    return _enrich(asset)
+    return _enrich(asset, db)
 
 
 @router.put("/{client_id}/fixed-assets/{asset_id}", response_model=schemas.FixedAssetRead)
@@ -678,7 +709,7 @@ def update_asset(
         setattr(asset, field, value)
     db.commit()
     db.refresh(asset)
-    return _enrich(asset)
+    return _enrich(asset, db)
 
 
 @router.post("/{client_id}/fixed-assets/{asset_id}/dispose", response_model=schemas.FixedAssetRead)
@@ -693,7 +724,7 @@ def dispose_asset(
     asset.status = "disposed"
     db.commit()
     db.refresh(asset)
-    return _enrich(asset)
+    return _enrich(asset, db)
 
 
 @router.post("/{client_id}/fixed-assets/generate-depreciation")

@@ -665,8 +665,20 @@ class FixedAssetRead(BaseModel):
     created_at: datetime
     # Computed fields
     monthly_depreciation: float = 0.0
+    # What the GENERAL LEDGER holds — the sum of entries actually posted for
+    # this asset. The register has to agree with the books, so this is the one
+    # the balance sheet figures are built from.
     accumulated_depreciation_to_date: float = 0.0
     net_book_value: float = 0.0
+    # What the schedule SAYS should have posted by now, and the gap between
+    # them. Kept separate because the two genuinely disagree when a useful life
+    # is edited after entries have already posted: ContextBridge's domain has
+    # ten months posted at the 120-month rate and a record that now says 60,
+    # so the schedule wants $685.80 where the ledger holds $342.90. Showing
+    # only the schedule silently restated ten months of history on screen while
+    # the books did not move.
+    scheduled_to_date: float = 0.0
+    catch_up: float = 0.0
     schedule: list[DepreciationPeriod] = []
 
     model_config = {"from_attributes": True}
