@@ -293,6 +293,36 @@ class CloseChecklistCompletion(Base):
     completed_at = Column(DateTime, default=datetime.utcnow)
 
 
+class CloseCheckRun(Base):
+    """The last time a period was checked against QuickBooks, and what it found.
+
+    Server-side rather than in the browser because this gates a close. A
+    finding kept in localStorage follows one machine and dies with a cleared
+    cache, which makes "did anyone look at October" unanswerable from anywhere
+    but the laptop it was run on.
+
+    One row per client and period: a new run replaces the old verdict, since
+    the question is always what is true now. The payload keeps what was found
+    so the detail survives being acknowledged.
+    """
+    __tablename__ = "close_check_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    period = Column(String(7), nullable=False, index=True)      # "YYYY-MM"
+    ran_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ran_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    clean = Column(Boolean, default=False, nullable=False)
+    problem_count = Column(Integer, default=0, nullable=False)
+    # Resolved means a person has dealt with it, not that the problem is gone.
+    # A later run that still finds something clears this: a resolution that
+    # outlives what it resolved turns the check into decoration.
+    resolved = Column(Boolean, default=False, nullable=False)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payload = Column(Text, nullable=True)                        # JSON of both checks
+
+
 class BillingType(str, enum.Enum):
     annual_upfront = "annual_upfront"
     quarterly_upfront = "quarterly_upfront"

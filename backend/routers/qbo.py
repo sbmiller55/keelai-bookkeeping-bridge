@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user
 from database import get_db, SessionLocal
-from models import Client, JournalEntry, Transaction, TransactionStatus, User
+from models import Client, CloseCheckRun, JournalEntry, Transaction, TransactionStatus, User
 import qbo_client as qbo
 import qbo_idempotency
 import schedule_tieout
@@ -1216,6 +1216,127 @@ def schedule_tieout_report(
         clean=all(s["status"] == "ok" for s in schedules),
         total_variance=round(sum(abs(s["variance_qbo_vs_expected"]) for s in schedules), 2),
     )
+
+
+# ── Saved close checks ───────────────────────────────────────────────────────
+
+class SavedCheck(BaseModel):
+    period:        str
+    ran_at:        datetime
+    clean:         bool
+    problem_count: int
+    resolved:      bool
+    resolved_at:   Optional[datetime] = None
+    close_check:   Optional[dict] = None
+    tie_out:       Optional[dict] = None
+
+
+def _saved_to_schema(row) -> SavedCheck:
+    body = {}
+    try:
+        body = json.loads(row.payload) if row.payload else {}
+    except Exception:
+        body = {}
+    return SavedCheck(
+        period=row.period, ran_at=row.ran_at, clean=row.clean,
+        problem_count=row.problem_count, resolved=row.resolved,
+        resolved_at=row.resolved_at,
+        close_check=body.get("close_check"), tie_out=body.get("tie_out"),
+    )
+
+
+@router.get("/close-check/saved", response_model=Optional[SavedCheck])
+def get_saved_check(
+    client_id: int,
+    period: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What the last check of this period found, if one has been run.
+
+    Returns null rather than 404 when nothing has been run: "not checked yet"
+    is an ordinary state for a close, not an error.
+    """
+    _get_client(client_id, current_user, db)
+    row = (db.query(CloseCheckRun)
+           .filter(CloseCheckRun.client_id == client_id, CloseCheckRun.period == period)
+           .first())
+    return _saved_to_schema(row) if row else None
+
+
+@router.post("/close-check/run", response_model=SavedCheck)
+def run_and_save_check(
+    client_id: int,
+    period: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run both checks and keep the verdict.
+
+    One call rather than two so the stored result cannot be half of one run and
+    half of another. A fresh run clears `resolved` — if the problem is still
+    there, it is not resolved just because someone said so last week.
+    """
+    _get_client(client_id, current_user, db)
+    checks = close_check(client_id=client_id, period=period, db=db, current_user=current_user)
+    tie    = schedule_tieout_report(client_id=client_id, period=period, db=db,
+                                    current_user=current_user)
+
+    problems = len(checks.duplicates) + len([s for s in tie.schedules if s.get("flags")])
+    clean = checks.clean and tie.clean
+
+    row = (db.query(CloseCheckRun)
+           .filter(CloseCheckRun.client_id == client_id, CloseCheckRun.period == period)
+           .first())
+    if row is None:
+        row = CloseCheckRun(client_id=client_id, period=period)
+        db.add(row)
+    row.ran_at = datetime.utcnow()
+    row.ran_by = current_user.id
+    row.clean = clean
+    row.problem_count = problems
+    row.resolved = False
+    row.resolved_at = None
+    row.resolved_by = None
+    row.payload = json.dumps({
+        "close_check": checks.model_dump(mode="json"),
+        "tie_out": tie.model_dump(mode="json"),
+    }, default=str)
+    db.commit()
+    db.refresh(row)
+    return _saved_to_schema(row)
+
+
+class ResolveRequest(BaseModel):
+    resolved: bool = True
+
+
+@router.post("/close-check/resolve", response_model=SavedCheck)
+def resolve_saved_check(
+    client_id: int,
+    period: str,
+    payload: ResolveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark what the last run found as dealt with, or put it back.
+
+    Does not re-run anything and does not erase the finding: resolving records
+    that a person looked, which is a different fact from the problem being
+    gone, and both are worth keeping.
+    """
+    _get_client(client_id, current_user, db)
+    row = (db.query(CloseCheckRun)
+           .filter(CloseCheckRun.client_id == client_id, CloseCheckRun.period == period)
+           .first())
+    if row is None:
+        raise HTTPException(404, "Nothing has been checked for this period yet.")
+    row.resolved = payload.resolved
+    row.resolved_at = datetime.utcnow() if payload.resolved else None
+    row.resolved_by = current_user.id if payload.resolved else None
+    db.commit()
+    db.refresh(row)
+    return _saved_to_schema(row)
 
 
 # ── Rollback (recovery from a bad force re-sync) ─────────────────────────────

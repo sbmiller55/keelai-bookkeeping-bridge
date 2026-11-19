@@ -127,6 +127,8 @@ _AUDITED = {
     "revenue_schedule_entries", "revenue_streams", "stripe_config",
     "revenue_integration_settings", "close_checklist_items", "invoices",
     "users", "transactions",
+    # Resolving a close finding is a judgement someone made about the books.
+    "close_check_runs",
 }
 _INSERT_EXEMPT = {"transactions", "journal_entries"}
 

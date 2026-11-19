@@ -19,37 +19,15 @@ import {
   CloseCheckResult,
   TieOutResult,
   TieOutSchedule,
-  runCloseCheck,
-  runScheduleTieOut,
+  SavedCheck,
+  getSavedCheck,
+  runAndSaveCheck,
+  resolveSavedCheck,
 } from "@/lib/api";
 
-// The result outlives the page. A check that vanishes the moment you navigate
-// away is a check you have to remember to re-run, and the whole reason it
-// exists is that nobody notices these problems unaided. It stays until it is
-// either resolved or re-run clean.
-const STORE_PREFIX = "bb-close-check";
-
-type Saved = {
-  dupes: CloseCheckResult;
-  tie: TieOutResult;
-  ranAt: string;
-  resolved: boolean;
-};
-
-function loadSaved(clientId: number, period: string): Saved | null {
-  try {
-    const raw = localStorage.getItem(`${STORE_PREFIX}:${clientId}:${period}`);
-    return raw ? (JSON.parse(raw) as Saved) : null;
-  } catch { return null; }
-}
-
-function storeSaved(clientId: number, period: string, value: Saved | null) {
-  try {
-    const key = `${STORE_PREFIX}:${clientId}:${period}`;
-    if (value) localStorage.setItem(key, JSON.stringify(value));
-    else localStorage.removeItem(key);
-  } catch { /* private window, blocked storage — the check still runs */ }
-}
+// The result outlives the page, and lives on the server rather than in this
+// browser: it gates a close, so "did anyone look at October" has to be
+// answerable from any machine and has to survive a cleared cache.
 
 function money(n: number): string {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -170,37 +148,36 @@ export default function CloseChecks({
   const [resolved, setResolved] = useState(false);
   const [ranAt, setRanAt] = useState<string | null>(null);
 
-  // Read on mount rather than seeding state during render: the server has no
-  // localStorage, so a value read at render time makes the first client render
-  // disagree with the server's and React discards the tree.
+  // Load whatever the last run found. An unresolved finding reopens itself:
+  // the point of keeping it is that it does not get forgotten.
   useEffect(() => {
-    const saved = loadSaved(clientId, period);
-    if (!saved) return;
-    setDupes(saved.dupes);
-    setTie(saved.tie);
-    setResolved(saved.resolved);
-    setRanAt(saved.ranAt);
-    setOpen(!saved.resolved);
+    let cancelled = false;
+    getSavedCheck(clientId, period)
+      .then((saved) => {
+        if (cancelled || !saved) return;
+        apply(saved);
+        setOpen(!saved.resolved && !saved.clean);
+      })
+      .catch(() => { /* nothing saved yet, or offline — the panel still runs */ });
+    return () => { cancelled = true; };
   }, [clientId, period]);
+
+  function apply(saved: SavedCheck) {
+    setDupes(saved.close_check);
+    setTie(saved.tie_out);
+    setResolved(saved.resolved);
+    setRanAt(saved.ran_at);
+  }
 
   async function run() {
     setRunning(true);
     setError(null);
     try {
-      // Both hit QuickBooks; run them together so one press answers both.
-      const [d, t] = await Promise.all([
-        runCloseCheck(clientId, period),
-        runScheduleTieOut(clientId, period),
-      ]);
-      const now = new Date().toISOString();
-      setDupes(d);
-      setTie(t);
-      setRanAt(now);
-      // A fresh run replaces an earlier verdict, including one marked
-      // resolved: if the problem is back, saying so is the point.
-      setResolved(false);
+      // One call: the server runs both checks and stores the verdict together,
+      // so a saved result can never be half of one run and half of another.
+      const saved = await runAndSaveCheck(clientId, period);
+      apply(saved);
       setOpen(true);
-      storeSaved(clientId, period, { dupes: d, tie: t, ranAt: now, resolved: false });
     } catch (e: any) {
       setError(e?.message ?? "Could not reach QuickBooks.");
     } finally {
@@ -208,21 +185,24 @@ export default function CloseChecks({
     }
   }
 
-  function markResolved() {
-    setResolved(true);
-    setOpen(false);
-    if (dupes && tie && ranAt) {
-      storeSaved(clientId, period, { dupes, tie, ranAt, resolved: true });
+  async function setResolvedOnServer(next: boolean) {
+    const previous = resolved;
+    setResolved(next);                       // optimistic — the click feels instant
+    setOpen(!next);
+    try {
+      apply(await resolveSavedCheck(clientId, period, next));
+    } catch (e: any) {
+      setResolved(previous);                 // put it back rather than show a lie
+      setOpen(!previous);
+      setError(e?.message ?? "Could not save that.");
     }
   }
 
-  function reopen() {
-    setResolved(false);
+  const markResolved = () => setResolvedOnServer(true);
+  const reopen = () => {
     setOpen(true);
-    if (dupes && tie && ranAt) {
-      storeSaved(clientId, period, { dupes, tie, ranAt, resolved: false });
-    }
-  }
+    if (resolved) void setResolvedOnServer(false);
+  };
 
   const hasRun = dupes !== null && tie !== null;
   const allClean = hasRun && dupes!.clean && tie!.clean;

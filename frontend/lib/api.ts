@@ -1016,6 +1016,38 @@ export interface TieOutResult {
 
 // The QBO router is mounted at /clients/{client_id}/qbo — client_id is a PATH
 // segment, not a query parameter. Calling /qbo/... returns 404.
+// A close finding is kept on the server, not in the browser: it gates a close,
+// and a verdict that lives in one machine's localStorage cannot answer "did
+// anyone look at October" from anywhere else.
+export interface SavedCheck {
+  period: string;
+  ran_at: string;
+  clean: boolean;
+  problem_count: number;
+  resolved: boolean;
+  resolved_at: string | null;
+  close_check: CloseCheckResult | null;
+  tie_out: TieOutResult | null;
+}
+
+export function getSavedCheck(clientId: number, period: string): Promise<SavedCheck | null> {
+  return apiFetch<SavedCheck | null>(
+    `/clients/${clientId}/qbo/close-check/saved?period=${period}`);
+}
+
+export function runAndSaveCheck(clientId: number, period: string): Promise<SavedCheck> {
+  return apiFetch<SavedCheck>(
+    `/clients/${clientId}/qbo/close-check/run?period=${period}`, { method: "POST" });
+}
+
+export function resolveSavedCheck(
+  clientId: number, period: string, resolved: boolean,
+): Promise<SavedCheck> {
+  return apiFetch<SavedCheck>(
+    `/clients/${clientId}/qbo/close-check/resolve?period=${period}`,
+    { method: "POST", body: JSON.stringify({ resolved }) });
+}
+
 export function runCloseCheck(clientId: number, period: string): Promise<CloseCheckResult> {
   return apiFetch<CloseCheckResult>(`/clients/${clientId}/qbo/close-check?period=${period}`);
 }
