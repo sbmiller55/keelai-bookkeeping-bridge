@@ -264,8 +264,17 @@ def _entries_for(session, objects: Iterable, verb: str) -> list:
     return rows
 
 
-def install(session_factory) -> None:
-    """Start recording. Safe to call more than once."""
+def install(session_factory=None) -> None:
+    """Start recording. Safe to call more than once.
+
+    Listens on SQLAlchemy's Session class rather than one sessionmaker, so
+    every session in the process is covered — the web app, the scheduler, and
+    a maintenance script run by hand. That last one is not a detail: the
+    listener used to be installed only by main.py, so a change made from a
+    script left no trace at all, which is precisely what made one asset's
+    history unexplainable after the fact. A trail with a hole where the
+    privileged writes go is not a trail.
+    """
     from sqlalchemy import event
     from sqlalchemy.orm import Session as _Session
 
@@ -273,7 +282,9 @@ def install(session_factory) -> None:
         return
     install._installed = True
 
-    @event.listens_for(session_factory, "before_flush")
+    target = session_factory if session_factory is not None else _Session
+
+    @event.listens_for(target, "before_flush")
     def _before_flush(session, flush_context, instances):  # noqa: ANN001
         try:
             rows = (

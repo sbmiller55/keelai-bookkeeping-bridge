@@ -520,3 +520,18 @@ class FixedAsset(Base):
     is_indefinite_life = Column(Boolean, default=False, nullable=True)  # True for Goodwill
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+# Start the automatic audit trail as soon as the models exist.
+#
+# Here rather than in main.py because main.py is only imported by the web
+# app. A maintenance script, a one-off fix run over SSH, the scheduler — all
+# import models and none import main, so installing it there left every
+# privileged write unrecorded. Imported at the bottom so audit's own
+# `import models` finds this module already populated.
+try:
+    import audit as _audit
+    _audit.install()
+except Exception as _exc:                     # never block the app from starting
+    import sys as _sys
+    _sys.stderr.write(f"[audit] trail not installed: {_exc}\n")
