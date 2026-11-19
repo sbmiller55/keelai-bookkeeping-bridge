@@ -968,18 +968,22 @@ def schedule_tieout_report(
         return found
 
     keel_accrual = defaultdict(list)
-    keel_asset   = defaultdict(list)
-    for je in (db.query(JournalEntry)
-               .join(Transaction, JournalEntry.transaction_id == Transaction.id)
-               .filter(Transaction.client_id == client_id).all()):
-        memo = je.memo or ""
-        hit = schedule_tieout.parse_accrual_memo(memo)
+    keel_asset   = defaultdict(list)          # (asset_id, period) -> [(je id, amount)]
+    for je, tx in (db.query(JournalEntry, Transaction)
+                   .join(Transaction, JournalEntry.transaction_id == Transaction.id)
+                   .filter(Transaction.client_id == client_id).all()):
+        # A depreciation entry is tied to its asset by a foreign key. Use it.
+        # Matching on the memo instead broke the moment an asset was renamed:
+        # "Domain Name" became "Domain Name - ContextBridge" and every one of
+        # its nine posted entries stopped being found, so the tie-out reported
+        # the ledger as holding entries this app had never made.
+        if tx.fixed_asset_id and (tx.source or "") == "depreciation" and je.je_date:
+            keel_asset[(tx.fixed_asset_id, je.je_date.strftime("%Y-%m"))].append(
+                (je.id, float(je.amount or 0)))
+            continue
+        hit = schedule_tieout.parse_accrual_memo(je.memo or "")
         if hit:
             keel_accrual[hit].append((je.id, float(je.amount or 0)))
-            continue
-        hit = schedule_tieout.parse_asset_memo(memo)
-        if hit:
-            keel_asset[hit].append((je.id, float(je.amount or 0)))
 
     schedules: list[dict] = []
     seen_vendors: set = set()
@@ -1139,7 +1143,7 @@ def schedule_tieout_report(
         monthly  = schedule_tieout.asset_monthly(a)
         expected = round(monthly * len(periods), 2)
         keel_total = round(sum(x for p in periods
-                               for _, x in keel_asset.get((name, p), [])), 2)
+                               for _, x in keel_asset.get((a.id, p), [])), 2)
         # Credits to this asset's accumulated account ARE its depreciation to
         # date. The two MacBooks share one accumulated account, so the monthly
         # amount tells them apart ($62.75 against $74.74).
