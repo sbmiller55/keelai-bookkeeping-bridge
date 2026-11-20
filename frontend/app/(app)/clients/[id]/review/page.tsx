@@ -1657,7 +1657,7 @@ export default function ReviewQueuePage() {
             <button
               onClick={approveAll}
               disabled={approvingAll}
-              className="h-[34px] flex items-center gap-1.5 bg-gray-100/45 hover:bg-gray-100/55 disabled:opacity-50 text-gray-950 text-xs font-semibold px-3.5 rounded-lg transition-colors"
+              className="h-[34px] flex items-center gap-1.5 bg-[#6f7279] hover:bg-[#7d8087] disabled:opacity-50 text-gray-950 text-xs font-semibold px-3.5 rounded-lg transition-colors"
             >
               {approvingAll ? "Approving…" : (
                 <>
@@ -1737,9 +1737,11 @@ export default function ReviewQueuePage() {
           does not change what has been imported. Tints when a filter is on so
           the state is visible without reading it. */}
       <div className="mb-3 flex items-center gap-2.5 flex-wrap">
-        {/* A box around the filter so it is easy to find, a little under half
-            the strength of the white behind AI Code. Approve all shares it. */}
-        <div className="flex items-center gap-2.5 rounded-lg bg-gray-100/45 pl-3 pr-1 py-1">
+        {/* A box around the filter so it is easy to find. Solid, not a
+            translucent white, so it and Approve all — which shares the colour —
+            look the same whatever is behind them. #6f7279 is 45% gray-100 over
+            the page's gray-950. */}
+        <div className="flex items-center gap-2.5 rounded-lg bg-[#6f7279] pl-3 pr-1 py-1">
         <span className="text-xs font-medium text-gray-950">Showing</span>
         <Dropdown<string>
           ariaLabel="Show only transactions dated in one month"
