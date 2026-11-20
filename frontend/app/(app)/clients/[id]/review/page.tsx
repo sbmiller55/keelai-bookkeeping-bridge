@@ -1737,18 +1737,19 @@ export default function ReviewQueuePage() {
           does not change what has been imported. Tints when a filter is on so
           the state is visible without reading it. */}
       <div className="mb-3 flex items-center gap-2.5 flex-wrap">
-        {/* A faint box around the filter so it is easy to find without
-            competing with Sync & Code above it. */}
-        <div className="flex items-center gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.03] pl-3 pr-1 py-1">
-        <span className="text-xs text-gray-400">Showing</span>
+        {/* A box around the filter so it is easy to find: half the strength
+            of the white behind Approve all, so it is visible without
+            competing with that button. */}
+        <div className="flex items-center gap-2.5 rounded-lg bg-gray-100/50 pl-3 pr-1 py-1">
+        <span className="text-xs font-medium text-gray-950">Showing</span>
         <Dropdown<string>
           ariaLabel="Show only transactions dated in one month"
           value={monthFilter}
           onChange={setMonthFilter}
           className={`h-7 pl-3 pr-2 rounded-full border text-xs ${monthFilter === "all"
             ? "border-gray-800 bg-[#121318] hover:border-gray-700"
-            : "border-indigo-500/60 bg-indigo-500/10"}`}
-          face={<span className={`font-semibold whitespace-nowrap ${monthFilter === "all" ? "text-white" : "text-indigo-200"}`}>{monthFilterLabel}</span>}
+            : "border-indigo-600 bg-indigo-600 hover:bg-indigo-500"}`}
+          face={<span className="font-semibold whitespace-nowrap text-white">{monthFilterLabel}</span>}
           options={[
             { value: "all", label: "All months", hint: String(items.length) },
             // Relative options first: the month you are closing is the one you
@@ -1760,9 +1761,9 @@ export default function ReviewQueuePage() {
           ]}
         />
         {monthFilter !== "all" && (
-          <span className="text-xs text-gray-500 pr-2">
+          <span className="text-xs text-gray-900 pr-2">
             {visibleItems.length} of {items.length}{" · "}
-            <button onClick={() => setMonthFilter("all")} className="text-indigo-400 hover:text-indigo-300">
+            <button onClick={() => setMonthFilter("all")} className="font-semibold text-indigo-900 hover:text-indigo-950 underline underline-offset-2">
               Show all
             </button>
           </span>
