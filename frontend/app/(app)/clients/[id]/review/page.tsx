@@ -1635,11 +1635,11 @@ export default function ReviewQueuePage() {
           <button
             onClick={handleRunCoding}
             disabled={coding || loading}
-            className="h-[34px] flex items-center gap-1.5 border border-gray-800 hover:border-gray-700 hover:bg-white/[0.03] disabled:opacity-50 text-gray-100 text-xs font-semibold px-3 rounded-lg transition-colors"
+            className="h-[34px] flex items-center gap-1.5 bg-gray-100 hover:bg-white disabled:opacity-50 text-gray-900 text-xs font-semibold px-3 rounded-lg transition-colors"
           >
             {coding ? (
               <>
-                <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                <span className="w-3 h-3 border-2 border-gray-500 border-t-transparent rounded-full animate-spin" />
                 {codingProgress && codingProgress.total > 0
                   ? `Coding ${codingProgress.done}/${codingProgress.total}…`
                   : "Coding…"}
@@ -1657,7 +1657,7 @@ export default function ReviewQueuePage() {
             <button
               onClick={approveAll}
               disabled={approvingAll}
-              className="h-[34px] flex items-center gap-1.5 bg-gray-100 hover:bg-white disabled:opacity-50 text-gray-900 text-xs font-semibold px-3.5 rounded-lg transition-colors"
+              className="h-[34px] flex items-center gap-1.5 bg-gray-100/45 hover:bg-gray-100/55 disabled:opacity-50 text-gray-950 text-xs font-semibold px-3.5 rounded-lg transition-colors"
             >
               {approvingAll ? "Approving…" : (
                 <>
@@ -1737,10 +1737,9 @@ export default function ReviewQueuePage() {
           does not change what has been imported. Tints when a filter is on so
           the state is visible without reading it. */}
       <div className="mb-3 flex items-center gap-2.5 flex-wrap">
-        {/* A box around the filter so it is easy to find: half the strength
-            of the white behind Approve all, so it is visible without
-            competing with that button. */}
-        <div className="flex items-center gap-2.5 rounded-lg bg-gray-100/50 pl-3 pr-1 py-1">
+        {/* A box around the filter so it is easy to find, a little under half
+            the strength of the white behind AI Code. Approve all shares it. */}
+        <div className="flex items-center gap-2.5 rounded-lg bg-gray-100/45 pl-3 pr-1 py-1">
         <span className="text-xs font-medium text-gray-950">Showing</span>
         <Dropdown<string>
           ariaLabel="Show only transactions dated in one month"
