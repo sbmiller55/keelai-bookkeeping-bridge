@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useParams } from "next/navigation";
 import { getClient, Client, getTransactionsWithEntries } from "@/lib/api";
 import ChatPanel from "@/components/ChatPanel";
 import { ChatContextProvider } from "@/lib/chat-context";
+import { SidebarContext } from "@/lib/sidebar-context";
 
 const NAV_MAIN = [
   { label: "Overview", suffix: "" },
@@ -33,6 +34,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // True while the page draws the collapse button in its own header.
+  const [inlineToggle, setInlineToggle] = useState(false);
 
   // Restore persisted sidebar state on mount
   useEffect(() => {
@@ -100,8 +103,16 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     );
   }
 
+  const sidebarCtx = useMemo(
+    () => ({ collapsed: sidebarCollapsed, toggle: toggleSidebar, setInlineToggle }),
+    // toggleSidebar only calls the stable state setter, so it never goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sidebarCollapsed],
+  );
+
   return (
     <ChatContextProvider>
+    <SidebarContext.Provider value={sidebarCtx}>
     <div className="flex min-h-[calc(100vh-49px)] relative">
       {/* Sidebar */}
       <aside
@@ -166,7 +177,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       {/* Floating toggle, always visible at the top-left of the viewport so
           it stays reachable even when the main content is scrolled. Slides
           horizontally to the edge of the (collapsed/expanded) sidebar. */}
-      <button
+      {!inlineToggle && <button
         onClick={toggleSidebar}
         title={sidebarCollapsed ? "Expand sidebar (⌘\\)" : "Collapse sidebar (⌘\\)"}
         aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -181,7 +192,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             <path strokeLinecap="round" strokeLinejoin="round" d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
           )}
         </svg>
-      </button>
+      </button>}
 
       {/* Page content */}
       <main className="flex-1 p-8 overflow-auto min-w-0">
@@ -190,6 +201,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 
       {client && <ChatPanel clientId={client.id} clientName={client.name} />}
     </div>
+    </SidebarContext.Provider>
     </ChatContextProvider>
   );
 }

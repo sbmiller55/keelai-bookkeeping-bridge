@@ -11,9 +11,15 @@ const API_ORIGIN =
 // page can't be framed, plugins are blocked, and — the one that matters most
 // for an app holding bank data — connect-src pins network calls to this origin
 // and the API, so injected code cannot quietly POST the books somewhere else.
+// The dev server (next dev) evaluates its modules with eval() and serves over
+// plain http, so locally the policy must allow eval and must not upgrade
+// requests to https — without both, localhost renders nothing at all.
+// Production builds never use eval and keep the strict policy.
+const DEV = process.env.NODE_ENV === "development";
+
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  DEV ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'" : "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
@@ -23,7 +29,7 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
-  "upgrade-insecure-requests",
+  ...(DEV ? [] : ["upgrade-insecure-requests"]),
 ].join("; ");
 
 const nextConfig = {

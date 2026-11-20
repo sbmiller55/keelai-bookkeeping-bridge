@@ -11,6 +11,15 @@ const config: Config = {
       fontFamily: {
         sans: ["Inter", "sans-serif"],
       },
+      keyframes: {
+        "menu-in": {
+          from: { opacity: "0", transform: "translateY(-4px) scale(0.98)" },
+          to: { opacity: "1", transform: "translateY(0) scale(1)" },
+        },
+      },
+      animation: {
+        "menu-in": "menu-in 120ms ease-out",
+      },
     },
   },
   plugins: [],
