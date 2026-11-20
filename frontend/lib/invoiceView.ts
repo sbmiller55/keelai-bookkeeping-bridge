@@ -121,17 +121,21 @@ export function prepaidSchedule(r: InvoiceListRow, today: Date): PrepaidSchedule
 
 // ── Paid invoice record ──────────────────────────────────────────────────────
 
+// No service period means a one-time bill: accrued in full in one month and
+// paid the next. That is expected, not a gap — only a missing invoice number
+// needs a look.
+export function isOneTimeBill(r: InvoiceListRow): boolean {
+  return !r.service_period_start;
+}
+
 export function missingRecord(r: InvoiceListRow): string[] {
-  const out: string[] = [];
-  if (!r.invoice_number?.trim()) out.push("invoice no.");
-  if (!r.service_period_start) out.push("service period");
-  return out;
+  return r.invoice_number?.trim() ? [] : ["invoice no."];
 }
 
 export function recordNote(r: InvoiceListRow): { ok: boolean; text: string } {
-  const m = missingRecord(r);
-  if (m.length === 0) return { ok: true, text: "Invoice no. and period on file" };
-  return { ok: false, text: `Missing ${m.join(" and ")}` };
+  const oneTime = isOneTimeBill(r);
+  if (missingRecord(r).length > 0) return { ok: false, text: oneTime ? "One-time bill · missing invoice no." : "Missing invoice no." };
+  return { ok: true, text: oneTime ? "One-time bill · invoice no. on file" : "Invoice no. and period on file" };
 }
 
 // ── Sorting ──────────────────────────────────────────────────────────────────

@@ -352,7 +352,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
           <td className="px-2 py-2.5 text-gray-400 text-[11px] font-mono whitespace-nowrap">
             {r.service_period_start
               ? `${r.service_period_start.slice(0, 7)} → ${(r.service_period_end ?? r.service_period_start).slice(0, 7)}`
-              : "—"}
+              : <span className="font-sans text-gray-500">One-time</span>}
           </td>
           <td className="px-2 py-2.5">
             <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium ${INVOICE_TYPE_BADGE[r.invoice_type] ?? INVOICE_TYPE_BADGE.one_time}`}>
@@ -453,8 +453,10 @@ function InvoicesTab({ clientId }: { clientId: number }) {
                       <dt className="text-gray-500">Invoice no.</dt>
                       <dd className={r.invoice_number?.trim() ? "font-mono text-gray-200" : "text-amber-400"}>{r.invoice_number?.trim() || "Missing"}</dd>
                       <dt className="text-gray-500">Service period</dt>
-                      <dd className={r.service_period_start ? "font-mono text-gray-200" : "text-amber-400"}>
-                        {r.service_period_start ? `${r.service_period_start.slice(0, 7)} → ${(r.service_period_end ?? r.service_period_start).slice(0, 7)}` : "Missing"}
+                      <dd className={r.service_period_start ? "font-mono text-gray-200" : "text-gray-300"}>
+                        {r.service_period_start
+                          ? `${r.service_period_start.slice(0, 7)} → ${(r.service_period_end ?? r.service_period_start).slice(0, 7)}`
+                          : "None — one-time bill, accrued in full and paid the next month"}
                       </dd>
                       <dt className="text-gray-500">Invoice date</dt><dd className="text-gray-200">{formatDay(r.date)}</dd>
                       <dt className="text-gray-500">Description</dt><dd className="text-gray-300">{r.description}</dd>
