@@ -18,6 +18,7 @@ import {
   suggestFixedAsset,
   createFixedAsset,
   codeAsPrepaidSchedule,
+  getClient,
   TransactionWithEntries,
   JournalEntry,
   DateRangeOption,
@@ -47,6 +48,63 @@ const COL_LABELS: Record<ColKey, string> = {
 // Description and Actions always stay: one identifies the row, the other is
 // how you act on it, and a queue with neither cannot be worked.
 const ALWAYS_SHOWN: ColKey[] = ["description", "actions"];
+
+// What each Pull-from option is called, in menu order.
+const DATE_RANGE_LABELS: Record<DateRangeOption, string> = {
+  last_month: "Last month", this_month: "This month", since_last_sync: "Since last sync",
+  last_30: "Last 30 days", last_90: "Last 90 days", last_180: "Last 6 months",
+  last_365: "Last 12 months", custom: "Custom",
+};
+
+// The dates a Pull-from option covers, worked out the same way the backend
+// does (routers/mercury.py _compute_date_range), so the label beside the
+// option is what Sync will actually fetch. Null when it cannot be known here.
+function pullRange(opt: DateRangeOption, lastSyncAt: Date | null): [Date, Date] | null {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const daysAgo = (n: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate() - n);
+  switch (opt) {
+    case "last_month":
+      return [new Date(today.getFullYear(), today.getMonth() - 1, 1),
+              new Date(today.getFullYear(), today.getMonth(), 0)];
+    case "this_month":
+      return [new Date(today.getFullYear(), today.getMonth(), 1), today];
+    case "since_last_sync":
+      return [lastSyncAt ?? daysAgo(90), today];
+    case "last_30": return [daysAgo(30), today];
+    case "last_90": return [daysAgo(90), today];
+    case "last_180": return [daysAgo(180), today];
+    case "last_365": return [daysAgo(365), today];
+    default: return null;
+  }
+}
+
+// "Oct 1 – 31, 2026", "Sep 20 – Oct 19, 2026", "Dec 1, 2025 – Jan 5, 2026".
+function formatRange(start: Date, end: Date): string {
+  const mon = (d: Date) => d.toLocaleDateString("en-US", { month: "short" });
+  if (start.getFullYear() !== end.getFullYear()) {
+    return `${mon(start)} ${start.getDate()}, ${start.getFullYear()} – ${mon(end)} ${end.getDate()}, ${end.getFullYear()}`;
+  }
+  const endPart = start.getMonth() === end.getMonth() ? `${end.getDate()}` : `${mon(end)} ${end.getDate()}`;
+  return `${mon(start)} ${start.getDate()} – ${endPart}, ${end.getFullYear()}`;
+}
+
+function timeAgo(d: Date): string {
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+// The backend stores last_sync_at in UTC without saying so; read it as UTC.
+function parseUtc(iso: string | null | undefined): Date | null {
+  if (!iso) return null;
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
+  return isNaN(d.getTime()) ? null : d;
+}
 
 function loadHiddenCols(): ColKey[] {
   try {
@@ -1103,6 +1161,7 @@ export default function ReviewQueuePage() {
   const [hiddenCols, setHiddenCols] = useState<ColKey[]>([]);
   // "all", or a "YYYY-MM" to work one month at a time.
   const [monthFilter, setMonthFilter] = useState<string>("all");
+  const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
   const [colMenuOpen, setColMenuOpen] = useState(false);
 
   // Read on mount rather than seeding state from localStorage during render:
@@ -1186,6 +1245,12 @@ export default function ReviewQueuePage() {
   useEffect(() => {
     reload();
   }, [clientId, reload]);
+
+  const reloadLastSync = useCallback(() => {
+    getClient(clientId).then((c) => setLastSyncAt(parseUtc(c.last_sync_at))).catch(() => {});
+  }, [clientId]);
+
+  useEffect(() => { reloadLastSync(); }, [reloadLastSync]);
 
   useEffect(() => {
     window.addEventListener("bb-data-changed", reload);
@@ -1277,6 +1342,7 @@ export default function ReviewQueuePage() {
         );
       }
       reload();
+      reloadLastSync();
     } catch (err: unknown) {
       setSyncError(err instanceof Error ? err.message : "Sync failed");
     } finally {
@@ -1450,6 +1516,14 @@ export default function ReviewQueuePage() {
   });
 
   const coded = sortedItems.filter((t) => t.journal_entries.length > 0);
+
+  const pullDates = pullRange(dateRange, lastSyncAt);
+  const pullRangeText = pullDates ? formatRange(pullDates[0], pullDates[1]) : null;
+  const monthFilterLabel =
+    monthFilter === "all" ? "All months"
+    : monthFilter === "rel:last" ? "Last month"
+    : monthFilter === "rel:this" ? "This month"
+    : availableMonths.find((m) => m.value === monthFilter)?.label ?? monthFilter;
   const uncoded = sortedItems.filter((t) => t.journal_entries.length === 0);
 
   const isHidden = (c: ColKey) => hiddenCols.includes(c);
@@ -1522,126 +1596,200 @@ export default function ReviewQueuePage() {
         />
       )}
 
-      {/* Header */}
-      <div className="mb-4 flex items-center gap-3 flex-wrap">
-        <div className="mr-2">
-          <h1 className="text-xl font-bold text-white">Review Queue</h1>
-          <p className="text-gray-500 text-xs mt-0.5">
-            {monthFilter === "all"
-              ? `${items.length} pending`
-              : `${visibleItems.length} of ${items.length} pending`}
+      {/* Header: title on the left, the two whole-queue actions on the right */}
+      <div className="mb-5 flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-white leading-tight">Review Queue</h1>
+          <p className="text-gray-500 text-sm mt-0.5">
+            {items.length} pending
             {uncoded.length > 0 && ` · ${uncoded.length} need coding`}
-            {monthFilter !== "all" && (
-              <>
-                {" · "}
-                <button onClick={() => setMonthFilter("all")}
-                  className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
-                  showing one month
-                </button>
-              </>
-            )}
           </p>
         </div>
-
-        {/* Two dropdowns sat side by side with nothing saying which was which:
-            one pulls transactions from Mercury, the other only filters what is
-            already on screen. Each now says what it does. */}
-        <div className="flex items-center gap-1.5 bg-gray-900/60 border border-gray-800 rounded-lg pl-2 pr-1 py-1">
-          <span className="text-[10px] uppercase tracking-wide text-gray-500 whitespace-nowrap">
-            Pull from
-          </span>
-          <select
-            value={dateRange}
-            onChange={(e) => setDateRange(e.target.value as DateRangeOption)}
-            className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500"
-          >
-            <option value="last_month">Last month</option>
-            <option value="this_month">This month</option>
-            <option value="since_last_sync">Since last sync</option>
-            <option value="last_30">Last 30 days</option>
-            <option value="last_90">Last 90 days</option>
-            <option value="last_180">Last 6 months</option>
-            <option value="last_365">Last 12 months</option>
-            <option value="custom">Custom…</option>
-          </select>
-          {dateRange === "custom" && (
-            <>
-              <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
-                className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500" />
-              <span className="text-gray-600 text-xs">→</span>
-              <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
-                className="bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500" />
-            </>
-          )}
+        <div className="flex gap-2 items-center">
           <button
-            onClick={handleSync}
-            disabled={syncing || coding || loading || (dateRange === "custom" && (!customStart || !customEnd))}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
+            onClick={handleRunCoding}
+            disabled={coding || loading}
+            className="flex items-center gap-2 bg-gray-950 hover:bg-gray-900 border border-gray-700 disabled:opacity-50 text-gray-200 hover:text-white text-sm font-medium px-4 py-2.5 rounded-lg transition-colors"
           >
-            {syncing ? (
-              <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
+            {coding ? (
+              <>
+                <span className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                {codingProgress && codingProgress.total > 0
+                  ? `Coding ${codingProgress.done}/${codingProgress.total}…`
+                  : "Coding…"}
+              </>
             ) : (
               <>
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9L12 3z" />
                 </svg>
-                Sync &amp; Code
+                AI Code
               </>
             )}
           </button>
+          {coded.length > 0 && (
+            <button
+              onClick={approveAll}
+              disabled={approvingAll}
+              className="flex items-center gap-2 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 text-gray-950 text-sm font-semibold px-4 py-2.5 rounded-lg transition-colors"
+            >
+              {approvingAll ? "Approving…" : (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.25} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Approve all ({coded.length})
+                </>
+              )}
+            </button>
+          )}
         </div>
+      </div>
 
-        {/* Show only one month — for closing October while November's
-            transactions are already arriving. Filters what is on screen; it
-            does not change what has been imported. */}
-        <div className={`flex items-center gap-1.5 border rounded-lg pl-2 pr-1 py-1 ${
+      {/* Pull bar: what to fetch from Mercury. Its own tinted panel so it reads
+          as a different kind of action from the filter below, which only
+          narrows what is already on screen. */}
+      <div className="mb-5 flex items-center gap-3 flex-wrap bg-indigo-950/30 border border-indigo-900/70 rounded-xl px-4 py-2.5">
+        <span className="flex items-center gap-2 text-sm font-medium text-gray-300 whitespace-nowrap">
+          <svg className="w-4 h-4 text-indigo-300" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          Pull from
+        </span>
+        {/* A styled face over a transparent native select: the look of the
+            mockup, the keyboard and mobile behaviour of a real select. */}
+        <div className="relative flex items-center gap-2 bg-gray-950 border border-gray-700 hover:border-gray-600 rounded-lg pl-3 pr-2.5 py-2 text-sm">
+          <svg className="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+            <rect x="3.5" y="5" width="17" height="15" rx="2" />
+            <path strokeLinecap="round" d="M3.5 10h17M8 3v4M16 3v4" />
+          </svg>
+          <span className="font-semibold text-white whitespace-nowrap">{DATE_RANGE_LABELS[dateRange]}</span>
+          {pullRangeText && (
+            <span className="text-gray-400 whitespace-nowrap">
+              <span className="text-gray-600 mx-1">·</span>{pullRangeText}
+            </span>
+          )}
+          <svg className="w-4 h-4 text-gray-500 ml-1 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+          </svg>
+          <select
+            value={dateRange}
+            onChange={(e) => setDateRange(e.target.value as DateRangeOption)}
+            className="absolute inset-0 w-full opacity-0 cursor-pointer"
+            aria-label="Date range to pull from Mercury"
+          >
+            {(Object.keys(DATE_RANGE_LABELS) as DateRangeOption[]).map((k) => (
+              <option key={k} value={k}>{DATE_RANGE_LABELS[k]}</option>
+            ))}
+          </select>
+        </div>
+        {dateRange === "custom" && (
+          <div className="flex items-center gap-1.5">
+            <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
+              className="bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg px-2 py-1.5 focus:outline-none focus:border-indigo-500" />
+            <span className="text-gray-600 text-sm">→</span>
+            <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
+              className="bg-gray-950 border border-gray-700 text-gray-300 text-sm rounded-lg px-2 py-1.5 focus:outline-none focus:border-indigo-500" />
+          </div>
+        )}
+        <button
+          onClick={handleSync}
+          disabled={syncing || coding || loading || (dateRange === "custom" && (!customStart || !customEnd))}
+          className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+        >
+          {syncing ? (
+            <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
+          ) : (
+            <>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Sync &amp; Code
+            </>
+          )}
+        </button>
+        <span className="ml-auto text-xs text-gray-500 whitespace-nowrap">
+          {lastSyncAt ? `Last synced ${timeAgo(lastSyncAt)}` : "Never synced"}
+        </span>
+      </div>
+
+      {/* Show only one month — for closing October while November's
+          transactions are already arriving. Filters what is on screen; it
+          does not change what has been imported. Tints when a filter is on so
+          the state is visible without reading it. */}
+      <div className="mb-3 flex items-center gap-3 flex-wrap">
+        <span className="flex items-center gap-2 text-sm text-gray-500">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 4h18l-7 8.5V19l-4 2v-8.5L3 4z" />
+          </svg>
+          Showing
+        </span>
+        <div className={`relative flex items-center gap-2 border rounded-lg pl-3 pr-2.5 py-1.5 text-sm ${
           monthFilter === "all"
-            ? "bg-gray-900/60 border-gray-800"
+            ? "bg-gray-950 border-gray-700 hover:border-gray-600"
             : "bg-indigo-950/60 border-indigo-700"}`}>
-          <span className={`text-[10px] uppercase tracking-wide whitespace-nowrap ${
-            monthFilter === "all" ? "text-gray-500" : "text-indigo-300"}`}>
-            Showing
+          <span className={`font-semibold whitespace-nowrap ${monthFilter === "all" ? "text-white" : "text-indigo-200"}`}>
+            {monthFilterLabel}
           </span>
+          <svg className="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+          </svg>
           <select
             value={monthFilter}
             onChange={(e) => setMonthFilter(e.target.value)}
-            className={`bg-transparent text-xs focus:outline-none cursor-pointer ${
-              monthFilter === "all" ? "text-gray-300" : "text-indigo-200"}`}
+            className="absolute inset-0 w-full opacity-0 cursor-pointer"
             title="Show only transactions dated in one month"
+            aria-label="Show only transactions dated in one month"
           >
-            <option value="all" className="bg-gray-800">All months</option>
+            <option value="all">All months</option>
             {/* Relative options first: the month you are closing is the one you
                 want nine times out of ten, and naming it by number means
                 working out which month that is every time. */}
-            <option value="rel:last" className="bg-gray-800">
+            <option value="rel:last">
               Last month{relMonthCounts.last !== null ? ` (${relMonthCounts.last})` : ""}
             </option>
-            <option value="rel:this" className="bg-gray-800">
+            <option value="rel:this">
               This month{relMonthCounts.this !== null ? ` (${relMonthCounts.this})` : ""}
             </option>
-            {availableMonths.length > 0 && <option disabled className="bg-gray-800">──────────</option>}
+            {availableMonths.length > 0 && <option disabled>──────────</option>}
             {availableMonths.map((m) => (
-              <option key={m.value} value={m.value} className="bg-gray-800">
+              <option key={m.value} value={m.value}>
                 {m.label} ({m.count})
               </option>
             ))}
           </select>
         </div>
+        <span className="text-sm text-gray-500">
+          {visibleItems.length} {visibleItems.length === 1 ? "entry" : "entries"}
+          {monthFilter !== "all" && (
+            <>
+              {" of "}{items.length}{" · "}
+              <button onClick={() => setMonthFilter("all")}
+                className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+                show all
+              </button>
+            </>
+          )}
+        </span>
 
         {/* Columns */}
-        <div className="relative">
+        <div className="relative ml-auto">
           <button
             onClick={() => setColMenuOpen((o) => !o)}
-            className={`flex items-center gap-1 border text-xs px-2.5 py-2 rounded-lg transition-colors ${
+            className={`flex items-center gap-2 border text-sm font-medium px-3 py-1.5 rounded-lg transition-colors ${
               hiddenCols.length > 0
                 ? "bg-indigo-950 border-indigo-600 text-indigo-200"
-                : "bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200"}`}
+                : "bg-gray-950 border-gray-700 text-gray-200 hover:border-gray-600"}`}
             title="Show or hide columns. Drag a column edge to resize."
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+              <path strokeLinecap="round" d="M9.5 4.5v15M14.5 4.5v15" />
             </svg>
             Columns{hiddenCols.length > 0 && ` (${hiddenCols.length} hidden)`}
+            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+            </svg>
           </button>
           {colMenuOpen && (
             <>
@@ -1683,33 +1831,6 @@ export default function ReviewQueuePage() {
                 </div>
               </div>
             </>
-          )}
-        </div>
-
-        {/* Secondary actions */}
-        <div className="flex gap-2 items-center ml-auto">
-          <button
-            onClick={handleRunCoding}
-            disabled={coding || loading}
-            className="flex items-center gap-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 disabled:opacity-50 text-gray-400 hover:text-gray-200 text-xs px-2.5 py-1.5 rounded-lg transition-colors"
-          >
-            {coding ? (
-              <>
-                <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
-                {codingProgress && codingProgress.total > 0
-                  ? `Coding ${codingProgress.done}/${codingProgress.total}…`
-                  : "Coding…"}
-              </>
-            ) : "✦ AI Code"}
-          </button>
-          {coded.length > 0 && (
-            <button
-              onClick={approveAll}
-              disabled={approvingAll}
-              className="bg-green-800 hover:bg-green-700 disabled:opacity-50 text-white text-xs font-medium px-3 py-2 rounded-lg transition-colors"
-            >
-              {approvingAll ? "Approving…" : `Approve All (${coded.length})`}
-            </button>
           )}
         </div>
       </div>
