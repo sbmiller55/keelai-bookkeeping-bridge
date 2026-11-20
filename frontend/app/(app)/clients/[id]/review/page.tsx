@@ -1657,7 +1657,7 @@ export default function ReviewQueuePage() {
             <button
               onClick={approveAll}
               disabled={approvingAll}
-              className="h-[34px] flex items-center gap-1.5 bg-[#6f7279] hover:bg-[#7d8087] disabled:opacity-50 text-gray-950 text-xs font-semibold px-3.5 rounded-lg transition-colors"
+              className="h-[34px] flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-xs font-semibold px-3.5 rounded-lg transition-colors"
             >
               {approvingAll ? "Approving…" : (
                 <>
@@ -1738,9 +1738,8 @@ export default function ReviewQueuePage() {
           the state is visible without reading it. */}
       <div className="mb-3 flex items-center gap-2.5 flex-wrap">
         {/* A box around the filter so it is easy to find. Solid, not a
-            translucent white, so it and Approve all — which shares the colour —
-            look the same whatever is behind them. #6f7279 is 45% gray-100 over
-            the page's gray-950. */}
+            translucent white, so it looks the same whatever is behind it.
+            #6f7279 is 45% gray-100 over the page's gray-950. */}
         <div className="flex items-center gap-2.5 rounded-lg bg-[#6f7279] pl-3 pr-1 py-1">
         <span className="text-xs font-medium text-gray-950">Showing</span>
         <Dropdown<string>
