@@ -1737,7 +1737,10 @@ export default function ReviewQueuePage() {
           does not change what has been imported. Tints when a filter is on so
           the state is visible without reading it. */}
       <div className="mb-3 flex items-center gap-2.5 flex-wrap">
-        <span className="text-xs text-gray-500">Showing</span>
+        {/* A faint box around the filter so it is easy to find without
+            competing with Sync & Code above it. */}
+        <div className="flex items-center gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.03] pl-3 pr-1 py-1">
+        <span className="text-xs text-gray-400">Showing</span>
         <Dropdown<string>
           ariaLabel="Show only transactions dated in one month"
           value={monthFilter}
@@ -1757,13 +1760,14 @@ export default function ReviewQueuePage() {
           ]}
         />
         {monthFilter !== "all" && (
-          <span className="text-xs text-gray-500">
+          <span className="text-xs text-gray-500 pr-2">
             {visibleItems.length} of {items.length}{" · "}
             <button onClick={() => setMonthFilter("all")} className="text-indigo-400 hover:text-indigo-300">
               Show all
             </button>
           </span>
         )}
+        </div>
 
         {/* Columns */}
         <div className="relative ml-auto">
