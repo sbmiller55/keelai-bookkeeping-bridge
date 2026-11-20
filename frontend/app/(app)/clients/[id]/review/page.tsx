@@ -81,14 +81,20 @@ function pullRange(opt: DateRangeOption, lastSyncAt: Date | null): [Date, Date] 
   }
 }
 
-// "Oct 1 – 31, 2026", "Sep 20 – Oct 19, 2026", "Dec 1, 2025 – Jan 5, 2026".
+// "Oct 1–31", "Oct 21–Nov 20", "Nov 20, 2025–Nov 20, 2026". The year only
+// appears when the range crosses one; otherwise it is this year or last and
+// the month says which.
 function formatRange(start: Date, end: Date): string {
   const mon = (d: Date) => d.toLocaleDateString("en-US", { month: "short" });
   if (start.getFullYear() !== end.getFullYear()) {
-    return `${mon(start)} ${start.getDate()}, ${start.getFullYear()} – ${mon(end)} ${end.getDate()}, ${end.getFullYear()}`;
+    return `${mon(start)} ${start.getDate()}, ${start.getFullYear()}–${mon(end)} ${end.getDate()}, ${end.getFullYear()}`;
   }
-  const endPart = start.getMonth() === end.getMonth() ? `${end.getDate()}` : `${mon(end)} ${end.getDate()}`;
-  return `${mon(start)} ${start.getDate()} – ${endPart}, ${end.getFullYear()}`;
+  if (start.getMonth() === end.getMonth()) {
+    return start.getDate() === end.getDate()
+      ? `${mon(start)} ${start.getDate()}`
+      : `${mon(start)} ${start.getDate()}–${end.getDate()}`;
+  }
+  return `${mon(start)} ${start.getDate()}–${mon(end)} ${end.getDate()}`;
 }
 
 function timeAgo(d: Date): string {
@@ -1602,14 +1608,14 @@ export default function ReviewQueuePage() {
       {/* Header: sidebar toggle and title on the left, the two whole-queue
           actions on the right */}
       <div className="mb-5 flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           <button
             onClick={sidebar.toggle}
             title={sidebar.collapsed ? "Expand sidebar (⌘\\)" : "Collapse sidebar (⌘\\)"}
             aria-label={sidebar.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="w-8 h-8 flex items-center justify-center rounded-lg border border-gray-700/80 text-gray-400 hover:text-white hover:border-gray-600 hover:bg-white/[0.03] transition-colors"
+            className="-ml-1.5 w-7 h-7 flex items-center justify-center rounded-md text-gray-500 hover:text-white hover:bg-white/[0.06] transition-colors"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               {sidebar.collapsed ? (
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5-5 5M6 7l5 5-5 5" />
               ) : (
@@ -1618,10 +1624,10 @@ export default function ReviewQueuePage() {
             </svg>
           </button>
           <div>
-            <h1 className="text-[21px] font-bold text-white leading-tight tracking-tight">Review Queue</h1>
-            <p className="text-[13px] text-gray-500 mt-0.5">
+            <h1 className="text-lg font-bold text-white leading-tight tracking-tight">Review Queue</h1>
+            <p className="text-xs text-gray-500 mt-px">
               {items.length} pending
-              {uncoded.length > 0 && <> · {uncoded.length} need coding</>}
+              {uncoded.length > 0 && ` · ${uncoded.length} need coding`}
             </p>
           </div>
         </div>
@@ -1629,18 +1635,18 @@ export default function ReviewQueuePage() {
           <button
             onClick={handleRunCoding}
             disabled={coding || loading}
-            className="h-9 flex items-center gap-2 border border-gray-700/80 hover:border-gray-600 hover:bg-white/[0.03] disabled:opacity-50 text-white text-[13px] font-semibold px-3.5 rounded-lg transition-colors"
+            className="h-[34px] flex items-center gap-1.5 border border-gray-800 hover:border-gray-700 hover:bg-white/[0.03] disabled:opacity-50 text-gray-100 text-xs font-semibold px-3 rounded-lg transition-colors"
           >
             {coding ? (
               <>
-                <span className="w-3.5 h-3.5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+                <span className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
                 {codingProgress && codingProgress.total > 0
                   ? `Coding ${codingProgress.done}/${codingProgress.total}…`
                   : "Coding…"}
               </>
             ) : (
               <>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
                   <path strokeLinejoin="round" d="M12 4c.5 4.2 3.8 7.5 8 8-4.2.5-7.5 3.8-8 8-.5-4.2-3.8-7.5-8-8 4.2-.5 7.5-3.8 8-8z" />
                 </svg>
                 AI Code
@@ -1651,11 +1657,11 @@ export default function ReviewQueuePage() {
             <button
               onClick={approveAll}
               disabled={approvingAll}
-              className="h-9 flex items-center gap-2 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-50 text-gray-950 text-[13px] font-semibold px-3.5 rounded-lg transition-colors"
+              className="h-[34px] flex items-center gap-1.5 bg-gray-100 hover:bg-white disabled:opacity-50 text-gray-900 text-xs font-semibold px-3.5 rounded-lg transition-colors"
             >
               {approvingAll ? "Approving…" : (
                 <>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.25} viewBox="0 0 24 24">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.25} viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
                   Approve all ({coded.length})
@@ -1666,68 +1672,61 @@ export default function ReviewQueuePage() {
         </div>
       </div>
 
-      {/* Pull bar: what to fetch from Mercury. Its own tinted panel so it reads
-          as a different kind of action from the filter below, which only
-          narrows what is already on screen. */}
-      <div className="mb-6 flex items-center gap-3 flex-wrap rounded-xl border border-indigo-400/20 bg-indigo-500/[0.07] px-4 py-2.5">
-        <span className="flex items-center gap-2 text-[13px] font-semibold text-gray-200 whitespace-nowrap">
-          <svg className="w-4 h-4 text-indigo-300" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-          </svg>
-          Pull from
-        </span>
-        <Dropdown<DateRangeOption>
-          ariaLabel="Date range to pull from Mercury"
-          value={dateRange}
-          onChange={setDateRange}
-          className="pl-3 pr-2.5 border-gray-700/80 bg-[#0d0e14] hover:border-gray-600"
-          menuClassName="w-80"
-          options={(Object.keys(DATE_RANGE_LABELS) as DateRangeOption[]).map((k) => {
-            const r = pullRange(k, lastSyncAt);
-            return { value: k, label: DATE_RANGE_LABELS[k], hint: r ? formatRange(r[0], r[1]) : "Pick dates",
-              dividerBefore: k === "since_last_sync" || k === "custom" };
-          })}
-          footer="Nothing is fetched until you click Sync & Code."
-          face={
-            <>
-              <svg className="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
-                <rect x="4" y="5" width="16" height="15" rx="2" />
-                <path strokeLinecap="round" d="M4 10h16M9 3v4M15 3v4" />
-              </svg>
-              <span className="font-semibold text-white whitespace-nowrap">{DATE_RANGE_LABELS[dateRange]}</span>
-              {pullRangeText && (
-                <span className="text-gray-400 whitespace-nowrap text-xs">· {pullRangeText}</span>
-              )}
-            </>
-          }
-        />
+      {/* Sync & Code joined to the range it will pull: one control, so the
+          range plainly belongs to the sync and not to what is on screen. */}
+      <div className="mb-6 flex items-center gap-3 flex-wrap">
+        <div className="flex items-stretch h-9 rounded-lg border border-gray-800 bg-[#121318]">
+          <button
+            onClick={handleSync}
+            disabled={syncing || coding || loading || (dateRange === "custom" && (!customStart || !customEnd))}
+            className="flex items-center gap-1.5 -my-px -ml-px bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold px-3.5 rounded-l-lg transition-colors"
+          >
+            {syncing ? (
+              <><span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Sync &amp; Code
+              </>
+            )}
+          </button>
+          <Dropdown<DateRangeOption>
+            ariaLabel="Date range to pull from Mercury"
+            value={dateRange}
+            onChange={setDateRange}
+            className="h-full pl-3 pr-2.5 rounded-r-lg text-xs hover:bg-white/[0.04]"
+            menuClassName="w-[19rem]"
+            options={(Object.keys(DATE_RANGE_LABELS) as DateRangeOption[]).map((k) => {
+              const r = pullRange(k, lastSyncAt);
+              return { value: k, label: DATE_RANGE_LABELS[k], hint: r ? formatRange(r[0], r[1]) : "Pick dates",
+                dividerBefore: k === "since_last_sync" || k === "custom" };
+            })}
+            footer="Nothing is fetched until you click Sync & Code."
+            face={
+              <>
+                <svg className="w-3.5 h-3.5 text-gray-400 shrink-0 mr-0.5" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+                  <rect x="4" y="5" width="16" height="15" rx="2" />
+                  <path strokeLinecap="round" d="M4 10h16M9 3v4M15 3v4" />
+                </svg>
+                <span className="font-semibold text-white whitespace-nowrap">{DATE_RANGE_LABELS[dateRange]}</span>
+                {pullRangeText && <span className="text-gray-500 whitespace-nowrap ml-1">{pullRangeText}</span>}
+              </>
+            }
+          />
+        </div>
         {dateRange === "custom" && (
           <div className="flex items-center gap-1.5">
             <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)}
               aria-label="Start date"
-              className="h-9 bg-[#0d0e14] border border-gray-700/80 text-gray-200 text-[13px] rounded-lg px-2.5 [color-scheme:dark] focus:outline-none focus:border-indigo-500" />
-            <span className="text-gray-600 text-[13px]">to</span>
+              className="h-9 bg-[#121318] border border-gray-800 text-gray-200 text-xs rounded-lg px-2.5 [color-scheme:dark] focus:outline-none focus:border-indigo-500" />
+            <span className="text-gray-600 text-xs">to</span>
             <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)}
               aria-label="End date"
-              className="h-9 bg-[#0d0e14] border border-gray-700/80 text-gray-200 text-[13px] rounded-lg px-2.5 [color-scheme:dark] focus:outline-none focus:border-indigo-500" />
+              className="h-9 bg-[#121318] border border-gray-800 text-gray-200 text-xs rounded-lg px-2.5 [color-scheme:dark] focus:outline-none focus:border-indigo-500" />
           </div>
         )}
-        <button
-          onClick={handleSync}
-          disabled={syncing || coding || loading || (dateRange === "custom" && (!customStart || !customEnd))}
-          className="h-9 flex items-center gap-2 bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed text-white text-[13px] font-semibold px-4 rounded-lg transition-colors"
-        >
-          {syncing ? (
-            <><span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />Syncing…</>
-          ) : (
-            <>
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Sync &amp; Code
-            </>
-          )}
-        </button>
         <span className="ml-auto text-xs text-gray-500 whitespace-nowrap">
           {lastSyncAt ? `Last synced ${timeAgo(lastSyncAt)}` : "Never synced"}
         </span>
@@ -1737,19 +1736,14 @@ export default function ReviewQueuePage() {
           transactions are already arriving. Filters what is on screen; it
           does not change what has been imported. Tints when a filter is on so
           the state is visible without reading it. */}
-      <div className="mb-3 flex items-center gap-3 flex-wrap">
-        <span className="flex items-center gap-2 text-[13px] text-gray-500">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
-            <path strokeLinejoin="round" d="M4 5h16l-6 7.5V18l-4 2v-7.5L4 5z" />
-          </svg>
-          Showing
-        </span>
+      <div className="mb-3 flex items-center gap-2.5 flex-wrap">
+        <span className="text-xs text-gray-500">Showing</span>
         <Dropdown<string>
           ariaLabel="Show only transactions dated in one month"
           value={monthFilter}
           onChange={setMonthFilter}
-          className={`pl-3 pr-2.5 ${monthFilter === "all"
-            ? "border-gray-700/80 bg-[#0d0e14] hover:border-gray-600"
+          className={`h-7 pl-3 pr-2 rounded-full border text-xs ${monthFilter === "all"
+            ? "border-gray-800 bg-[#121318] hover:border-gray-700"
             : "border-indigo-500/60 bg-indigo-500/10"}`}
           face={<span className={`font-semibold whitespace-nowrap ${monthFilter === "all" ? "text-white" : "text-indigo-200"}`}>{monthFilterLabel}</span>}
           options={[
@@ -1762,38 +1756,34 @@ export default function ReviewQueuePage() {
             ...availableMonths.map((m, i) => ({ value: m.value, label: m.label, hint: String(m.count), dividerBefore: i === 0 })),
           ]}
         />
-        <span className="text-[13px] text-gray-500">
-          {visibleItems.length} {visibleItems.length === 1 ? "entry" : "entries"}
-          {monthFilter !== "all" && (
-            <>
-              {" of "}{items.length}{" · "}
-              <button onClick={() => setMonthFilter("all")}
-                className="text-indigo-400 hover:text-indigo-300">
-                Show all
-              </button>
-            </>
-          )}
-        </span>
+        {monthFilter !== "all" && (
+          <span className="text-xs text-gray-500">
+            {visibleItems.length} of {items.length}{" · "}
+            <button onClick={() => setMonthFilter("all")} className="text-indigo-400 hover:text-indigo-300">
+              Show all
+            </button>
+          </span>
+        )}
 
         {/* Columns */}
         <div className="relative ml-auto">
           <button
             onClick={() => setColMenuOpen((o) => !o)}
             aria-expanded={colMenuOpen}
-            className={`h-9 flex items-center gap-2 border text-[13px] font-semibold pl-3 pr-2.5 rounded-lg transition-colors ${
+            className={`h-7 flex items-center gap-1.5 text-xs font-medium px-2 rounded-md transition-colors ${
               hiddenCols.length > 0
-                ? "border-indigo-500/60 bg-indigo-500/10 text-indigo-200"
+                ? "text-indigo-300 hover:bg-white/[0.04]"
                 : colMenuOpen
-                  ? "border-gray-600 bg-[#15161c] text-white"
-                  : "border-gray-700/80 bg-[#0d0e14] text-white hover:border-gray-600"}`}
+                  ? "bg-white/[0.06] text-white"
+                  : "text-gray-400 hover:text-white hover:bg-white/[0.04]"}`}
             title="Show or hide columns. Drag a column edge to resize."
           >
-            <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24">
               <rect x="4" y="5" width="16" height="14" rx="2" />
               <path d="M9.5 5v14M14.5 5v14" />
             </svg>
-            Columns{hiddenCols.length > 0 && <span className="font-normal text-indigo-300">{hiddenCols.length} hidden</span>}
-            <svg className={`w-4 h-4 text-gray-500 transition-transform duration-150 ${colMenuOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            Columns{hiddenCols.length > 0 && ` · ${hiddenCols.length} hidden`}
+            <svg className={`w-3.5 h-3.5 text-gray-500 transition-transform duration-150 ${colMenuOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
             </svg>
           </button>

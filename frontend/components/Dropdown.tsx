@@ -76,11 +76,13 @@ export function Dropdown<V extends string>({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
-        className={`flex items-center gap-2 h-9 rounded-lg border text-[13px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ${
-          open ? "border-gray-600 bg-[#15161c]" : ""} ${className}`}
+        // Size, border and shape come from the caller: the same menu sits
+        // joined to a button in one place and as a pill in another.
+        className={`flex items-center gap-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ${
+          open ? "bg-white/[0.06]" : ""} ${className}`}
       >
         {face ?? <span className="font-semibold text-white">{options[selectedIdx]?.label}</span>}
-        <svg className={`w-4 h-4 text-gray-500 shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
+        <svg className={`w-3.5 h-3.5 text-gray-500 shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`}
           fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
         </svg>
@@ -100,7 +102,7 @@ export function Dropdown<V extends string>({
                 aria-selected={i === selectedIdx}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => choose(i)}
-                className={`w-full flex items-center gap-2 px-2.5 py-1.5 mx-1 rounded-md text-left text-[13px] ${
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 mx-1 rounded-md text-left text-[12.5px] ${
                   i === active ? "bg-white/[0.06]" : ""}`}
                 style={{ width: "calc(100% - 0.5rem)" }}
               >
