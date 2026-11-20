@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -12,6 +12,13 @@ import {
   getInvoices, updateInvoice, exportPrepaidSchedule, InvoiceListRow,
 } from "@/lib/api";
 import { useChatContext } from "@/lib/chat-context";
+import { Dropdown, DropdownOption } from "@/components/Dropdown";
+import {
+  Category, CATEGORY_LABEL, SortCol, SortDir, SortKey, SORT_COL_LABEL, DEFAULT_SORT, MAX_SECONDARY_SORTS,
+  categoryOf, daysOpen, formatDay, formatMoney, monthLabel, monthSlash, prepaidSchedule,
+  missingRecord, recordNote, arrangeInvoices, clickHeader, addSort, flipSort, removeSort,
+  isGrouped, isDefaultSort,
+} from "@/lib/invoiceView";
 
 const MERCURY_STATUS_BADGE: Record<string, string> = {
   pending:   "bg-yellow-900 text-yellow-300 border border-yellow-700",
@@ -180,19 +187,13 @@ export default function PaymentsPage() {
   );
 }
 
-// ── Invoices Tab (NEW) ────────────────────────────────────────────────────────
-
-const INVOICE_STATUS_BADGE: Record<string, string> = {
-  unpaid:  "bg-yellow-900 text-yellow-300 border border-yellow-700",
-  partial: "bg-blue-900 text-blue-300 border border-blue-700",
-  paid:    "bg-green-900 text-green-300 border border-green-700",
-};
+// ── Invoices Tab ──────────────────────────────────────────────────────────────
 
 const INVOICE_TYPE_BADGE: Record<string, string> = {
   one_time:    "bg-gray-800 text-gray-300 border border-gray-700",
-  accrual:     "bg-amber-900/60 text-amber-300 border border-amber-700",
-  prepaid:     "bg-indigo-900 text-indigo-300 border border-indigo-700",
-  fixed_asset: "bg-purple-900 text-purple-300 border border-purple-700",
+  accrual:     "bg-amber-950/60 text-amber-300 border border-amber-800",
+  prepaid:     "bg-indigo-950 text-indigo-300 border border-indigo-700",
+  fixed_asset: "bg-purple-950 text-purple-300 border border-purple-700",
 };
 
 const INVOICE_TYPE_LABEL: Record<string, string> = {
@@ -202,11 +203,57 @@ const INVOICE_TYPE_LABEL: Record<string, string> = {
   fixed_asset: "Fixed Asset",
 };
 
+const CATEGORY_PILL: Record<Category, string> = {
+  unpaid:  "bg-amber-950/60 text-amber-300 border-amber-800",
+  prepaid: "bg-indigo-950 text-indigo-300 border-indigo-700",
+  paid:    "bg-green-950 text-green-300 border-green-800",
+};
+
+const INVOICE_COLS: { col: SortCol; label: string; align?: "right" }[] = [
+  { col: "date", label: "Date" },
+  { col: "vendor", label: "Vendor" },
+  { col: "invoice", label: "Invoice #" },
+  { col: "description", label: "Description" },
+  { col: "amount", label: "Amount", align: "right" },
+  { col: "period", label: "Service period" },
+  { col: "type", label: "Type" },
+  { col: "status", label: "Status" },
+  { col: "source", label: "Source" },
+];
+
+type StatusFilter = "all" | Category;
+
+// Stands in for data the invoice list does not carry yet (paid dates, bank
+// matches, journal entry numbers). Dashed so it cannot be mistaken for a value.
+function Placeholder({ wide }: { wide?: boolean }) {
+  return (
+    <span
+      title="Not in the data yet"
+      className={`inline-block h-4 align-middle rounded border border-dashed border-gray-600 ${wide ? "w-28" : "w-16"}`}
+    />
+  );
+}
+
+function SortArrows({ dir }: { dir: SortDir | null }) {
+  return (
+    <svg className={`w-3 h-3 shrink-0 ${dir ? "text-indigo-400" : "text-gray-600"}`} viewBox="0 0 12 12" fill="currentColor">
+      {dir !== "desc" && <path d={dir ? "M6 2.5l3.5 4h-7z" : "M6 1.5l3 3.25H3z"} />}
+      {dir !== "asc" && <path d={dir ? "M6 9.5l-3.5-4h7z" : "M6 10.5l-3-3.25h6z"} />}
+    </svg>
+  );
+}
+
 function InvoicesTab({ clientId }: { clientId: number }) {
   const [rows, setRows] = useState<InvoiceListRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<"all" | "unpaid" | "partial" | "paid">("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sorts, setSorts] = useState<SortKey[]>(DEFAULT_SORT);
+  const [addSortOpen, setAddSortOpen] = useState(false);
+  // Both keyed by something that survives a re-sort, so changing the order
+  // never closes a row you opened or reopens a category you folded.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [collapsed, setCollapsed] = useState<Set<Category>>(new Set());
 
   useEffect(() => { load(); }, [clientId]);
 
@@ -214,8 +261,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
     setLoading(true);
     setError(null);
     try {
-      const data = await getInvoices(clientId);
-      setRows(data);
+      setRows(await getInvoices(clientId));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load invoices");
     } finally {
@@ -228,8 +274,36 @@ function InvoicesTab({ clientId }: { clientId: number }) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, bill_status: status } : r)));
   }
 
-  const filtered = statusFilter === "all" ? rows : rows.filter((r) => r.bill_status === statusFilter);
-  const unpaidTotal = rows.filter((r) => r.bill_status !== "paid").reduce((s, r) => s + r.amount, 0);
+  function toggle<T>(set: Set<T>, v: T): Set<T> {
+    const next = new Set(set);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    return next;
+  }
+
+  const today = new Date();
+  const filtered = statusFilter === "all" ? rows : rows.filter((r) => categoryOf(r) === statusFilter);
+  const arranged = arrangeInvoices(filtered, sorts);
+  const outstanding = rows.filter((r) => categoryOf(r) === "unpaid").reduce((s, r) => s + r.amount, 0);
+  const sortDirFor = (col: SortCol) => sorts.find((s) => s.col === col)?.dir ?? null;
+  const sortRankFor = (col: SortCol) => sorts.findIndex((s) => s.col === col);
+  const unusedCols = INVOICE_COLS.map((c) => c.col).filter((c) => !sorts.some((s) => s.col === c));
+  const canAddSort = sorts.length <= MAX_SECONDARY_SORTS && unusedCols.length > 0;
+
+  function categorySummary(cat: Category, list: InvoiceListRow[]): { text: string; tone: string } | null {
+    if (list.length === 0) return null;
+    if (cat === "unpaid") {
+      const oldest = Math.max(...list.map((r) => daysOpen(r, today) ?? 0));
+      return { text: `Oldest open ${oldest} day${oldest === 1 ? "" : "s"}`, tone: oldest >= 90 ? "text-amber-400" : "text-gray-400" };
+    }
+    if (cat === "prepaid") {
+      const left = list.reduce((s, r) => s + (prepaidSchedule(r, today)?.left ?? 0), 0);
+      return { text: `Accrual left ${formatMoney(left)}`, tone: "text-indigo-300" };
+    }
+    const needLook = list.filter((r) => missingRecord(r).length > 0).length;
+    return needLook > 0
+      ? { text: `${needLook} need${needLook === 1 ? "s" : ""} a look`, tone: "text-amber-400" }
+      : { text: "All invoice records on file", tone: "text-green-400" };
+  }
 
   if (loading) return (
     <div className="flex justify-center h-40 items-center">
@@ -237,35 +311,256 @@ function InvoicesTab({ clientId }: { clientId: number }) {
     </div>
   );
 
+  function renderRow(r: InvoiceListRow) {
+    const cat = categoryOf(r);
+    const expandable = cat !== "unpaid";
+    const isOpen = expandable && expanded.has(r.id);
+    const days = daysOpen(r, today);
+    const sched = cat === "prepaid" ? prepaidSchedule(r, today) : null;
+    const note = cat === "paid" ? recordNote(r) : null;
+    const statusOptions: DropdownOption<"unpaid" | "partial" | "paid">[] = [
+      { value: "unpaid", label: "Unpaid" },
+      { value: "partial", label: "Partially paid" },
+      { value: "paid", label: "Paid" },
+    ];
+    const pillText = cat === "prepaid"
+      ? (sched ? `Accruing to ${monthSlash(sched.lastMonth)}` : "Prepaid")
+      : r.bill_status === "partial" ? "Partial" : CATEGORY_LABEL[cat];
+
+    return (
+      <Fragment key={r.id}>
+        <tr className={`border-t border-gray-800/80 align-top ${isOpen ? "bg-white/[0.02]" : "hover:bg-white/[0.02]"}`}>
+          <td className="pl-2 pr-0 py-2.5 w-7">
+            {expandable && (
+              <button
+                onClick={() => setExpanded((s) => toggle(s, r.id))}
+                aria-expanded={isOpen}
+                aria-label={isOpen ? "Hide details" : "Show details"}
+                className="w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-white hover:bg-white/[0.06]"
+              >
+                <svg className={`w-3 h-3 transition-transform duration-150 ${isOpen ? "rotate-90" : ""}`} fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+                </svg>
+              </button>
+            )}
+          </td>
+          <td className="px-2 py-2.5 text-gray-400 text-xs whitespace-nowrap">{formatDay(r.date)}</td>
+          <td className="px-2 py-2.5 text-white text-xs font-medium max-w-[150px] truncate" title={r.vendor}>{r.vendor || "—"}</td>
+          <td className="px-2 py-2.5 text-gray-300 text-xs font-mono whitespace-nowrap">{r.invoice_number?.trim() || "—"}</td>
+          <td className="px-2 py-2.5 text-gray-400 text-xs max-w-[160px] truncate" title={r.description}>{r.description}</td>
+          <td className="px-2 py-2.5 text-right font-mono text-red-400 text-xs whitespace-nowrap">{formatMoney(r.amount)}</td>
+          <td className="px-2 py-2.5 text-gray-400 text-[11px] font-mono whitespace-nowrap">
+            {r.service_period_start
+              ? `${r.service_period_start.slice(0, 7)} → ${(r.service_period_end ?? r.service_period_start).slice(0, 7)}`
+              : "—"}
+          </td>
+          <td className="px-2 py-2.5">
+            <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium ${INVOICE_TYPE_BADGE[r.invoice_type] ?? INVOICE_TYPE_BADGE.one_time}`}>
+              {INVOICE_TYPE_LABEL[r.invoice_type] || r.invoice_type}
+            </span>
+          </td>
+          <td className="px-2 py-2.5">
+            <Dropdown<"unpaid" | "partial" | "paid">
+              ariaLabel={`Bill status for ${r.vendor || "invoice"}`}
+              value={r.bill_status}
+              onChange={(v) => setStatus(r.id, v)}
+              options={statusOptions}
+              menuClassName="w-40"
+              className={`h-6 pl-2 pr-1.5 rounded-md border text-[11px] font-medium ${CATEGORY_PILL[cat]}`}
+              face={<span className="whitespace-nowrap">{pillText}</span>}
+            />
+            {cat === "unpaid" && days !== null && (
+              <p className={`mt-1 text-[11px] ${days >= 90 ? "text-amber-400" : "text-gray-500"}`}>
+                Open {days} day{days === 1 ? "" : "s"}
+              </p>
+            )}
+            {note && (
+              <p className={`mt-1 text-[11px] leading-snug max-w-[150px] ${note.ok ? "text-green-400" : "text-amber-400"}`}>{note.text}</p>
+            )}
+          </td>
+          <td className="px-2 py-2.5">
+            {/* The source pill opens the invoice for editing — the list has no
+                separate Actions column. */}
+            <Link
+              href={`/clients/${clientId}/invoices?tx=${r.id}`}
+              title="Open this invoice"
+              className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-gray-900 text-gray-300 border border-gray-700 hover:border-gray-500 hover:text-white capitalize"
+            >
+              {r.source}
+            </Link>
+          </td>
+        </tr>
+        {isOpen && (
+          <tr className="bg-white/[0.02]">
+            <td />
+            <td colSpan={9} className="px-3 pb-4 pt-1">
+              {cat === "prepaid" && (sched ? (
+                <div className="max-w-xl rounded-lg border border-gray-800 bg-gray-950/60 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Schedule</p>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-xs">
+                    <dt className="text-gray-500">Monthly</dt>
+                    <dd className="text-gray-200 font-mono">{formatMoney(sched.monthly)} × {sched.months} month{sched.months === 1 ? "" : "s"} <span className="text-gray-500 font-sans">({monthLabel(sched.firstMonth)} – {monthLabel(sched.lastMonth)})</span></dd>
+                    <dt className="text-gray-500">Posted</dt>
+                    <dd className="text-gray-200">
+                      {sched.posted > 0
+                        ? <>Through {monthLabel(sched.firstMonth + sched.posted - 1)} · {sched.posted} entr{sched.posted === 1 ? "y" : "ies"} · <span className="font-mono">{formatMoney(sched.accrued)}</span></>
+                        : "None yet"}
+                    </dd>
+                    <dt className="text-gray-500">Accrual left</dt>
+                    <dd className="text-indigo-300 font-mono">{formatMoney(sched.left)}</dd>
+                    <dt className="text-gray-500">Next entry</dt>
+                    <dd className="text-gray-200">{sched.next ? <>{monthLabel(sched.next.month)} · <span className="font-mono">{formatMoney(sched.next.amount)}</span></> : "Schedule complete"}</dd>
+                    <dt className="text-gray-500">Final entry</dt>
+                    <dd className="text-gray-200">{monthLabel(sched.lastMonth)} · <span className="font-mono">{formatMoney(sched.finalAmount)}</span>{sched.finalAmount !== sched.monthly && <span className="text-gray-500"> (takes the rounding)</span>}</dd>
+                  </dl>
+                  <p className="mt-3 text-[11px] text-gray-500">
+                    {sched.posted > 0
+                      ? `Assumes ${monthLabel(sched.firstMonth)}${sched.posted > 1 ? ` – ${monthLabel(sched.firstMonth + sched.posted - 1)}` : ""} ${sched.posted === 1 ? "is" : "are"} posted: entries through last month are counted as done. This list does not read the ledger.`
+                      : "No entries are assumed posted yet."}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-400">No service period on file, so there is no schedule to show.</p>
+              ))}
+              {cat === "paid" && (
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Payment</p>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs items-center">
+                      <dt className="text-gray-500">Paid date</dt><dd><Placeholder /></dd>
+                      <dt className="text-gray-500">Bank match</dt><dd><Placeholder wide /></dd>
+                      <dt className="text-gray-500">Amount</dt><dd className="font-mono text-gray-200">{formatMoney(r.amount)}</dd>
+                    </dl>
+                  </div>
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Journal entries</p>
+                    {[
+                      { label: "Invoice", dr: "Expense", cr: "Accounts payable" },
+                      { label: "Payment", dr: "Accounts payable", cr: "Bank" },
+                    ].map((je, i) => (
+                      <div key={je.label} className={i > 0 ? "mt-3 pt-3 border-t border-gray-800" : ""}>
+                        <p className="text-xs text-gray-300 mb-1.5 flex items-center gap-2">{je.label} <span className="text-gray-600">JE</span><Placeholder /></p>
+                        <div className="grid grid-cols-[2rem_1fr_auto] gap-x-2 gap-y-1 text-xs">
+                          <span className="text-gray-500">Dr</span><span className="text-gray-200">{je.dr}</span><span className="font-mono text-gray-300">{formatMoney(r.amount)}</span>
+                          <span className="text-gray-500">Cr</span><span className="text-gray-200 pl-3">{je.cr}</span><span className="font-mono text-gray-300">{formatMoney(r.amount)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Invoice record</p>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+                      <dt className="text-gray-500">Invoice no.</dt>
+                      <dd className={r.invoice_number?.trim() ? "font-mono text-gray-200" : "text-amber-400"}>{r.invoice_number?.trim() || "Missing"}</dd>
+                      <dt className="text-gray-500">Service period</dt>
+                      <dd className={r.service_period_start ? "font-mono text-gray-200" : "text-amber-400"}>
+                        {r.service_period_start ? `${r.service_period_start.slice(0, 7)} → ${(r.service_period_end ?? r.service_period_start).slice(0, 7)}` : "Missing"}
+                      </dd>
+                      <dt className="text-gray-500">Invoice date</dt><dd className="text-gray-200">{formatDay(r.date)}</dd>
+                      <dt className="text-gray-500">Description</dt><dd className="text-gray-300">{r.description}</dd>
+                    </dl>
+                  </div>
+                </div>
+              )}
+            </td>
+          </tr>
+        )}
+      </Fragment>
+    );
+  }
+
   return (
     <>
-      <div className="mb-6 flex items-start justify-between">
+      <div className="mb-4 flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold text-white">Invoices</h1>
           <p className="text-gray-500 mt-1 text-xs">
-            Vendor invoices · {rows.length} total · {formatAmount(unpaidTotal)} outstanding
+            Vendor invoices · {rows.length} total · {formatMoney(outstanding)} outstanding
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <select
+          <Dropdown<StatusFilter>
+            ariaLabel="Show one status"
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
-            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
-          >
-            <option value="all">All statuses</option>
-            <option value="unpaid">Unpaid</option>
-            <option value="partial">Partially paid</option>
-            <option value="paid">Paid</option>
-          </select>
+            onChange={setStatusFilter}
+            menuClassName="w-44"
+            className="h-9 pl-3 pr-2.5 rounded-lg border border-gray-700 bg-gray-900 hover:border-gray-600 text-xs"
+            options={[
+              { value: "all", label: "All statuses" },
+              { value: "unpaid", label: "Unpaid", dividerBefore: true },
+              { value: "prepaid", label: "Prepaid" },
+              { value: "paid", label: "Paid" },
+            ]}
+          />
           <Link
             href={`/clients/${clientId}/invoices`}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors"
+            className="h-9 flex items-center gap-2 px-3.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M12 12V4m0 8l-3-3m3 3l3-3" />
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1M12 4v12m0-12l-4 4m4-4l4 4" />
             </svg>
             Invoice Upload
           </Link>
+        </div>
+      </div>
+
+      {/* Sort bar: the active sorts as chips, whether categories are showing,
+          and a way back to the default. */}
+      <div className="mb-3 flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mr-1">Sort</span>
+        {sorts.map((s, i) => (
+          <span key={s.col} className="inline-flex items-center h-7 rounded-full border border-indigo-500/40 bg-indigo-500/10 text-xs text-indigo-200">
+            <button
+              onClick={() => setSorts((prev) => flipSort(prev, i))}
+              title="Reverse this sort"
+              className="flex items-center gap-1 pl-3 pr-2.5 h-full rounded-full hover:bg-indigo-500/10 font-medium"
+            >
+              {i > 0 && <span className="text-indigo-400/70">then</span>}
+              {SORT_COL_LABEL[s.col]} {s.dir === "asc" ? "↑" : "↓"}
+            </button>
+            {i > 0 && (
+              <button
+                onClick={() => setSorts((prev) => removeSort(prev, i))}
+                aria-label={`Remove ${SORT_COL_LABEL[s.col]} sort`}
+                className="-ml-1 mr-1 w-5 h-5 flex items-center justify-center rounded-full text-indigo-300 hover:text-white hover:bg-indigo-500/20"
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        <span className="text-xs text-gray-500 ml-1">{isGrouped(sorts) ? "Grouped by status" : "Categories hidden"}</span>
+        {!isDefaultSort(sorts) && (
+          <button onClick={() => setSorts(DEFAULT_SORT)} className="text-xs text-indigo-400 hover:text-indigo-300 ml-1">
+            Reset sort
+          </button>
+        )}
+        <div className="relative ml-auto">
+          <button
+            onClick={() => setAddSortOpen((o) => !o)}
+            disabled={!canAddSort}
+            title={canAddSort ? "Sort by another column as well" : "Up to two extra sorts"}
+            className="h-8 px-3 rounded-lg border border-gray-700 bg-gray-900 hover:border-gray-600 text-xs font-medium text-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Add sort
+          </button>
+          {addSortOpen && canAddSort && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setAddSortOpen(false)} />
+              <div className="absolute right-0 top-full mt-1.5 z-50 w-44 py-1 rounded-xl border border-gray-700/80 bg-[#15161c] shadow-2xl shadow-black/60 animate-menu-in origin-top-right">
+                <p className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-gray-500">Then sort by</p>
+                {unusedCols.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => { setSorts((prev) => addSort(prev, c)); setAddSortOpen(false); }}
+                    className="block w-[calc(100%-0.5rem)] mx-1 px-2.5 py-1.5 rounded-md text-left text-[12.5px] text-gray-300 hover:bg-white/[0.06]"
+                  >
+                    {SORT_COL_LABEL[c]}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
@@ -278,72 +573,71 @@ function InvoicesTab({ clientId }: { clientId: number }) {
             : "No invoices match this filter."}
         </div>
       ) : (
-        <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-auto">
-          <table className="w-full text-sm min-w-[1100px]">
+        // No overflow clipping on this box: the status menus open downward and
+        // would be cut off on the last rows. The page itself scrolls instead.
+        <div className="bg-gray-900 rounded-xl border border-gray-800">
+          <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-800 text-left text-xs text-gray-400 font-medium">
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Vendor</th>
-                <th className="px-4 py-3">Invoice #</th>
-                <th className="px-4 py-3">Description</th>
-                <th className="px-4 py-3 text-right">Amount</th>
-                <th className="px-4 py-3">Service Period</th>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Source</th>
-                <th className="px-4 py-3">Actions</th>
+              <tr className="text-left text-[11px] text-gray-500">
+                <th className="w-7" />
+                {INVOICE_COLS.map(({ col, label, align }) => {
+                  const dir = sortDirFor(col);
+                  const rank = sortRankFor(col);
+                  return (
+                    <th key={col} className={`px-2 py-2.5 font-medium whitespace-nowrap ${align === "right" ? "text-right" : ""}`}>
+                      <button
+                        onClick={() => setSorts((prev) => clickHeader(prev, col))}
+                        title={`Sort by ${label}`}
+                        className={`inline-flex items-center gap-1 hover:text-gray-200 ${dir ? "text-gray-200" : ""}`}
+                      >
+                        {label}
+                        <SortArrows dir={dir} />
+                        {rank > 0 && <span className="text-[9px] text-indigo-400 -ml-0.5">{rank + 1}</span>}
+                      </button>
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r) => (
-                <tr key={r.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">{formatDate(r.date)}</td>
-                  <td className="px-4 py-3 text-white text-xs font-medium max-w-[180px] truncate">{r.vendor || "—"}</td>
-                  <td className="px-4 py-3 text-gray-300 text-xs font-mono">{r.invoice_number || "—"}</td>
-                  <td className="px-4 py-3 text-gray-400 text-xs max-w-[200px] truncate">{r.description}</td>
-                  <td className="px-4 py-3 text-right font-mono font-medium text-red-400 text-xs whitespace-nowrap">{formatAmount(r.amount)}</td>
-                  <td className="px-4 py-3 text-gray-400 text-xs font-mono whitespace-nowrap">
-                    {r.service_period_start && r.service_period_end
-                      ? `${r.service_period_start.slice(0, 7)} → ${r.service_period_end.slice(0, 7)}`
-                      : r.service_period_start
-                        ? r.service_period_start.slice(0, 7)
-                        : "—"}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${INVOICE_TYPE_BADGE[r.invoice_type]}`}>
-                      {INVOICE_TYPE_LABEL[r.invoice_type] || r.invoice_type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <select
-                      value={r.bill_status}
-                      onChange={(e) => setStatus(r.id, e.target.value as "unpaid" | "partial" | "paid")}
-                      className={`text-xs rounded-full px-2 py-0.5 border font-medium bg-transparent cursor-pointer ${INVOICE_STATUS_BADGE[r.bill_status]}`}
-                    >
-                      <option value="unpaid">Unpaid</option>
-                      <option value="partial">Partial</option>
-                      <option value="paid">Paid</option>
-                    </select>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700 capitalize">
-                      {r.source}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/clients/${clientId}/invoices?tx=${r.id}`}
-                      className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                    >
-                      Edit
-                    </Link>
-                  </td>
-                </tr>
-              ))}
+              {arranged.grouped
+                ? arranged.groups
+                    .filter((g) => statusFilter === "all" || g.category === statusFilter)
+                    .map((g) => {
+                      const isCollapsed = collapsed.has(g.category);
+                      const total = g.rows.reduce((s, r) => s + r.amount, 0);
+                      const summary = categorySummary(g.category, g.rows);
+                      return (
+                        <Fragment key={g.category}>
+                          <tr className="border-t border-gray-800 bg-gray-950/50">
+                            <td colSpan={10} className="px-3 py-2">
+                              <button
+                                onClick={() => setCollapsed((s) => toggle(s, g.category))}
+                                aria-expanded={!isCollapsed}
+                                className="w-full flex items-center gap-2.5 text-left"
+                              >
+                                <svg className={`w-3 h-3 text-gray-500 transition-transform duration-150 ${isCollapsed ? "" : "rotate-90"}`} fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" />
+                                </svg>
+                                <span className="text-sm font-semibold text-white">{CATEGORY_LABEL[g.category]}</span>
+                                <span className="text-[11px] font-medium text-gray-300 bg-gray-800 rounded-full px-1.5 min-w-[20px] text-center">{g.rows.length}</span>
+                                <span className="text-xs text-gray-500">Total {formatMoney(total)}</span>
+                                {summary && <span className={`ml-auto text-xs ${summary.tone}`}>{summary.text}</span>}
+                              </button>
+                            </td>
+                          </tr>
+                          {!isCollapsed && g.rows.map(renderRow)}
+                        </Fragment>
+                      );
+                    })
+                : arranged.rows.map(renderRow)}
             </tbody>
           </table>
         </div>
       )}
+      <p className="mt-3 text-[11px] text-gray-500 flex items-center gap-2">
+        <Placeholder /> Dashed boxes are placeholders for data that isn&apos;t on file yet: paid dates, bank matches and journal entry numbers.
+      </p>
     </>
   );
 }
