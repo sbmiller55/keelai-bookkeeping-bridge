@@ -1396,14 +1396,42 @@ export default function ReviewQueuePage() {
       });
   })();
 
+  // "Last month" and "This month" resolve against today, not against what the
+  // queue happens to contain. A month with nothing in it still has to be
+  // selectable — otherwise the way you discover October is empty is that the
+  // option for it is missing, which reads as a bug.
+  function resolveMonthFilter(value: string): string | null {
+    if (value === "all") return null;
+    const now = new Date();
+    if (value === "rel:this") {
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    }
+    if (value === "rel:last") {
+      const y = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+      const m = now.getMonth() === 0 ? 12 : now.getMonth();
+      return `${y}-${String(m).padStart(2, "0")}`;
+    }
+    return value;
+  }
+
+  const monthOf = (t: { date?: string | null }) => {
+    if (!t.date) return null;
+    const d = new Date(t.date);
+    if (isNaN(d.getTime())) return null;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+
+  const relMonthCounts = {
+    last: items.filter((t) => monthOf(t) === resolveMonthFilter("rel:last")).length,
+    this: items.filter((t) => monthOf(t) === resolveMonthFilter("rel:this")).length,
+  };
+
   // Filter before sorting, so the counts below the heading describe what is
   // actually on screen.
-  const visibleItems = monthFilter === "all" ? items : items.filter((t) => {
-    if (!t.date) return false;
-    const d = new Date(t.date);
-    if (isNaN(d.getTime())) return false;
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` === monthFilter;
-  });
+  const activeMonth = resolveMonthFilter(monthFilter);
+  const visibleItems = activeMonth === null
+    ? items
+    : items.filter((t) => monthOf(t) === activeMonth);
 
   const sortedItems = [...visibleItems].sort((a, b) => {
     let cmp = 0;
@@ -1436,6 +1464,26 @@ export default function ReviewQueuePage() {
                 `overflow:hidden!important;white-space:nowrap!important;` +
                 `border-left-width:0!important;border-right-width:0!important}`)
     .join("");
+
+  // Hide this one column, from its own header. The Columns menu still exists
+  // for turning several back on at once, but reaching for a menu to remove the
+  // column you are looking at is a detour.
+  const hideBtn = (col: ColKey) =>
+    ALWAYS_SHOWN.includes(col) ? null : (
+      <button
+        onClick={(e) => { e.stopPropagation(); toggleCol(col); }}
+        onMouseDown={(e) => e.stopPropagation()}
+        title={`Hide ${COL_LABELS[col]}`}
+        aria-label={`Hide ${COL_LABELS[col]}`}
+        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded
+                   text-gray-600 hover:text-white hover:bg-gray-700
+                   opacity-0 group-hover/th:opacity-100 focus:opacity-100 transition-opacity"
+      >
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    );
 
   // Resize handle rendered inside each <th>
   const handle = (col: ColKey) => (
@@ -1495,8 +1543,13 @@ export default function ReviewQueuePage() {
           </p>
         </div>
 
-        {/* Date range + Sync & Code — grouped together */}
-        <div className="flex items-center gap-1.5">
+        {/* Two dropdowns sat side by side with nothing saying which was which:
+            one pulls transactions from Mercury, the other only filters what is
+            already on screen. Each now says what it does. */}
+        <div className="flex items-center gap-1.5 bg-gray-900/60 border border-gray-800 rounded-lg pl-2 pr-1 py-1">
+          <span className="text-[10px] uppercase tracking-wide text-gray-500 whitespace-nowrap">
+            Pull from
+          </span>
           <select
             value={dateRange}
             onChange={(e) => setDateRange(e.target.value as DateRangeOption)}
@@ -1538,23 +1591,42 @@ export default function ReviewQueuePage() {
           </button>
         </div>
 
-        {/* Show only one month — for closing last month while this month's
+        {/* Show only one month — for closing October while November's
             transactions are already arriving. Filters what is on screen; it
             does not change what has been imported. */}
-        <select
-          value={monthFilter}
-          onChange={(e) => setMonthFilter(e.target.value)}
-          className={`border text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-indigo-500 ${
-            monthFilter === "all"
-              ? "bg-gray-800 border-gray-700 text-gray-300"
-              : "bg-indigo-950 border-indigo-600 text-indigo-200"}`}
-          title="Show only transactions dated in one month"
-        >
-          <option value="all">All months</option>
-          {availableMonths.map((m) => (
-            <option key={m.value} value={m.value}>{m.label} ({m.count})</option>
-          ))}
-        </select>
+        <div className={`flex items-center gap-1.5 border rounded-lg pl-2 pr-1 py-1 ${
+          monthFilter === "all"
+            ? "bg-gray-900/60 border-gray-800"
+            : "bg-indigo-950/60 border-indigo-700"}`}>
+          <span className={`text-[10px] uppercase tracking-wide whitespace-nowrap ${
+            monthFilter === "all" ? "text-gray-500" : "text-indigo-300"}`}>
+            Showing
+          </span>
+          <select
+            value={monthFilter}
+            onChange={(e) => setMonthFilter(e.target.value)}
+            className={`bg-transparent text-xs focus:outline-none cursor-pointer ${
+              monthFilter === "all" ? "text-gray-300" : "text-indigo-200"}`}
+            title="Show only transactions dated in one month"
+          >
+            <option value="all" className="bg-gray-800">All months</option>
+            {/* Relative options first: the month you are closing is the one you
+                want nine times out of ten, and naming it by number means
+                working out which month that is every time. */}
+            <option value="rel:last" className="bg-gray-800">
+              Last month{relMonthCounts.last !== null ? ` (${relMonthCounts.last})` : ""}
+            </option>
+            <option value="rel:this" className="bg-gray-800">
+              This month{relMonthCounts.this !== null ? ` (${relMonthCounts.this})` : ""}
+            </option>
+            {availableMonths.length > 0 && <option disabled className="bg-gray-800">──────────</option>}
+            {availableMonths.map((m) => (
+              <option key={m.value} value={m.value} className="bg-gray-800">
+                {m.label} ({m.count})
+              </option>
+            ))}
+          </select>
+        </div>
 
         {/* Columns */}
         <div className="relative">
@@ -1678,38 +1750,38 @@ export default function ReviewQueuePage() {
             </colgroup>
             <thead>
               <tr className="bg-gray-900 text-gray-500 text-xs uppercase tracking-wider">
-                <th data-col="date" className="px-3 py-2.5 text-left font-medium whitespace-nowrap relative select-none">Date{handle("date")}</th>
-                <th data-col="description" className="px-3 py-2.5 text-left font-medium relative select-none">Description{handle("description")}</th>
-                <th data-col="amount" className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">
+                <th data-col="date" className="group/th pr-7 px-3 py-2.5 text-left font-medium whitespace-nowrap relative select-none">Date{hideBtn("date")}{handle("date")}</th>
+                <th data-col="description" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Description{hideBtn("description")}{handle("description")}</th>
+                <th data-col="amount" className="group/th pr-7 px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">
                   <button onClick={() => { if (sortBy === "amount") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("amount"); setSortDir("desc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Amount <span className={sortBy === "amount" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "amount" && sortDir === "asc" ? "↑" : "↓"}</span>
                   </button>
-                  {handle("amount")}
+                  {hideBtn("amount")}{handle("amount")}
                 </th>
-                <th data-col="category" className="px-3 py-2.5 text-left font-medium relative select-none">Category{handle("category")}</th>
-                <th data-col="debit" className="px-3 py-2.5 text-left font-medium relative select-none">
+                <th data-col="category" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Category{hideBtn("category")}{handle("category")}</th>
+                <th data-col="debit" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "debit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("debit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Debit Account <span className={sortBy === "debit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "debit" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
-                  {handle("debit")}
+                  {hideBtn("debit")}{handle("debit")}
                 </th>
-                <th data-col="credit" className="px-3 py-2.5 text-left font-medium relative select-none">
+                <th data-col="credit" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "credit") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("credit"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Credit Account <span className={sortBy === "credit" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "credit" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
-                  {handle("credit")}
+                  {hideBtn("credit")}{handle("credit")}
                 </th>
-                <th data-col="customer" className="px-3 py-2.5 text-left font-medium relative select-none">Customer{handle("customer")}</th>
-                <th data-col="jeAmt" className="px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{handle("jeAmt")}</th>
-                <th data-col="memo" className="px-3 py-2.5 text-left font-medium relative select-none">Memo{handle("memo")}</th>
-                <th data-col="conf" className="px-3 py-2.5 text-center font-medium relative select-none">
+                <th data-col="customer" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Customer{hideBtn("customer")}{handle("customer")}</th>
+                <th data-col="jeAmt" className="group/th pr-7 px-3 py-2.5 text-right font-medium whitespace-nowrap relative select-none">JE Amt{hideBtn("jeAmt")}{handle("jeAmt")}</th>
+                <th data-col="memo" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Memo{hideBtn("memo")}{handle("memo")}</th>
+                <th data-col="conf" className="group/th pr-7 px-3 py-2.5 text-center font-medium relative select-none">
                   <button onClick={() => { if (sortBy === "confidence") setSortDir(d => d === "asc" ? "desc" : "asc"); else { setSortBy("confidence"); setSortDir("asc"); } }} className="inline-flex items-center gap-1 hover:text-white transition-colors">
                     Conf <span className={sortBy === "confidence" ? "text-indigo-400" : "text-gray-700"}>{sortBy === "confidence" && sortDir === "desc" ? "↓" : "↑"}</span>
                   </button>
-                  {handle("conf")}
+                  {hideBtn("conf")}{handle("conf")}
                 </th>
-                <th data-col="reasoning" className="px-3 py-2.5 text-left font-medium relative select-none">Reasoning{handle("reasoning")}</th>
-                <th data-col="actions" className="px-3 py-2.5 text-left font-medium relative select-none">Actions{handle("actions")}</th>
+                <th data-col="reasoning" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Reasoning{hideBtn("reasoning")}{handle("reasoning")}</th>
+                <th data-col="actions" className="group/th pr-7 px-3 py-2.5 text-left font-medium relative select-none">Actions{hideBtn("actions")}{handle("actions")}</th>
               </tr>
             </thead>
             <tbody>
