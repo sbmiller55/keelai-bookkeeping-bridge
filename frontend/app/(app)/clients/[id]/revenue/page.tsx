@@ -1623,7 +1623,7 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
             {intForm.stripe_enabled && (
               <div className="mt-3">
                 <label className="text-xs text-gray-400 mb-1 block">Stripe Secret Key</label>
-                <input type="password"
+                <input type="password" autoComplete="new-password"
                   placeholder={settings?.stripe_api_key ? "••••••• (saved — enter new key to update)" : "sk_live_..."}
                   value={intForm.stripe_api_key}
                   onChange={(e) => setIntForm({ ...intForm, stripe_api_key: e.target.value })}
@@ -1647,7 +1647,7 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
                 </div>
                 <div>
                   <label className="text-xs text-gray-400 mb-1 block">Password</label>
-                  <input type="password" placeholder="••••••••" value={intForm.billcom_password}
+                  <input type="password" autoComplete="new-password" placeholder="••••••••" value={intForm.billcom_password}
                     onChange={(e) => setIntForm({ ...intForm, billcom_password: e.target.value })}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
                 </div>
@@ -1659,7 +1659,7 @@ function SettingsTab({ clientId, streams, settings, onSaved, onError }: {
                 </div>
                 <div>
                   <label className="text-xs text-gray-400 mb-1 block">Developer Key</label>
-                  <input type="password" placeholder="••••••••" value={intForm.billcom_dev_key}
+                  <input type="password" autoComplete="new-password" placeholder="••••••••" value={intForm.billcom_dev_key}
                     onChange={(e) => setIntForm({ ...intForm, billcom_dev_key: e.target.value })}
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500" />
                 </div>

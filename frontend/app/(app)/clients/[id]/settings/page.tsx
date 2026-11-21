@@ -375,7 +375,7 @@ export default function ClientSettingsPage() {
         </p>
         <div className="flex gap-2">
           <input
-            type="password"
+            type="password" autoComplete="new-password"
             value={mercuryKey}
             onChange={(e) => setMercuryKey(e.target.value)}
             placeholder={client?.mercury_api_key_encrypted ? "•••••••• (saved)" : "secret-token:mercury_production_…"}
@@ -410,7 +410,7 @@ export default function ClientSettingsPage() {
         {/* API key */}
         <label className="text-xs text-gray-400 mb-1 block">Restricted API key</label>
         <input
-          type="password"
+          type="password" autoComplete="new-password"
           value={stripeForm.api_key}
           onChange={(e) => setStripeForm((f) => ({ ...f, api_key: e.target.value }))}
           placeholder={stripeSettings?.stripe_api_key ? "••••••• (saved — enter a new key to replace)" : "rk_live_…"}
@@ -624,7 +624,7 @@ export default function ClientSettingsPage() {
           </div>
           <div>
             <label className="text-xs text-gray-400 mb-1 block">Password</label>
-            <input type="password"
+            <input type="password" autoComplete="new-password"
               placeholder={billcomSettings?.billcom_username ? "••••••• (saved)" : "••••••••"}
               value={billcomForm.password}
               onChange={(e) => setBillcomForm((f) => ({ ...f, password: e.target.value }))}
@@ -638,7 +638,7 @@ export default function ClientSettingsPage() {
           </div>
           <div>
             <label className="text-xs text-gray-400 mb-1 block">Developer Key</label>
-            <input type="password"
+            <input type="password" autoComplete="new-password"
               placeholder={billcomSettings?.billcom_dev_key ? "••••••• (saved)" : "••••••••"}
               value={billcomForm.dev_key}
               onChange={(e) => setBillcomForm((f) => ({ ...f, dev_key: e.target.value }))}
