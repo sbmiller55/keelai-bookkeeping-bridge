@@ -12,11 +12,19 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  // Both boxes start read-only and unlock on first focus. Browsers and
-  // password add-ons skip read-only fields when filling a page as it loads,
-  // so the form opens empty and the saved-login choice appears on click
+  // Both boxes start read-only and unlock on first press or focus. Browsers
+  // and password add-ons skip read-only fields when filling a page as it
+  // loads, so the form opens empty and the saved-login choice appears on click
   // instead — an outdated saved password was being filled in silently.
+  // Unlocking on pointerdown, which comes before focus, matters: a box that is
+  // still read-only when it takes focus gets no saved-login list, which cost a
+  // second click. The attribute is dropped on the element directly so it is
+  // gone before focus, without waiting for React to re-render.
   const [unlocked, setUnlocked] = useState(false);
+  function unlock(e: React.SyntheticEvent<HTMLInputElement>) {
+    e.currentTarget.form?.querySelectorAll("input").forEach((el) => { el.readOnly = false; });
+    setUnlocked(true);
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -60,7 +68,8 @@ export default function LoginPage() {
               name="email"
               autoComplete="username"
               readOnly={!unlocked}
-              onFocus={() => setUnlocked(true)}
+              onPointerDown={unlock}
+              onFocus={unlock}
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -78,7 +87,8 @@ export default function LoginPage() {
               name="password"
               autoComplete="current-password"
               readOnly={!unlocked}
-              onFocus={() => setUnlocked(true)}
+              onPointerDown={unlock}
+              onFocus={unlock}
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
