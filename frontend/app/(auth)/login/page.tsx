@@ -12,6 +12,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Both boxes start read-only and unlock on first focus. Browsers and
+  // password add-ons skip read-only fields when filling a page as it loads,
+  // so the form opens empty and the saved-login choice appears on click
+  // instead — an outdated saved password was being filled in silently.
+  const [unlocked, setUnlocked] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -54,6 +59,8 @@ export default function LoginPage() {
               type="email"
               name="email"
               autoComplete="username"
+              readOnly={!unlocked}
+              onFocus={() => setUnlocked(true)}
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -70,6 +77,8 @@ export default function LoginPage() {
               type="password"
               name="password"
               autoComplete="current-password"
+              readOnly={!unlocked}
+              onFocus={() => setUnlocked(true)}
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
