@@ -206,7 +206,7 @@ const INVOICE_TYPE_LABEL: Record<string, string> = {
 const CATEGORY_PILL: Record<Category, string> = {
   unpaid:  "bg-amber-950/60 text-amber-300 border-amber-800",
   prepaid: "bg-indigo-950 text-indigo-300 border-indigo-700",
-  paid:    "bg-green-950 text-green-300 border-green-800",
+  completed: "bg-green-950 text-green-300 border-green-800",
 };
 
 const INVOICE_COLS: { col: SortCol; label: string; align?: "right" }[] = [
@@ -281,9 +281,9 @@ function InvoicesTab({ clientId }: { clientId: number }) {
   }
 
   const today = new Date();
-  const filtered = statusFilter === "all" ? rows : rows.filter((r) => categoryOf(r) === statusFilter);
+  const filtered = statusFilter === "all" ? rows : rows.filter((r) => categoryOf(r, today) === statusFilter);
   const arranged = arrangeInvoices(filtered, sorts);
-  const outstanding = rows.filter((r) => categoryOf(r) === "unpaid").reduce((s, r) => s + r.amount, 0);
+  const outstanding = rows.filter((r) => categoryOf(r, today) === "unpaid").reduce((s, r) => s + r.amount, 0);
   const sortDirFor = (col: SortCol) => sorts.find((s) => s.col === col)?.dir ?? null;
   const sortRankFor = (col: SortCol) => sorts.findIndex((s) => s.col === col);
   const unusedCols = INVOICE_COLS.map((c) => c.col).filter((c) => !sorts.some((s) => s.col === c));
@@ -299,7 +299,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
       const left = list.reduce((s, r) => s + (prepaidSchedule(r, today)?.left ?? 0), 0);
       return { text: `Accrual left ${formatMoney(left)}`, tone: "text-indigo-300" };
     }
-    const needLook = list.filter((r) => missingRecord(r).length > 0).length;
+    const needLook = list.filter((r) => r.invoice_type !== "prepaid" && missingRecord(r).length > 0).length;
     return needLook > 0
       ? { text: `${needLook} need${needLook === 1 ? "s" : ""} a look`, tone: "text-amber-400" }
       : { text: "All invoice records on file", tone: "text-green-400" };
@@ -312,20 +312,21 @@ function InvoicesTab({ clientId }: { clientId: number }) {
   );
 
   function renderRow(r: InvoiceListRow) {
-    const cat = categoryOf(r);
+    const cat = categoryOf(r, today);
     const expandable = cat !== "unpaid";
     const isOpen = expandable && expanded.has(r.id);
     const days = daysOpen(r, today);
-    const sched = cat === "prepaid" ? prepaidSchedule(r, today) : null;
-    const note = cat === "paid" ? recordNote(r) : null;
+    const isPrepaid = r.invoice_type === "prepaid";
+    const sched = isPrepaid ? prepaidSchedule(r, today) : null;
+    const note = cat === "completed" && !isPrepaid ? recordNote(r) : null;
     const statusOptions: DropdownOption<"unpaid" | "partial" | "paid">[] = [
       { value: "unpaid", label: "Unpaid" },
       { value: "partial", label: "Partially paid" },
-      { value: "paid", label: "Paid" },
+      { value: "paid", label: "Paid — completed" },
     ];
     const pillText = cat === "prepaid"
       ? (sched ? `Accruing to ${monthSlash(sched.lastMonth)}` : "Prepaid")
-      : r.bill_status === "partial" ? "Partial" : CATEGORY_LABEL[cat];
+      : cat === "unpaid" && r.bill_status === "partial" ? "Partial" : CATEGORY_LABEL[cat];
 
     return (
       <Fragment key={r.id}>
@@ -394,7 +395,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
           <tr className="bg-white/[0.02]">
             <td />
             <td colSpan={9} className="px-3 pb-4 pt-1">
-              {cat === "prepaid" && (sched ? (
+              {isPrepaid && (sched ? (
                 <div className="max-w-xl rounded-lg border border-gray-800 bg-gray-950/60 p-4">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Schedule</p>
                   <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1.5 text-xs">
@@ -422,7 +423,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
               ) : (
                 <p className="text-xs text-amber-400">No service period on file, so there is no schedule to show.</p>
               ))}
-              {cat === "paid" && (
+              {cat === "completed" && !isPrepaid && (
                 <div className="grid gap-3 md:grid-cols-3">
                   <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-4">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 mb-3">Payment</p>
@@ -491,7 +492,7 @@ function InvoicesTab({ clientId }: { clientId: number }) {
               { value: "all", label: "All statuses" },
               { value: "unpaid", label: "Unpaid", dividerBefore: true },
               { value: "prepaid", label: "Prepaid" },
-              { value: "paid", label: "Paid" },
+              { value: "completed", label: "Completed" },
             ]}
           />
           <Link

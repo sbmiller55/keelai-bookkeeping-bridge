@@ -3,10 +3,10 @@
 
 import type { InvoiceListRow } from "@/lib/api";
 
-export type Category = "unpaid" | "prepaid" | "paid";
-export const CATEGORY_ORDER: Category[] = ["unpaid", "prepaid", "paid"];
+export type Category = "unpaid" | "prepaid" | "completed";
+export const CATEGORY_ORDER: Category[] = ["unpaid", "prepaid", "completed"];
 export const CATEGORY_LABEL: Record<Category, string> = {
-  unpaid: "Unpaid", prepaid: "Prepaid", paid: "Paid",
+  unpaid: "Unpaid", prepaid: "Prepaid", completed: "Completed",
 };
 
 export type SortCol =
@@ -28,12 +28,18 @@ const TYPE_LABEL: Record<string, string> = {
   one_time: "One-time", accrual: "Accrual", prepaid: "Prepaid", fixed_asset: "Fixed Asset",
 };
 
-// A prepaid invoice is its own category whatever its bill status: it was paid
+// An invoice is Completed once nothing is left to do on it: an accrued bill
+// once it is paid, a prepaid once its last month has been expensed. Until then
+// a prepaid stays in its own category whatever its bill status — it was paid
 // up front and what matters is how much is still to be expensed. Partially
 // paid bills are still owed money, so they sit with Unpaid.
-export function categoryOf(r: InvoiceListRow): Category {
-  if (r.invoice_type === "prepaid") return "prepaid";
-  return r.bill_status === "paid" ? "paid" : "unpaid";
+export function categoryOf(r: InvoiceListRow, today: Date = new Date()): Category {
+  if (r.invoice_type === "prepaid") {
+    const last = monthIndex(r.service_period_end ?? r.service_period_start);
+    const priorMonth = today.getFullYear() * 12 + today.getMonth() - 1;
+    return last !== null && last <= priorMonth ? "completed" : "prepaid";
+  }
+  return r.bill_status === "paid" ? "completed" : "unpaid";
 }
 
 // ── Dates ────────────────────────────────────────────────────────────────────
@@ -182,11 +188,11 @@ function compareAll(a: InvoiceListRow, b: InvoiceListRow, keys: SortKey[]): numb
 }
 
 // What a category falls back to inside itself: the bill you have owed longest,
-// the prepaid that started first, the payment made most recently.
+// the prepaid that started first, the invoice completed most recently.
 const WITHIN_DEFAULT: Record<Category, SortKey> = {
   unpaid: { col: "date", dir: "asc" },
   prepaid: { col: "date", dir: "asc" },
-  paid: { col: "date", dir: "desc" },
+  completed: { col: "date", dir: "desc" },
 };
 
 export function isGrouped(sorts: SortKey[]): boolean {
